@@ -28,19 +28,44 @@ export default function TerminalPage() {
       try {
         const parsed = JSON.parse(data)
 
-        if (parsed.type === 'output' || parsed.type === 'error') {
+        if (parsed.type === 'stdout') {
           setEntries((prev) => [
             ...prev,
             {
               id: crypto.randomUUID(),
-              type: parsed.type,
-              content: stripAnsi(parsed.data),
+              type: 'output',
+              content: stripAnsi(parsed.content),
               timestamp: new Date().toISOString(),
             },
           ])
         }
 
-        if (parsed.type === 'done') {
+        if (parsed.type === 'stderr') {
+          setEntries((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              type: 'error',
+              content: stripAnsi(parsed.content),
+              timestamp: new Date().toISOString(),
+            },
+          ])
+        }
+
+        if (parsed.type === 'exit') {
+          setIsRunning(false)
+        }
+
+        if (parsed.type === 'error') {
+          setEntries((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              type: 'error',
+              content: parsed.message || 'Unknown error',
+              timestamp: new Date().toISOString(),
+            },
+          ])
           setIsRunning(false)
         }
       } catch {
@@ -87,7 +112,7 @@ export default function TerminalPage() {
       },
     ])
 
-    send(JSON.stringify({ type: 'command', data: command }))
+    send(JSON.stringify({ type: 'command', content: command }))
     setIsRunning(true)
   }
 

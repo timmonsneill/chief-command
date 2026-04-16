@@ -37,7 +37,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -133,6 +133,15 @@ async def api_list_projects(
 async def api_get_project(
     slug: str, subject: str = Depends(require_auth)
 ) -> dict[str, object]:
+    data = get_project(slug)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return data
+
+
+@app.get("/api/share/{slug}")
+async def api_share_project(slug: str) -> dict[str, object]:
+    """Public endpoint for shared project dashboards — no auth required."""
     data = get_project(slug)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")

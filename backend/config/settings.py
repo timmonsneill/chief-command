@@ -15,10 +15,11 @@ class Settings(BaseSettings):
     located in the backend directory.
     """
 
-    OWNER_PASSWORD: str = "chief"
+    OWNER_PASSWORD: str  # No default — MUST be set in .env
     JWT_SECRET: str = secrets.token_urlsafe(32)
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_DAYS: int = 30
+    ALLOWED_ORIGINS: str = "https://chiefcommand.app,http://localhost:3000,http://localhost:8000"
 
     CLAUDE_CODE_PATH: str = shutil.which("claude") or "claude"
     PROJECTS_DIR: str = str(Path.home() / ".claude" / "projects")

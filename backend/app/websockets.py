@@ -235,8 +235,11 @@ async def terminal_ws(ws: WebSocket) -> None:
                 await ws.send_json({"type": "exit", "code": exit_code})
                 current_process = None
 
-            elif msg_type == "signal":
+            elif msg_type == "signal" or msg_type == "kill":
                 sig_name = data.get("signal", "SIGINT")
+                allowed_signals = {"SIGINT", "SIGTERM"}
+                if sig_name not in allowed_signals:
+                    sig_name = "SIGINT"
                 if current_process and current_process.returncode is None:
                     sig = getattr(signal, sig_name, signal.SIGINT)
                     current_process.send_signal(sig)

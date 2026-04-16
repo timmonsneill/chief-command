@@ -21,7 +21,7 @@ export default function SharePage() {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(`/api/projects/${slug}`)
+      const res = await fetch(`/api/share/${slug}`)
       if (!res.ok) throw new Error('Not found')
       const data = await res.json()
       setProject(data)

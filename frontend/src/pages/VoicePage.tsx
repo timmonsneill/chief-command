@@ -14,26 +14,91 @@ export default function VoicePage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
 
+  // Accumulate streaming response chunks into a single message
+  const responseBuffer = useRef('')
+
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
     onMessage: useCallback((data: string) => {
       try {
         const parsed = JSON.parse(data)
 
-        if (parsed.type === 'message') {
-          setMessages((prev) => [...prev, parsed.data as VoiceMessage])
+        if (parsed.type === 'transcript') {
+          // Our speech was transcribed — show it as a user message
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: 'user',
+              content: parsed.content,
+              timestamp: new Date().toISOString(),
+            },
+          ])
+        }
+
+        if (parsed.type === 'response') {
+          // Streaming chunk from Claude — accumulate
+          responseBuffer.current += parsed.content
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && last.id === 'streaming') {
+              return [
+                ...prev.slice(0, -1),
+                { ...last, content: responseBuffer.current },
+              ]
+            }
+            return [
+              ...prev,
+              {
+                id: 'streaming',
+                role: 'assistant',
+                content: responseBuffer.current,
+                timestamp: new Date().toISOString(),
+              },
+            ]
+          })
+        }
+
+        if (parsed.type === 'tts_start') {
+          // Response complete, finalize the streaming message
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === 'streaming' ? { ...m, id: crypto.randomUUID() } : m
+            )
+          )
+          responseBuffer.current = ''
           setIsProcessing(false)
         }
 
-        if (parsed.type === 'agents') {
-          setAgents(parsed.data as Agent[])
+        if (parsed.type === 'tts_end') {
+          // TTS audio finished playing
         }
 
-        if (parsed.type === 'processing') {
-          setIsProcessing(true)
+        if (parsed.type === 'agent_status') {
+          setAgents(
+            (parsed.agents || []).map((a: Record<string, string>, i: number) => ({
+              id: `agent-${i}`,
+              name: a.name || 'Agent',
+              task: a.last_output || a.role || '',
+              status: a.status === 'running' ? 'working' : a.status,
+            }))
+          )
+        }
+
+        if (parsed.type === 'error') {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: `Error: ${parsed.message}`,
+              timestamp: new Date().toISOString(),
+            },
+          ])
+          setIsProcessing(false)
         }
       } catch {
-        // ignore non-JSON
+        // ignore non-JSON (binary audio frames handled separately)
       }
     }, []),
   })
@@ -64,24 +129,14 @@ export default function VoicePage() {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
 
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
         stream.getTracks().forEach((t) => t.stop())
 
-        // Send audio via WebSocket as base64
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          const base64 = reader.result as string
-          send(
-            JSON.stringify({
-              type: 'audio',
-              data: base64,
-              speed,
-            })
-          )
-          setIsProcessing(true)
-        }
-        reader.readAsDataURL(blob)
+        // Send audio as binary blob via WebSocket
+        const arrayBuffer = await blob.arrayBuffer()
+        send(arrayBuffer)
+        setIsProcessing(true)
       }
 
       recorder.start()
@@ -96,7 +151,7 @@ export default function VoicePage() {
     e.preventDefault()
     if (!textInput.trim() || isProcessing) return
 
-    send(JSON.stringify({ type: 'text', data: textInput.trim(), speed }))
+    send(JSON.stringify({ type: 'text', content: textInput.trim() }))
 
     setMessages((prev) => [
       ...prev,
