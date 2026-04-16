@@ -1,0 +1,348 @@
+import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
+import { Mic, MicOff, Camera, Monitor, Send } from 'lucide-react'
+import { useWebSocket } from '../hooks/useWebSocket'
+import type { VoiceMessage, Agent } from '../lib/api'
+
+export default function VoicePage() {
+  const [messages, setMessages] = useState<VoiceMessage[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [textInput, setTextInput] = useState('')
+  const [speed, setSpeed] = useState(1)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+
+  const { send, isConnected } = useWebSocket({
+    path: '/ws/voice',
+    onMessage: useCallback((data: string) => {
+      try {
+        const parsed = JSON.parse(data)
+
+        if (parsed.type === 'message') {
+          setMessages((prev) => [...prev, parsed.data as VoiceMessage])
+          setIsProcessing(false)
+        }
+
+        if (parsed.type === 'agents') {
+          setAgents(parsed.data as Agent[])
+        }
+
+        if (parsed.type === 'processing') {
+          setIsProcessing(true)
+        }
+      } catch {
+        // ignore non-JSON
+      }
+    }, []),
+  })
+
+  // Auto-scroll on new messages
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages])
+
+  // --- Recording ---
+  async function toggleRecording() {
+    if (isRecording) {
+      // Stop recording
+      mediaRecorderRef.current?.stop()
+      setIsRecording(false)
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      mediaRecorderRef.current = recorder
+      chunksRef.current = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        stream.getTracks().forEach((t) => t.stop())
+
+        // Send audio via WebSocket as base64
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          const base64 = reader.result as string
+          send(
+            JSON.stringify({
+              type: 'audio',
+              data: base64,
+              speed,
+            })
+          )
+          setIsProcessing(true)
+        }
+        reader.readAsDataURL(blob)
+      }
+
+      recorder.start()
+      setIsRecording(true)
+    } catch {
+      // Mic permission denied
+    }
+  }
+
+  // --- Text send ---
+  function handleTextSend(e: FormEvent) {
+    e.preventDefault()
+    if (!textInput.trim() || isProcessing) return
+
+    send(JSON.stringify({ type: 'text', data: textInput.trim(), speed }))
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: textInput.trim(),
+        timestamp: new Date().toISOString(),
+      },
+    ])
+    setTextInput('')
+    setIsProcessing(true)
+  }
+
+  // --- Camera ---
+  async function handleCamera() {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.capture = 'environment'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        send(
+          JSON.stringify({
+            type: 'image',
+            data: reader.result as string,
+          })
+        )
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: 'user',
+            content: '[Photo attached]',
+            timestamp: new Date().toISOString(),
+          },
+        ])
+        setIsProcessing(true)
+      }
+      reader.readAsDataURL(file)
+    }
+    input.click()
+  }
+
+  // --- Screenshot ---
+  async function handleScreenshot() {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+      })
+      const track = stream.getVideoTracks()[0]
+      const canvas = document.createElement('canvas')
+
+      const video = document.createElement('video')
+      video.srcObject = stream
+      await video.play()
+
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      canvas.getContext('2d')?.drawImage(video, 0, 0)
+
+      track.stop()
+
+      const dataUrl = canvas.toDataURL('image/png')
+      send(JSON.stringify({ type: 'screenshot', data: dataUrl }))
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: 'user',
+          content: '[Screenshot attached]',
+          timestamp: new Date().toISOString(),
+        },
+      ])
+      setIsProcessing(true)
+    } catch {
+      // User cancelled or not supported
+    }
+  }
+
+  // --- Speed labels ---
+  const speeds = [0.75, 1, 1.25, 1.5]
+
+  function formatTime(iso: string) {
+    return new Date(iso).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
+  const workingAgents = agents.filter((a) => a.status === 'working')
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Messages */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        {messages.length === 0 && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <div className="text-white/20 text-sm">
+                {isConnected
+                  ? 'Tap the mic or type to start'
+                  : 'Connecting...'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+          >
+            <div
+              className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                msg.role === 'user'
+                  ? 'bg-chief text-white rounded-br-md'
+                  : 'bg-surface-raised text-white/90 rounded-bl-md'
+              }`}
+            >
+              <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                {msg.content}
+              </p>
+              <p
+                className={`text-[10px] mt-1 ${
+                  msg.role === 'user' ? 'text-white/50' : 'text-white/30'
+                }`}
+              >
+                {formatTime(msg.timestamp)}
+              </p>
+            </div>
+          </div>
+        ))}
+
+        {isProcessing && (
+          <div className="flex justify-start">
+            <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
+              <div className="flex gap-1">
+                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
+                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
+                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Agent status strip */}
+      {workingAgents.length > 0 && (
+        <div className="px-4 py-2 border-t border-surface-border bg-surface-raised/50 space-y-1 overflow-x-auto">
+          {workingAgents.map((agent) => (
+            <div
+              key={agent.id}
+              className="flex items-center gap-2 text-xs text-white/60 animate-[fadeIn_0.3s_ease-out]"
+            >
+              <div className="w-1.5 h-1.5 rounded-full bg-status-working animate-pulse" />
+              <span className="font-medium text-white/80">{agent.name}:</span>
+              <span className="truncate">{agent.task}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Controls area */}
+      <div className="px-4 pb-2 pt-3 bg-surface space-y-3">
+        {/* Mic row */}
+        <div className="flex items-center justify-center gap-4">
+          {/* Camera */}
+          <button
+            onClick={handleCamera}
+            className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
+          >
+            <Camera size={18} />
+          </button>
+
+          {/* Mic button */}
+          <button
+            onClick={toggleRecording}
+            disabled={isProcessing || !isConnected}
+            className={`relative w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+              isRecording
+                ? 'bg-status-offline'
+                : 'bg-chief hover:bg-chief-dark'
+            }`}
+          >
+            {/* Pulse rings when recording */}
+            {isRecording && (
+              <>
+                <span className="absolute inset-0 rounded-full bg-status-offline/30 animate-ping" />
+                <span className="absolute -inset-2 rounded-full border-2 border-status-offline/20 animate-pulse" />
+              </>
+            )}
+            {isRecording ? (
+              <MicOff size={28} className="text-white relative z-10" />
+            ) : (
+              <Mic size={28} className="text-white relative z-10" />
+            )}
+          </button>
+
+          {/* Screenshot */}
+          <button
+            onClick={handleScreenshot}
+            className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
+          >
+            <Monitor size={18} />
+          </button>
+        </div>
+
+        {/* Speed control */}
+        <div className="flex items-center justify-center gap-1">
+          {speeds.map((s) => (
+            <button
+              key={s}
+              onClick={() => setSpeed(s)}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                speed === s
+                  ? 'bg-chief text-white'
+                  : 'bg-surface-raised text-white/40 active:text-white/60'
+              }`}
+            >
+              {s}x
+            </button>
+          ))}
+        </div>
+
+        {/* Text input */}
+        <form onSubmit={handleTextSend} className="flex gap-2">
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder="Type a message..."
+            className="flex-1 h-11 px-4 rounded-xl bg-surface-raised border border-surface-border text-white placeholder-white/30 text-sm focus:outline-none focus:border-chief transition-colors"
+          />
+          <button
+            type="submit"
+            disabled={!textInput.trim() || isProcessing}
+            className="w-11 h-11 flex items-center justify-center rounded-xl bg-chief text-white disabled:opacity-30 active:scale-95 transition-all"
+          >
+            <Send size={16} />
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
