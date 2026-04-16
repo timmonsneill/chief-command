@@ -4,27 +4,28 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import hashlib
+import hmac
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
-    """Return bcrypt hash of the given password."""
-    return pwd_context.hash(password)
+    """Return SHA-256 hash of the given password. Simple and sufficient for single-owner auth."""
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Check a plaintext password against a bcrypt hash."""
-    return pwd_context.verify(plain, hashed)
+    """Check a plaintext password against its hash using constant-time comparison."""
+    return hmac.compare_digest(hash_password(plain), hashed)
 
 
 def create_token(subject: str = "owner") -> str:
