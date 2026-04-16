@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
-import { Mic, MicOff, Camera, Monitor, Send } from 'lucide-react'
+import { Mic, Camera, Monitor, Send } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { VoiceMessage, Agent } from '../lib/api'
 
@@ -17,8 +17,42 @@ export default function VoicePage() {
   // Accumulate streaming response chunks into a single message
   const responseBuffer = useRef('')
 
+  // Audio playback — accumulate TTS chunks and play them
+  const audioChunksRef = useRef<ArrayBuffer[]>([])
+  const isPlayingAudioRef = useRef(false)
+
+  const playAudioChunks = useCallback(async () => {
+    if (isPlayingAudioRef.current || audioChunksRef.current.length === 0) return
+    isPlayingAudioRef.current = true
+
+    try {
+      const combined = new Blob(audioChunksRef.current, { type: 'audio/wav' })
+      audioChunksRef.current = []
+      const url = URL.createObjectURL(combined)
+      const audio = new Audio(url)
+      audio.playbackRate = speed
+      audio.onended = () => {
+        URL.revokeObjectURL(url)
+        isPlayingAudioRef.current = false
+        // Play next batch if more arrived while playing
+        if (audioChunksRef.current.length > 0) playAudioChunks()
+      }
+      audio.onerror = () => {
+        URL.revokeObjectURL(url)
+        isPlayingAudioRef.current = false
+      }
+      await audio.play()
+    } catch {
+      isPlayingAudioRef.current = false
+    }
+  }, [speed])
+
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
+    onBinary: useCallback((data: ArrayBuffer) => {
+      // TTS audio chunk from backend
+      audioChunksRef.current.push(data)
+    }, []),
     onMessage: useCallback((data: string) => {
       try {
         const parsed = JSON.parse(data)
@@ -71,7 +105,10 @@ export default function VoicePage() {
         }
 
         if (parsed.type === 'tts_end') {
-          // TTS audio finished playing
+          // All TTS audio received — play it
+          playAudioChunks()
+          setIsProcessing(false)
+          responseBuffer.current = ''
         }
 
         if (parsed.type === 'agent_status') {
@@ -110,6 +147,18 @@ export default function VoicePage() {
     }
   }, [messages])
 
+  // --- Persistent mic stream — request once, reuse ---
+  const streamRef = useRef<MediaStream | null>(null)
+
+  async function getMicStream(): Promise<MediaStream> {
+    if (streamRef.current && streamRef.current.active) {
+      return streamRef.current
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    streamRef.current = stream
+    return stream
+  }
+
   // --- Recording ---
   async function toggleRecording() {
     if (isRecording) {
@@ -120,8 +169,15 @@ export default function VoicePage() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      const stream = await getMicStream()
+
+      // Safari doesn't support audio/webm — fall back to default
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : ''
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
       mediaRecorderRef.current = recorder
       chunksRef.current = []
 
@@ -130,19 +186,25 @@ export default function VoicePage() {
       }
 
       recorder.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
-        stream.getTracks().forEach((t) => t.stop())
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType })
 
         // Send audio as binary blob via WebSocket
         const arrayBuffer = await blob.arrayBuffer()
-        send(arrayBuffer)
-        setIsProcessing(true)
+        if (arrayBuffer.byteLength > 0) {
+          send(arrayBuffer)
+          setIsProcessing(true)
+
+          // Safety timeout — reset processing after 30s if no response
+          setTimeout(() => setIsProcessing(false), 30000)
+        }
       }
 
       recorder.start()
       setIsRecording(true)
-    } catch {
-      // Mic permission denied
+    } catch (err) {
+      console.error('Mic access error:', err)
+      // Don't leave in processing state
+      setIsProcessing(false)
     }
   }
 
@@ -336,22 +398,18 @@ export default function VoicePage() {
             disabled={isProcessing || !isConnected}
             className={`relative w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
               isRecording
-                ? 'bg-status-offline'
+                ? 'bg-red-500'
                 : 'bg-chief hover:bg-chief-dark'
             }`}
           >
             {/* Pulse rings when recording */}
             {isRecording && (
               <>
-                <span className="absolute inset-0 rounded-full bg-status-offline/30 animate-ping" />
-                <span className="absolute -inset-2 rounded-full border-2 border-status-offline/20 animate-pulse" />
+                <span className="absolute inset-0 rounded-full bg-red-500/30 animate-ping" />
+                <span className="absolute -inset-2 rounded-full border-2 border-red-500/20 animate-pulse" />
               </>
             )}
-            {isRecording ? (
-              <MicOff size={28} className="text-white relative z-10" />
-            ) : (
-              <Mic size={28} className="text-white relative z-10" />
-            )}
+            <Mic size={28} className="text-white relative z-10" />
           </button>
 
           {/* Screenshot */}

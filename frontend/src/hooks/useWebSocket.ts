@@ -7,8 +7,10 @@ interface UseWebSocketOptions {
   path: string
   /** Auto-connect on mount (default true) */
   autoConnect?: boolean
-  /** Called on every incoming message */
+  /** Called on every incoming text message */
   onMessage?: (data: string) => void
+  /** Called on every incoming binary message */
+  onBinary?: (data: ArrayBuffer) => void
 }
 
 interface UseWebSocketReturn {
@@ -27,12 +29,15 @@ export function useWebSocket({
   path,
   autoConnect = true,
   onMessage,
+  onBinary,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null)
   const retriesRef = useRef(0)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onMessageRef = useRef(onMessage)
+  const onBinaryRef = useRef(onBinary)
   onMessageRef.current = onMessage
+  onBinaryRef.current = onBinary
 
   const [lastMessage, setLastMessage] = useState<string | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected')
@@ -71,10 +76,18 @@ export function useWebSocket({
       setConnectionState('connected')
     }
 
+    ws.binaryType = 'arraybuffer'
+
     ws.onmessage = (event) => {
-      const data = typeof event.data === 'string' ? event.data : ''
-      setLastMessage(data)
-      onMessageRef.current?.(data)
+      if (event.data instanceof ArrayBuffer) {
+        // Binary frame — audio data
+        onBinaryRef.current?.(event.data)
+      } else {
+        // Text frame — JSON message
+        const data = event.data as string
+        setLastMessage(data)
+        onMessageRef.current?.(data)
+      }
     }
 
     ws.onerror = () => {
