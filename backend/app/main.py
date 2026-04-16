@@ -6,8 +6,10 @@ import uuid
 from pathlib import Path
 
 import aiofiles
-from fastapi import Depends, FastAPI, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.websockets import router as ws_router
@@ -170,6 +172,35 @@ async def upload_file(
 
     logger.info("File uploaded: %s -> %s", file.filename, dest)
     return UploadResponse(path=str(dest), filename=file.filename)
+
+
+# ---------------------------------------------------------------------------
+# Static files — serve the React frontend
+# ---------------------------------------------------------------------------
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+if FRONTEND_DIR.exists():
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="static-assets")
+
+    # Serve other static files from dist root (manifest, icons, sw.js)
+    @app.get("/manifest.json")
+    async def manifest():
+        return FileResponse(FRONTEND_DIR / "manifest.json")
+
+    # SPA catch-all — must be LAST route
+    @app.get("/{full_path:path}")
+    async def serve_spa(request: Request, full_path: str):
+        # Don't catch API or WebSocket routes
+        if full_path.startswith(("api/", "ws/", "docs", "openapi.json")):
+            raise HTTPException(status_code=404)
+        # Try to serve the exact file first (e.g., favicon.ico)
+        file_path = FRONTEND_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        # Otherwise serve index.html for SPA routing
+        return FileResponse(FRONTEND_DIR / "index.html")
 
 
 # ---------------------------------------------------------------------------
