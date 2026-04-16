@@ -118,6 +118,13 @@ async def get_agents(subject: str = Depends(require_auth)) -> list[dict[str, str
     return claude_pipe.get_agents()
 
 
+@app.get("/api/agents/reviews")
+async def get_agent_reviews(subject: str = Depends(require_auth)) -> list[dict]:
+    """Return recent review sweeps. Currently returns empty list since reviews
+    are only populated during active build cycles."""
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------

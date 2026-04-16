@@ -83,17 +83,17 @@ export default function ProjectsPage() {
             TYPE_BADGES[project.type] || TYPE_BADGES.default
           const dotClass = STATUS_DOT[project.status] || 'bg-white/20'
 
-          // Calculate overall progress
-          const totalTasks = project.phases.reduce(
+          // Calculate overall progress from backend todo counts
+          const totalTasks = project.todo_total ?? project.phases.reduce(
             (sum, p) => sum + p.total,
             0
           )
-          const completedTasks = project.phases.reduce(
+          const completedTasks = project.todo_done ?? project.phases.reduce(
             (sum, p) => sum + p.completed,
             0
           )
-          const progressPct =
-            totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0
+          const progressPct = project.todo_percent ??
+            (totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0)
 
           return (
             <button

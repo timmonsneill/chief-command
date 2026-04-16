@@ -89,6 +89,12 @@ export interface Project {
   todos: Todo[]
   timeline: TimelineEntry[]
   builds: Build[]
+  // Fields from backend list endpoint
+  category?: string
+  file?: string
+  todo_total?: number
+  todo_done?: number
+  todo_percent?: number
 }
 
 export interface Phase {
@@ -151,7 +157,26 @@ export const api = {
     recentReviews: () => request<ReviewSweep[]>('/agents/reviews'),
   },
   projects: {
-    list: () => request<Project[]>('/projects'),
+    list: async (): Promise<Project[]> => {
+      const res = await request<{ projects: Record<string, unknown>[]; memory_index: unknown[] }>('/projects')
+      // Map backend shape to frontend Project interface
+      return (res.projects || []).map((p) => ({
+        slug: (p.slug as string) || '',
+        name: (p.name as string) || '',
+        description: (p.description as string) || '',
+        type: (p.category as string) || 'project',
+        status: 'active',
+        phases: [],
+        todos: [],
+        timeline: [],
+        builds: [],
+        category: (p.category as string) || '',
+        file: (p.file as string) || '',
+        todo_total: (p.todo_total as number) || 0,
+        todo_done: (p.todo_done as number) || 0,
+        todo_percent: (p.todo_percent as number) || 0,
+      }))
+    },
     get: (slug: string) => request<Project>(`/projects/${slug}`),
   },
   voice: {

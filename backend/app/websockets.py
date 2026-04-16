@@ -74,6 +74,7 @@ async def voice_ws(ws: WebSocket) -> None:
             # --- Text message ---
             if "text" in message:
                 raw = message["text"]
+                logger.info("Voice WS received text frame: %.100s", raw)
                 try:
                     data = json.loads(raw)
                     text_content = data.get("content", raw)
@@ -86,6 +87,7 @@ async def voice_ws(ws: WebSocket) -> None:
             # --- Binary message (audio) ---
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
+                logger.info("Voice WS received audio frame: %d bytes", len(audio_data))
                 await _handle_audio_message(ws, audio_data)
 
     except WebSocketDisconnect:
@@ -99,14 +101,27 @@ async def voice_ws(ws: WebSocket) -> None:
 
 
 async def _handle_text_message(ws: WebSocket, text: str) -> None:
-    """Process a text command through Claude Code and stream results."""
+    """Process a text command through Claude Code and stream results + TTS."""
     try:
+        full_response = []
         async for chunk in claude_pipe.send_message_stream(text):
             await ws.send_json({"type": "response", "content": chunk})
-            # Also send agent status if it changed
+            full_response.append(chunk)
             agents = claude_pipe.get_agents()
             if agents:
                 await ws.send_json({"type": "agent_status", "agents": agents})
+
+        # Convert response to speech
+        response_text = "".join(full_response).strip()
+        if response_text:
+            try:
+                await ws.send_json({"type": "tts_start"})
+                async for audio_chunk in tts_service.synthesize_stream(response_text):
+                    await ws.send_bytes(audio_chunk)
+                await ws.send_json({"type": "tts_end"})
+            except Exception as tts_err:
+                logger.warning("TTS failed (text response still sent): %s", tts_err)
+                await ws.send_json({"type": "tts_end"})
     except Exception as exc:
         logger.exception("Error processing text message: %s", exc)
         await ws.send_json({"type": "error", "message": str(exc)})

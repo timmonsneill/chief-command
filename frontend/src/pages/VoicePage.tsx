@@ -17,41 +17,49 @@ export default function VoicePage() {
   // Accumulate streaming response chunks into a single message
   const responseBuffer = useRef('')
 
-  // Audio playback — accumulate TTS chunks and play them
-  const audioChunksRef = useRef<ArrayBuffer[]>([])
+  // Audio playback — queue individual WAV chunks and play sequentially
+  const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
 
-  const playAudioChunks = useCallback(async () => {
-    if (isPlayingAudioRef.current || audioChunksRef.current.length === 0) return
+  const playNextChunk = useCallback(async () => {
+    if (isPlayingAudioRef.current || audioQueueRef.current.length === 0) return
     isPlayingAudioRef.current = true
 
+    const chunk = audioQueueRef.current.shift()!
     try {
-      const combined = new Blob(audioChunksRef.current, { type: 'audio/wav' })
-      audioChunksRef.current = []
-      const url = URL.createObjectURL(combined)
+      const blob = new Blob([chunk], { type: 'audio/wav' })
+      const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
       audio.playbackRate = speed
       audio.onended = () => {
         URL.revokeObjectURL(url)
         isPlayingAudioRef.current = false
-        // Play next batch if more arrived while playing
-        if (audioChunksRef.current.length > 0) playAudioChunks()
+        // Play next chunk in queue
+        if (audioQueueRef.current.length > 0) playNextChunk()
       }
       audio.onerror = () => {
         URL.revokeObjectURL(url)
         isPlayingAudioRef.current = false
+        // Try next chunk even on error
+        if (audioQueueRef.current.length > 0) playNextChunk()
       }
       await audio.play()
     } catch {
       isPlayingAudioRef.current = false
+      if (audioQueueRef.current.length > 0) playNextChunk()
     }
   }, [speed])
+
+  const playAudioChunks = useCallback(() => {
+    // Start playing if not already
+    if (!isPlayingAudioRef.current) playNextChunk()
+  }, [playNextChunk])
 
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
     onBinary: useCallback((data: ArrayBuffer) => {
-      // TTS audio chunk from backend
-      audioChunksRef.current.push(data)
+      // TTS audio chunk from backend — each chunk is a complete WAV file
+      audioQueueRef.current.push(data)
     }, []),
     onMessage: useCallback((data: string) => {
       try {
@@ -151,8 +159,15 @@ export default function VoicePage() {
   const streamRef = useRef<MediaStream | null>(null)
 
   async function getMicStream(): Promise<MediaStream> {
+    // Check if existing stream is still usable
     if (streamRef.current && streamRef.current.active) {
-      return streamRef.current
+      const tracks = streamRef.current.getAudioTracks()
+      if (tracks.length > 0 && tracks[0].readyState === 'live') {
+        return streamRef.current
+      }
+      // Stream or track died — release and get a new one
+      streamRef.current.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     streamRef.current = stream

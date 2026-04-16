@@ -73,11 +73,15 @@ export default function ProjectDashboard() {
     )
   }
 
-  // Group todos by category
-  const todosByCategory: Record<string, typeof project.todos> = {}
-  for (const todo of project.todos) {
-    if (!todosByCategory[todo.category]) todosByCategory[todo.category] = []
-    todosByCategory[todo.category].push(todo)
+  // Backend todos don't have category — group under a single bucket
+  // Support both {id, category, text, done} and {text, done} shapes
+  const todosByCategory: Record<string, { id: string; category: string; text: string; done: boolean }[]> = {}
+  for (const [i, todo] of (project.todos || []).entries()) {
+    const t = todo as unknown as Record<string, unknown>
+    const cat = (t.category as string) || 'Tasks'
+    const id = (t.id as string) || `todo-${i}`
+    if (!todosByCategory[cat]) todosByCategory[cat] = []
+    todosByCategory[cat].push({ id, category: cat, text: todo.text, done: todo.done })
   }
 
   return (
@@ -115,17 +119,22 @@ export default function ProjectDashboard() {
             Phases
           </h2>
           <div className="space-y-3">
-            {project.phases.map((phase) => {
+            {(project.phases || []).map((phase) => {
+              // Support both backend shapes: {name, complete, items[]} and {name, total, completed}
+              const p = phase as unknown as Record<string, unknown>
+              const items = (p.items as { done: boolean }[]) || []
+              const total = (p.total as number) ?? items.length
+              const completed = (p.completed as number) ?? items.filter((i) => i.done).length
               const pct =
-                phase.total > 0
-                  ? Math.round((phase.completed / phase.total) * 100)
-                  : 0
+                total > 0
+                  ? Math.round((completed / total) * 100)
+                  : (p.complete ? 100 : 0)
               return (
                 <div key={phase.name}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm text-white/80">{phase.name}</span>
                     <span className="text-xs text-white/40">
-                      {phase.completed}/{phase.total} ({pct}%)
+                      {completed}/{total} ({pct}%)
                     </span>
                   </div>
                   <div className="h-2 bg-surface-border rounded-full overflow-hidden">
