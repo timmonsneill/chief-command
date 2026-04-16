@@ -1,0 +1,7 @@
+tunnel: 9cf2d650-08bf-4dc0-843e-ee6c1712b2de
+credentials-file: /Users/user/.cloudflared/9cf2d650-08bf-4dc0-843e-ee6c1712b2de.json
+
+ingress:
+  - hostname: chiefcommand.app
+    service: http://localhost:8000
+  - service: http_status:404

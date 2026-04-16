@@ -10,6 +10,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.auth import verify_token
 from services.claude_pipe import claude_pipe
+from services import stt_service, tts_service
+from services.audio_utils import convert_webm_to_wav
 
 logger = logging.getLogger(__name__)
 
@@ -111,59 +113,39 @@ async def _handle_text_message(ws: WebSocket, text: str) -> None:
 
 
 async def _handle_audio_message(ws: WebSocket, audio_data: bytes) -> None:
-    """Process audio input: STT -> Claude Code -> TTS -> back to client.
-
-    STT and TTS are handled by dedicated services (faster-whisper and kokoro).
-    This function provides the glue and falls back to a placeholder if the
-    models are not yet loaded.
-    """
+    """Process audio input: STT -> Claude Code -> TTS -> back to client."""
     try:
-        # Attempt STT
-        transcript = await _speech_to_text(audio_data)
-        if transcript:
-            await ws.send_json({"type": "transcript", "content": transcript})
-            # Process through Claude
-            await _handle_text_message(ws, transcript)
-        else:
-            await ws.send_json(
-                {"type": "error", "message": "Could not transcribe audio"}
-            )
+        # Convert browser WebM/Opus to WAV for whisper
+        wav_data = await convert_webm_to_wav(audio_data)
+
+        # Transcribe using the proper STT service (medium model, Apple Silicon optimized)
+        transcript = await stt_service.transcribe(wav_data)
+        if not transcript:
+            await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
+            return
+
+        await ws.send_json({"type": "transcript", "content": transcript})
+
+        # Process through Claude and collect full response for TTS
+        full_response = []
+        async for chunk in claude_pipe.send_message_stream(transcript):
+            await ws.send_json({"type": "response", "content": chunk})
+            full_response.append(chunk)
+            agents = claude_pipe.get_agents()
+            if agents:
+                await ws.send_json({"type": "agent_status", "agents": agents})
+
+        # Convert response to speech and send audio back
+        response_text = "".join(full_response).strip()
+        if response_text:
+            await ws.send_json({"type": "tts_start"})
+            async for audio_chunk in tts_service.synthesize_stream(response_text):
+                await ws.send_bytes(audio_chunk)
+            await ws.send_json({"type": "tts_end"})
+
     except Exception as exc:
         logger.exception("Audio processing error: %s", exc)
         await ws.send_json({"type": "error", "message": str(exc)})
-
-
-async def _speech_to_text(audio_data: bytes) -> Optional[str]:
-    """Transcribe audio bytes to text using faster-whisper.
-
-    Runs in an executor to avoid blocking the event loop.
-    Returns None if the model is not available.
-    """
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        logger.warning("faster-whisper not installed, STT unavailable")
-        return None
-
-    import io
-    import tempfile
-
-    loop = asyncio.get_running_loop()
-
-    def _transcribe() -> Optional[str]:
-        # Write audio to a temp file for whisper
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(audio_data)
-            tmp_path = f.name
-        try:
-            model = WhisperModel("base", device="cpu", compute_type="int8")
-            segments, _ = model.transcribe(tmp_path)
-            return " ".join(seg.text for seg in segments).strip() or None
-        except Exception as e:
-            logger.error("Whisper transcription failed: %s", e)
-            return None
-
-    return await loop.run_in_executor(None, _transcribe)
 
 
 # ---------------------------------------------------------------------------
