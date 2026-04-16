@@ -124,7 +124,7 @@ export interface Build {
 
 export interface VoiceMessage {
   id: string
-  role: 'user' | 'chief'
+  role: 'user' | 'chief' | 'assistant'
   content: string
   timestamp: string
 }
