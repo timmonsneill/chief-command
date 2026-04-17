@@ -1,7 +1,7 @@
 """Session and turn persistence with cost tracking."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from db import get_db
 
@@ -134,8 +134,10 @@ async def get_session_totals(session_id: str) -> dict:
 async def get_rolling_totals() -> dict:
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    week_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = (week_start.replace(day=week_start.day - week_start.weekday())).isoformat()
+    week_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+        days=now.weekday()
+    )
+    week_start = week_start_dt.isoformat()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
     async with get_db() as db:
@@ -164,7 +166,16 @@ async def list_sessions(limit: int = 50) -> list[dict]:
             "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?", (limit,)
         )
         rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        row = dict(r)
+        started = datetime.fromisoformat(row["started_at"])
+        ended = datetime.fromisoformat(row["ended_at"]) if row.get("ended_at") else now
+        row["duration_s"] = round((ended - started).total_seconds())
+        out.append(row)
+    return out
 
 
 async def get_session_with_turns(session_id: str) -> dict | None:

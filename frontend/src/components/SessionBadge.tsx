@@ -11,6 +11,7 @@ interface SessionBadgeProps {
 const MODEL_DOT: Record<ActiveModel, string> = {
   'claude-haiku-4-5': 'bg-emerald-400',
   'claude-sonnet-4-6': 'bg-blue-400',
+  'claude-opus-4-7': 'bg-purple-400',
 }
 
 export function SessionBadge({ sessionId, costCents, turnCount, model }: SessionBadgeProps) {

@@ -13,11 +13,13 @@ interface UsageMeterProps {
 const MODEL_LABELS: Record<ActiveModel, string> = {
   'claude-haiku-4-5': 'Haiku',
   'claude-sonnet-4-6': 'Sonnet',
+  'claude-opus-4-7': 'Opus',
 }
 
 const MODEL_COLORS: Record<ActiveModel, string> = {
   'claude-haiku-4-5': 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
   'claude-sonnet-4-6': 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+  'claude-opus-4-7': 'bg-purple-500/20 text-purple-400 border-purple-500/30',
 }
 
 function AnimatedCost({ cents }: { cents: number }) {

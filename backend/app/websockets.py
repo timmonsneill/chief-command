@@ -65,11 +65,18 @@ async def voice_ws(ws: WebSocket) -> None:
         await ws.close(code=4001)
         return
 
-    session_id = str(uuid.uuid4())
-    await create_session(session_id)
-    logger.info("Voice WS connected session=%s", session_id)
-
+    session_id: Optional[str] = None
     history: list[dict] = []
+
+    async def ensure_session() -> str:
+        """Lazy-create session on first real turn to avoid ghost rows from
+        status-only WS connections (e.g. Layout's connection-status indicator)."""
+        nonlocal session_id
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+            await create_session(session_id)
+            logger.info("Voice WS session started session=%s", session_id)
+        return session_id
 
     try:
         while True:
@@ -80,30 +87,35 @@ async def voice_ws(ws: WebSocket) -> None:
 
             if "text" in message:
                 raw = message["text"]
-                logger.info("Voice WS text frame: %.100s", raw)
                 try:
                     data = json.loads(raw)
                     text_content = data.get("content", raw)
                 except json.JSONDecodeError:
                     text_content = raw
 
-                await _handle_text_turn(ws, session_id, history, text_content)
+                if not text_content or not text_content.strip():
+                    continue
+
+                sid = await ensure_session()
+                await _handle_text_turn(ws, sid, history, text_content)
 
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
                 logger.info("Voice WS audio frame: %d bytes", len(audio_data))
-                await _handle_audio_turn(ws, session_id, history, audio_data)
+                sid = await ensure_session()
+                await _handle_audio_turn(ws, sid, history, audio_data)
 
     except WebSocketDisconnect:
         logger.info("Voice WS disconnected session=%s", session_id)
     except Exception as exc:
         logger.exception("Voice WS error session=%s: %s", session_id, exc)
         try:
-            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws.send_json({"type": "error", "message": "Internal error"})
         except Exception:
             pass
     finally:
-        await close_session(session_id)
+        if session_id is not None:
+            await close_session(session_id)
 
 
 async def _run_llm_turn(
@@ -184,12 +196,19 @@ async def _run_llm_turn(
             "session_total_cents": totals.get("cost_cents", 0),
         })
 
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        tts_task.cancel()
+        try:
+            await tts_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        raise
     except Exception:
         await tts_queue.put(None)
         try:
-            await tts_task
-        except Exception:
-            pass
+            await asyncio.wait_for(tts_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            tts_task.cancel()
         raise
 
 

@@ -113,7 +113,7 @@ export default function VoicePage() {
       try {
         const parsed = JSON.parse(data) as WsEvent
 
-        if (parsed.type === 'transcript' && parsed.final) {
+        if (parsed.type === 'transcript') {
           setMessages((prev) => [
             ...prev,
             {

@@ -133,7 +133,7 @@ async def api_get_project(
 
 
 @app.get("/api/share/{slug}")
-async def api_share_project(slug: str) -> dict[str, object]:
+async def api_share_project(slug: str, subject: str = Depends(require_auth)) -> dict[str, object]:
     data = get_project(slug)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")
