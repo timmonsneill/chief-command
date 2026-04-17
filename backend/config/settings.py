@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     PROJECTS_DIR: str = str(Path.home() / ".claude" / "projects")
     MEMORY_SUBDIR: str = "-Users-user/memory"
 
+    ANTHROPIC_API_KEY: Optional[str] = None
+
     TUNNEL_URL: Optional[str] = None
     HOST: str = "0.0.0.0"
     PORT: int = 8000

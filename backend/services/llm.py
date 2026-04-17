@@ -6,8 +6,14 @@ import re
 from typing import Awaitable, Callable, Optional
 
 from anthropic import AsyncAnthropic
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Ensure ANTHROPIC_API_KEY is available in os.environ so the Anthropic client
+# can pick it up even if it was only loaded via pydantic-settings.
+if settings.ANTHROPIC_API_KEY and not os.environ.get("ANTHROPIC_API_KEY"):
+    os.environ["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
 
 _client: Optional[AsyncAnthropic] = None
 
@@ -29,7 +35,7 @@ UsageRecord = dict
 def _get_client() -> AsyncAnthropic:
     global _client
     if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = settings.ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY")
         _client = AsyncAnthropic(api_key=api_key)
     return _client
 
