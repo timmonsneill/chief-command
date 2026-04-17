@@ -1,21 +1,21 @@
 import { useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Mic, Bot, TerminalSquare, FolderKanban, BarChart2, Users, BookOpen, MoreHorizontal } from 'lucide-react'
+import { Mic, Bot, TerminalSquare, FolderKanban, CircleDollarSign, Users, BookOpen, MoreHorizontal } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import ProjectPicker from './ProjectPicker'
 
-// Voice · Team · Agents · Projects · Memory · Sessions · Terminal
-// Sessions + Terminal collapse into a "More" overflow menu on narrow screens.
+// Voice · Team · Agents · Projects · Usage · Memory
+// Terminal collapses into a "More" overflow menu on narrow screens.
 const PRIMARY_TABS = [
   { path: '/voice', label: 'Voice', icon: Mic },
   { path: '/team', label: 'Team', icon: Users },
   { path: '/agents', label: 'Agents', icon: Bot },
   { path: '/projects', label: 'Projects', icon: FolderKanban },
+  { path: '/usage', label: 'Usage', icon: CircleDollarSign },
   { path: '/memory', label: 'Memory', icon: BookOpen },
 ] as const
 
 const OVERFLOW_TABS = [
-  { path: '/sessions', label: 'Sessions', icon: BarChart2 },
   { path: '/terminal', label: 'Terminal', icon: TerminalSquare },
 ] as const
 
