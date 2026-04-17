@@ -17,6 +17,8 @@ from db import init_db
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
 from services.project_parser import get_project, get_projects
+from services.team_service import get_team, get_agent_memory, put_agent_memory
+from services.memory_service import get_all_memory, get_memory_file, put_memory_file
 from services.usage_tracker import (
     get_rolling_totals,
     get_session_totals,
@@ -71,6 +73,21 @@ class UploadResponse(BaseModel):
     filename: str
 
 
+# Team / memory
+class AgentMemoryResponse(BaseModel):
+    name: str
+    content: str
+    updated_at: str
+
+
+class AgentMemoryPutRequest(BaseModel):
+    content: str
+
+
+class MemoryFilePutRequest(BaseModel):
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -113,6 +130,73 @@ async def get_agent_reviews(subject: str = Depends(require_auth)) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Team (named roster + per-agent memory)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/team")
+async def api_get_team(subject: str = Depends(require_auth)) -> dict:
+    agents = get_team()
+    return {"agents": agents}
+
+
+@app.get("/api/team/{name}/memory", response_model=AgentMemoryResponse)
+async def api_get_agent_memory(
+    name: str, subject: str = Depends(require_auth)
+) -> AgentMemoryResponse:
+    try:
+        data = get_agent_memory(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return AgentMemoryResponse(**data)
+
+
+@app.put("/api/team/{name}/memory", response_model=AgentMemoryResponse)
+async def api_put_agent_memory(
+    name: str, body: AgentMemoryPutRequest, subject: str = Depends(require_auth)
+) -> AgentMemoryResponse:
+    try:
+        data = put_agent_memory(name, body.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except OSError as exc:
+        logger.error("Failed to write agent memory for %s: %s", name, exc)
+        raise HTTPException(status_code=500, detail="Failed to write memory file")
+    return AgentMemoryResponse(**data)
+
+
+# ---------------------------------------------------------------------------
+# Memory (global / per-project / per-agent / audit log)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memory")
+async def api_get_memory(subject: str = Depends(require_auth)) -> dict:
+    return get_all_memory()
+
+
+@app.get("/api/memory/{filename}")
+async def api_get_memory_file(
+    filename: str, subject: str = Depends(require_auth)
+) -> dict:
+    try:
+        return get_memory_file(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.put("/api/memory/{filename}")
+async def api_put_memory_file(
+    filename: str, body: MemoryFilePutRequest, subject: str = Depends(require_auth)
+) -> dict:
+    try:
+        return put_memory_file(filename, body.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        logger.error("Failed to write memory file %s: %s", filename, exc)
+        raise HTTPException(status_code=500, detail="Failed to write memory file")
+
+
+# ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
 
@@ -133,7 +217,7 @@ async def api_get_project(
 
 
 @app.get("/api/share/{slug}")
-async def api_share_project(slug: str, subject: str = Depends(require_auth)) -> dict[str, object]:
+async def api_share_project(slug: str) -> dict[str, object]:
     data = get_project(slug)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")
