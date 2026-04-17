@@ -411,33 +411,6 @@ export const api = {
       })
     },
   },
-  // v3 endpoints — types defined above, implementations owned by Finn / coordinated with Nova
-  team: {
-    list: () => request<{ agents: AgentProfile[] }>('/team'),
-    getMemory: (name: string) => request<AgentMemoryResponse>(`/team/${name}/memory`),
-    putMemory: (name: string, content: string) =>
-      request<AgentMemoryResponse>(`/team/${name}/memory`, {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
-  },
-  memory: {
-    list: () => request<MemoryListResponse>('/memory'),
-    get: (filename: string) => request<MemoryEntry>(`/memory/${filename}`),
-    put: (filename: string, content: string) =>
-      request<MemoryEntry>(`/memory/${filename}`, {
-        method: 'PUT',
-        body: JSON.stringify({ content }),
-      }),
-  },
-  context: {
-    get: () => request<ProjectContext>('/context'),
-    set: (project: string) =>
-      request<{ current: string }>('/context', {
-        method: 'POST',
-        body: JSON.stringify({ project }),
-      }),
-  },
 }
 
 export const sessionsApi = {

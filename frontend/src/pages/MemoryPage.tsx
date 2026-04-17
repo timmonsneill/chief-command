@@ -188,7 +188,7 @@ export default function MemoryPage() {
   const fetchMemory = useCallback(async () => {
     setError('')
     try {
-      const result = await api.memory.list()
+      const result = await api.memory.getAll()
       setData(result)
     } catch {
       setError('Failed to load memory')
@@ -202,7 +202,7 @@ export default function MemoryPage() {
   }, [fetchMemory])
 
   async function handleSaveEntry(filename: string, content: string) {
-    await api.memory.put(filename, content)
+    await api.memory.update(filename, content)
     // Optimistic update in local state
     setData((prev) => {
       if (!prev) return prev
@@ -222,7 +222,7 @@ export default function MemoryPage() {
   }
 
   async function handleSaveAgentMemory(name: string, content: string) {
-    await api.team.putMemory(name, content)
+    await api.team.updateMemory(name, content)
     setData((prev) => {
       if (!prev) return prev
       return {

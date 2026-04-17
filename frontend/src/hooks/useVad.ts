@@ -34,8 +34,9 @@ export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): 
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
         model: 'legacy',
-        positiveSpeechThreshold: 0.85,
-        minSpeechFrames: 4,
+        positiveSpeechThreshold: 0.5,
+        negativeSpeechThreshold: 0.35,
+        minSpeechFrames: 3,
         redemptionFrames: 8,
         additionalAudioConstraints: {
           sampleRate: { ideal: 16000 },

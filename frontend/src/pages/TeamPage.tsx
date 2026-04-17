@@ -61,7 +61,7 @@ function MemoryModal({ agent, onClose }: MemoryModalProps) {
     setError('')
     setSaveSuccess(false)
     try {
-      await api.team.putMemory(agent.name, content)
+      await api.team.updateMemory(agent.name, content)
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 2000)
     } catch {
