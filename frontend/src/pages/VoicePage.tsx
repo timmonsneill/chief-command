@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
-import { Mic, MicOff, Send, Camera, Monitor, ChevronDown } from 'lucide-react'
+import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useVad } from '../hooks/useVad'
 import { UsageMeter } from '../components/UsageMeter'
@@ -40,6 +40,138 @@ function float32ToWav(samples: Float32Array, sampleRate = 16000): ArrayBuffer {
 
   return buffer
 }
+
+// ─── Orb visual component ────────────────────────────────────────────────────
+
+interface VoiceOrbProps {
+  state: VoiceState
+  userSpeaking: boolean
+}
+
+function VoiceOrb({ state, userSpeaking }: VoiceOrbProps) {
+  const isListening = state === 'listening' && !userSpeaking
+  const isSpeaking = userSpeaking || state === 'speaking'
+  const isThinking = state === 'thinking'
+  const isChiefSpeaking = state === 'speaking' && !userSpeaking
+
+  // Outer ripple rings — shown when listening or user speaking
+  const showRipples = isListening || isSpeaking
+
+  // Orb color classes
+  let orbGradient = 'from-chief via-chief-dark to-indigo-900'
+  if (isSpeaking) orbGradient = 'from-amber-500 via-chief to-indigo-800'
+  if (isChiefSpeaking) orbGradient = 'from-chief-light via-chief to-indigo-900'
+  if (isThinking) orbGradient = 'from-surface-raised via-surface-overlay to-surface-raised'
+
+  // Orb animation
+  let orbAnim = 'animate-orb-breathe'
+  if (isSpeaking) orbAnim = 'animate-orb-pulse-strong'
+  if (isChiefSpeaking) orbAnim = 'animate-orb-breathe'
+  if (isThinking) orbAnim = ''
+
+  // Ring colors
+  let rippleColor = 'bg-chief/20'
+  if (isSpeaking) rippleColor = 'bg-amber-500/20'
+
+  return (
+    <div className="relative flex items-center justify-center" style={{ width: 192, height: 192 }}>
+      {/* Slow outer ripple */}
+      {showRipples && (
+        <span
+          className={`absolute rounded-full ${rippleColor} animate-orb-ripple-slow`}
+          style={{ width: 192, height: 192 }}
+        />
+      )}
+      {/* Fast inner ripple */}
+      {showRipples && (
+        <span
+          className={`absolute rounded-full ${rippleColor} animate-orb-ripple`}
+          style={{ width: 192, height: 192 }}
+        />
+      )}
+
+      {/* Main orb */}
+      <div
+        className={`relative w-40 h-40 rounded-full bg-gradient-to-br ${orbGradient} ${orbAnim} flex items-center justify-center shadow-2xl transition-all duration-500`}
+        style={{
+          boxShadow: isSpeaking
+            ? '0 0 60px rgba(245,158,11,0.35), 0 0 120px rgba(99,102,241,0.2)'
+            : isChiefSpeaking
+            ? '0 0 60px rgba(99,102,241,0.45), 0 0 120px rgba(99,102,241,0.15)'
+            : isThinking
+            ? 'none'
+            : '0 0 40px rgba(99,102,241,0.3), 0 0 80px rgba(99,102,241,0.1)',
+        }}
+      >
+        {/* Thinking indicator */}
+        {isThinking && (
+          <div className="flex gap-1.5">
+            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:0ms]" />
+            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:150ms]" />
+            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:300ms]" />
+          </div>
+        )}
+
+        {/* Mic icon — only shown when listening (never MicOff) */}
+        {isListening && (
+          <Mic size={40} className="text-white/90" />
+        )}
+
+        {/* Sound bars — shown when Chief is speaking */}
+        {isChiefSpeaking && (
+          <div className="flex items-end gap-1 h-8">
+            {[0, 150, 75, 225, 50].map((delay, i) => (
+              <div
+                key={i}
+                className="w-1.5 bg-white/80 rounded-full animate-bounce"
+                style={{
+                  height: [20, 32, 24, 28, 16][i],
+                  animationDelay: `${delay}ms`,
+                  animationDuration: '0.7s',
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* User speaking waveform dots */}
+        {isSpeaking && !isChiefSpeaking && (
+          <div className="flex items-end gap-1.5 h-8">
+            {[0, 100, 50, 200, 125].map((delay, i) => (
+              <div
+                key={i}
+                className="w-1.5 bg-white/90 rounded-full animate-bounce"
+                style={{
+                  height: [16, 28, 20, 32, 24][i],
+                  animationDelay: `${delay}ms`,
+                  animationDuration: '0.5s',
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── State label ──────────────────────────────────────────────────────────────
+
+const STATE_LABELS: Record<VoiceState, string> = {
+  idle: 'Ready',
+  listening: 'Listening...',
+  speaking: 'Thinking...',
+  thinking: 'Thinking...',
+}
+
+const STATE_COLORS: Record<VoiceState, string> = {
+  idle: 'text-white/30',
+  listening: 'text-emerald-400',
+  speaking: 'text-chief',
+  thinking: 'text-status-working',
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VoicePage() {
   const [messages, setMessages] = useState<VoiceMessage[]>([])
@@ -221,6 +353,7 @@ export default function VoicePage() {
   const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError } = useVad({
     enabled: conversationActive,
     onSpeechStart: useCallback(() => {
+      // Barge-in: if Chief is speaking, cut audio immediately and switch to listening
       if (isPlayingAudioRef.current) {
         stopAudioPlayback()
       }
@@ -335,20 +468,6 @@ export default function VoicePage() {
     }
   }
 
-  const STATE_LABELS: Record<VoiceState, string> = {
-    idle: 'Ready',
-    listening: 'Listening...',
-    speaking: 'Speaking...',
-    thinking: 'Thinking...',
-  }
-
-  const STATE_COLORS: Record<VoiceState, string> = {
-    idle: 'text-white/30',
-    listening: 'text-emerald-400',
-    speaking: 'text-chief',
-    thinking: 'text-status-working',
-  }
-
   const speeds = [0.75, 1, 1.25, 1.5]
 
   function formatTime(iso: string) {
@@ -357,13 +476,21 @@ export default function VoicePage() {
 
   const workingAgents = agents.filter((a) => a.status === 'working')
 
+  // Determine label shown under orb during active session
+  function getActiveLabel(): string {
+    if (vadSpeaking) return 'Listening to you...'
+    if (voiceState === 'thinking') return 'Thinking...'
+    if (voiceState === 'speaking') return 'Chief is speaking'
+    return 'Listening...'
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Header strip */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface">
         <div className="flex items-center gap-3">
           <span className={`text-xs font-medium ${STATE_COLORS[voiceState]}`}>
-            {STATE_LABELS[voiceState]}
+            {voiceState === 'idle' ? 'Ready' : STATE_LABELS[voiceState]}
           </span>
           {!isConnected && (
             <span className="text-xs text-white/30">Connecting...</span>
@@ -406,55 +533,126 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-        {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center space-y-2">
-              <div className="text-white/20 text-sm">
-                {conversationActive
-                  ? 'Speak to start a conversation'
-                  : 'Tap "Start conversation" to begin'}
-              </div>
-              {vadError && (
-                <div className="text-destructive text-xs">{vadError}</div>
-              )}
-            </div>
-          </div>
-        )}
+      {/* Main content area */}
+      {conversationActive ? (
+        /* ── Active voice session layout ── */
+        <div className="flex-1 flex flex-col min-h-0">
+          {/* Orb area — fixed height so messages still scroll below */}
+          <div className="flex flex-col items-center justify-center py-6 gap-3 shrink-0">
+            <VoiceOrb state={voiceState} userSpeaking={vadSpeaking} />
 
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
-                msg.role === 'user'
-                  ? 'bg-chief text-white rounded-br-md'
-                  : 'bg-surface-raised text-white/90 rounded-bl-md'
-              }`}
+            {/* State label under orb */}
+            <p className={`text-sm font-medium transition-all duration-300 ${
+              vadSpeaking
+                ? 'text-amber-400'
+                : voiceState === 'thinking'
+                ? 'text-status-working'
+                : voiceState === 'speaking'
+                ? 'text-chief-light'
+                : 'text-emerald-400'
+            }`}>
+              {getActiveLabel()}
+            </p>
+
+            {/* End call button — PhoneOff, clearly separate from orb */}
+            <button
+              onClick={handleEndConversation}
+              className="mt-1 flex items-center gap-2 px-4 py-2 rounded-full bg-red-600/20 border border-red-600/40 text-red-400 hover:bg-red-600/30 active:scale-95 transition-all text-sm font-medium"
             >
-              <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-              <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
-                {formatTime(msg.timestamp)}
-              </p>
-            </div>
+              <PhoneOff size={15} />
+              End call
+            </button>
           </div>
-        ))}
 
-        {voiceState === 'thinking' && (
-          <div className="flex justify-start">
-            <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
-              <div className="flex gap-1">
-                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
-                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
-                <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
+          {/* Message history — scrollable below the orb */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+            {messages.length === 0 && (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-white/20 text-sm">Speak to start a conversation</p>
               </div>
-            </div>
+            )}
+
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                    msg.role === 'user'
+                      ? 'bg-chief text-white rounded-br-md'
+                      : 'bg-surface-raised text-white/90 rounded-bl-md'
+                  }`}
+                >
+                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                  <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
+                    {formatTime(msg.timestamp)}
+                  </p>
+                </div>
+              </div>
+            ))}
+
+            {voiceState === 'thinking' && (
+              <div className="flex justify-start">
+                <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
+                  <div className="flex gap-1">
+                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
+                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
+                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        /* ── Idle / inactive layout ── */
+        <div className="flex-1 flex flex-col min-h-0">
+          {/* Start voice affordance — center of screen */}
+          <div className="flex flex-col items-center justify-center flex-1 gap-5">
+            <button
+              onClick={handleStartConversation}
+              disabled={!isConnected}
+              className="relative w-28 h-28 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed bg-chief hover:bg-chief-dark shadow-lg"
+              style={{ boxShadow: '0 0 40px rgba(99,102,241,0.25)' }}
+            >
+              <Mic size={36} className="text-white" />
+            </button>
+            <div className="text-center space-y-1">
+              <p className="text-white/70 text-sm font-medium">Tap to start voice</p>
+              <p className="text-white/30 text-xs">Always-listening conversation</p>
+            </div>
+            {vadError && (
+              <p className="text-destructive text-xs">{vadError}</p>
+            )}
+            {!isConnected && (
+              <p className="text-white/30 text-xs">Connecting to server...</p>
+            )}
+
+            {/* Past messages if any */}
+            {messages.length > 0 && (
+              <div ref={scrollRef} className="w-full max-h-40 overflow-y-auto px-4 space-y-2 mt-2">
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-3 py-2 ${
+                        msg.role === 'user'
+                          ? 'bg-chief text-white rounded-br-md'
+                          : 'bg-surface-raised text-white/90 rounded-bl-md'
+                      }`}
+                    >
+                      <p className="text-xs whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Agent status strip */}
       {workingAgents.length > 0 && (
@@ -472,11 +670,10 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Controls area */}
+      {/* Bottom controls */}
       <div className="px-4 pb-2 pt-3 bg-surface space-y-3">
-        {/* Main voice control row */}
+        {/* Camera + Screenshot row — always visible */}
         <div className="flex items-center justify-center gap-4">
-          {/* Camera */}
           <button
             onClick={handleCamera}
             className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
@@ -484,37 +681,6 @@ export default function VoicePage() {
             <Camera size={18} />
           </button>
 
-          {/* Start/End conversation button */}
-          {!conversationActive ? (
-            <button
-              onClick={handleStartConversation}
-              disabled={!isConnected}
-              className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed bg-chief hover:bg-chief-dark"
-            >
-              <Mic size={28} className="text-white relative z-10" />
-            </button>
-          ) : (
-            <button
-              onClick={handleEndConversation}
-              className={`relative w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 ${
-                voiceState === 'speaking'
-                  ? 'bg-red-500'
-                  : voiceState === 'listening'
-                  ? 'bg-emerald-600'
-                  : 'bg-surface-raised border-2 border-surface-border'
-              }`}
-            >
-              {voiceState === 'listening' && (
-                <>
-                  <span className="absolute inset-0 rounded-full bg-emerald-500/30 animate-ping" />
-                  <span className="absolute -inset-2 rounded-full border-2 border-emerald-500/20 animate-pulse" />
-                </>
-              )}
-              <MicOff size={28} className="text-white relative z-10" />
-            </button>
-          )}
-
-          {/* Screenshot */}
           <button
             onClick={handleScreenshot}
             className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
@@ -522,12 +688,6 @@ export default function VoicePage() {
             <Monitor size={18} />
           </button>
         </div>
-
-        {!conversationActive && (
-          <div className="text-center text-white/30 text-xs">
-            Tap mic to start always-listening conversation
-          </div>
-        )}
 
         {/* Speed control */}
         <div className="flex items-center justify-center gap-1">
