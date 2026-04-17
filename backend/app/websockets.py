@@ -4,14 +4,17 @@ import asyncio
 import json
 import logging
 import signal
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.auth import verify_token
-from services.claude_pipe import claude_pipe
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav
+from services.llm import stream_turn
+from services.router import classify_and_route, random_thinking_phrase
+from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +22,9 @@ router = APIRouter()
 
 
 async def _authenticate_ws(ws: WebSocket) -> bool:
-    """Authenticate a WebSocket connection via token query param or first message."""
     token = ws.query_params.get("token")
     if token and verify_token(token):
         return True
-    # Try reading token from first text message
     try:
         first = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
         try:
@@ -38,23 +39,25 @@ async def _authenticate_ws(ws: WebSocket) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# /ws/voice — audio + text bridge to Claude Code
-# ---------------------------------------------------------------------------
-
 @router.websocket("/ws/voice")
 async def voice_ws(ws: WebSocket) -> None:
     """Voice WebSocket endpoint.
 
-    Protocol:
-      - Client sends text frames with JSON: {"type": "text", "content": "..."}
-        or binary frames with audio chunks.
-      - Server responds with text frames containing JSON:
-        {"type": "transcript", "content": "..."} — STT result
-        {"type": "response", "content": "..."} — Claude response text
-        {"type": "agent_status", "agents": [...]} — agent status updates
-        {"type": "audio", "format": "pcm"} followed by binary frame — TTS audio
-        {"type": "error", "message": "..."} — errors
+    Inbound frames:
+      text  {"type": "text", "content": "..."}
+      binary  raw audio (WebM/Opus)
+
+    Outbound frames:
+      {"type": "transcript", "content": "..."}       — STT result
+      {"type": "active_model", "model": "...", "is_deep": bool} — routing decision
+      {"type": "bridge_phrase", "text": "..."}        — spoken while Opus thinks
+      {"type": "token", "text": "..."}                — streaming token
+      {"type": "tts_start"}                           — TTS about to begin
+      binary                                          — WAV audio chunk
+      {"type": "tts_end"}                             — TTS done
+      {"type": "message_done"}                        — full turn complete
+      {"type": "usage", ...}                          — token/cost summary
+      {"type": "error", "message": "..."}
     """
     await ws.accept()
     if not await _authenticate_ws(ws):
@@ -62,7 +65,11 @@ async def voice_ws(ws: WebSocket) -> None:
         await ws.close(code=4001)
         return
 
-    logger.info("Voice WebSocket connected")
+    session_id = str(uuid.uuid4())
+    await create_session(session_id)
+    logger.info("Voice WS connected session=%s", session_id)
+
+    history: list[dict] = []
 
     try:
         while True:
@@ -71,116 +78,169 @@ async def voice_ws(ws: WebSocket) -> None:
             if message.get("type") == "websocket.disconnect":
                 break
 
-            # --- Text message ---
             if "text" in message:
                 raw = message["text"]
-                logger.info("Voice WS received text frame: %.100s", raw)
+                logger.info("Voice WS text frame: %.100s", raw)
                 try:
                     data = json.loads(raw)
                     text_content = data.get("content", raw)
                 except json.JSONDecodeError:
                     text_content = raw
 
-                # Send to Claude Code and stream back
-                await _handle_text_message(ws, text_content)
+                await _handle_text_turn(ws, session_id, history, text_content)
 
-            # --- Binary message (audio) ---
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
-                logger.info("Voice WS received audio frame: %d bytes", len(audio_data))
-                await _handle_audio_message(ws, audio_data)
+                logger.info("Voice WS audio frame: %d bytes", len(audio_data))
+                await _handle_audio_turn(ws, session_id, history, audio_data)
 
     except WebSocketDisconnect:
-        logger.info("Voice WebSocket disconnected")
+        logger.info("Voice WS disconnected session=%s", session_id)
     except Exception as exc:
-        logger.exception("Voice WebSocket error: %s", exc)
+        logger.exception("Voice WS error session=%s: %s", session_id, exc)
         try:
             await ws.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
+    finally:
+        await close_session(session_id)
 
 
-async def _handle_text_message(ws: WebSocket, text: str) -> None:
-    """Process a text command through Claude Code and stream results + TTS."""
+async def _run_llm_turn(
+    ws: WebSocket,
+    session_id: str,
+    history: list[dict],
+    user_text: str,
+) -> None:
+    """Core LLM streaming loop: route → stream tokens → TTS → record."""
+    model, is_deep = classify_and_route(user_text)
+    await ws.send_json({"type": "active_model", "model": model, "is_deep": is_deep})
+
+    tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+    if is_deep:
+        bridge = random_thinking_phrase()
+        await ws.send_json({"type": "bridge_phrase", "text": bridge})
+        await tts_queue.put(bridge)
+
+    async def send_token(text: str) -> None:
+        await ws.send_json({"type": "token", "text": text})
+
+    async def send_tts_sentence(sentence: str) -> None:
+        await tts_queue.put(sentence)
+
+    async def tts_worker() -> None:
+        try:
+            await ws.send_json({"type": "tts_start"})
+            while True:
+                sentence = await tts_queue.get()
+                if sentence is None:
+                    break
+                try:
+                    async for chunk in tts_service.synthesize_stream(sentence):
+                        await ws.send_bytes(chunk)
+                except Exception as tts_err:
+                    logger.warning("TTS failed for sentence: %s", tts_err)
+        finally:
+            await ws.send_json({"type": "tts_end"})
+
+    history.append({"role": "user", "content": user_text})
+
+    tts_task = asyncio.create_task(tts_worker())
+
     try:
-        full_response = []
-        async for chunk in claude_pipe.send_message_stream(text):
-            await ws.send_json({"type": "response", "content": chunk})
-            full_response.append(chunk)
-            agents = claude_pipe.get_agents()
-            if agents:
-                await ws.send_json({"type": "agent_status", "agents": agents})
+        usage = await stream_turn(
+            history=history,
+            model=model,
+            send_token=send_token,
+            send_tts_sentence=send_tts_sentence,
+        )
 
-        # Convert response to speech
-        response_text = "".join(full_response).strip()
-        if response_text:
-            try:
-                await ws.send_json({"type": "tts_start"})
-                async for audio_chunk in tts_service.synthesize_stream(response_text):
-                    await ws.send_bytes(audio_chunk)
-                await ws.send_json({"type": "tts_end"})
-            except Exception as tts_err:
-                logger.warning("TTS failed (text response still sent): %s", tts_err)
-                await ws.send_json({"type": "tts_end"})
+        await tts_queue.put(None)
+        await tts_task
+
+        assistant_text = usage.get("assistant_text", "")
+        history.append({"role": "assistant", "content": assistant_text})
+
+        await ws.send_json({"type": "message_done"})
+
+        turn = await record_turn(
+            session_id=session_id,
+            model=model,
+            usage_dict=usage,
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
+        totals = await get_session_totals(session_id)
+
+        await ws.send_json({
+            "type": "usage",
+            "session_id": session_id,
+            "model": model,
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "cached_tokens": usage.get("cache_read_input_tokens", 0),
+            "turn_cost_cents": turn["cost_cents"],
+            "session_total_cents": totals.get("cost_cents", 0),
+        })
+
+    except Exception:
+        await tts_queue.put(None)
+        try:
+            await tts_task
+        except Exception:
+            pass
+        raise
+
+
+async def _handle_text_turn(
+    ws: WebSocket,
+    session_id: str,
+    history: list[dict],
+    text: str,
+) -> None:
+    try:
+        await _run_llm_turn(ws, session_id, history, text)
     except Exception as exc:
-        logger.exception("Error processing text message: %s", exc)
+        logger.exception("Error processing text turn session=%s: %s", session_id, exc)
         await ws.send_json({"type": "error", "message": str(exc)})
 
 
-async def _handle_audio_message(ws: WebSocket, audio_data: bytes) -> None:
-    """Process audio input: STT -> Claude Code -> TTS -> back to client."""
+async def _handle_audio_turn(
+    ws: WebSocket,
+    session_id: str,
+    history: list[dict],
+    audio_data: bytes,
+) -> None:
     try:
-        # Convert browser WebM/Opus to WAV for whisper
         wav_data = await convert_webm_to_wav(audio_data)
-
-        # Transcribe using the proper STT service (medium model, Apple Silicon optimized)
         transcript = await stt_service.transcribe(wav_data)
         if not transcript:
             await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
             return
 
         await ws.send_json({"type": "transcript", "content": transcript})
-
-        # Process through Claude and collect full response for TTS
-        full_response = []
-        async for chunk in claude_pipe.send_message_stream(transcript):
-            await ws.send_json({"type": "response", "content": chunk})
-            full_response.append(chunk)
-            agents = claude_pipe.get_agents()
-            if agents:
-                await ws.send_json({"type": "agent_status", "agents": agents})
-
-        # Convert response to speech and send audio back
-        response_text = "".join(full_response).strip()
-        if response_text:
-            await ws.send_json({"type": "tts_start"})
-            async for audio_chunk in tts_service.synthesize_stream(response_text):
-                await ws.send_bytes(audio_chunk)
-            await ws.send_json({"type": "tts_end"})
+        await _run_llm_turn(ws, session_id, history, transcript)
 
     except Exception as exc:
-        logger.exception("Audio processing error: %s", exc)
+        logger.exception("Audio turn error session=%s: %s", session_id, exc)
         await ws.send_json({"type": "error", "message": str(exc)})
 
-
-# ---------------------------------------------------------------------------
-# /ws/terminal — remote shell access
-# ---------------------------------------------------------------------------
 
 @router.websocket("/ws/terminal")
 async def terminal_ws(ws: WebSocket) -> None:
     """Terminal WebSocket endpoint.
 
-    Protocol:
-      - Client sends text frames with JSON:
-        {"type": "command", "content": "ls -la"}
-        {"type": "signal", "signal": "SIGINT"}
-        {"type": "resize", "cols": 80, "rows": 24}
-      - Server responds with text frames:
-        {"type": "stdout", "content": "..."}
-        {"type": "stderr", "content": "..."}
-        {"type": "exit", "code": 0}
-        {"type": "error", "message": "..."}
+    Inbound frames:
+      {"type": "command", "content": "ls -la"}
+      {"type": "signal", "signal": "SIGINT"}
+      {"type": "resize", "cols": 80, "rows": 24}
+
+    Outbound frames:
+      {"type": "stdout", "content": "..."}
+      {"type": "stderr", "content": "..."}
+      {"type": "exit", "code": 0}
+      {"type": "error", "message": "..."}
     """
     await ws.accept()
     if not await _authenticate_ws(ws):
@@ -214,7 +274,6 @@ async def terminal_ws(ws: WebSocket) -> None:
                     preexec_fn=None,
                 )
 
-                # Stream stdout and stderr concurrently
                 async def _stream_pipe(
                     pipe: asyncio.StreamReader, stream_type: str
                 ) -> None:
@@ -223,25 +282,14 @@ async def terminal_ws(ws: WebSocket) -> None:
                         if not line:
                             break
                         await ws.send_json(
-                            {
-                                "type": stream_type,
-                                "content": line.decode(errors="replace"),
-                            }
+                            {"type": stream_type, "content": line.decode(errors="replace")}
                         )
 
                 tasks = []
                 if current_process.stdout:
-                    tasks.append(
-                        asyncio.create_task(
-                            _stream_pipe(current_process.stdout, "stdout")
-                        )
-                    )
+                    tasks.append(asyncio.create_task(_stream_pipe(current_process.stdout, "stdout")))
                 if current_process.stderr:
-                    tasks.append(
-                        asyncio.create_task(
-                            _stream_pipe(current_process.stderr, "stderr")
-                        )
-                    )
+                    tasks.append(asyncio.create_task(_stream_pipe(current_process.stderr, "stderr")))
 
                 if tasks:
                     await asyncio.gather(*tasks)
@@ -250,7 +298,7 @@ async def terminal_ws(ws: WebSocket) -> None:
                 await ws.send_json({"type": "exit", "code": exit_code})
                 current_process = None
 
-            elif msg_type == "signal" or msg_type == "kill":
+            elif msg_type in ("signal", "kill"):
                 sig_name = data.get("signal", "SIGINT")
                 allowed_signals = {"SIGINT", "SIGTERM"}
                 if sig_name not in allowed_signals:
