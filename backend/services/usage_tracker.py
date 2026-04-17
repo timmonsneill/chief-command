@@ -178,6 +178,85 @@ async def list_sessions(limit: int = 50) -> list[dict]:
     return out
 
 
+async def get_by_model_totals() -> dict:
+    """Return per-model cost/token/turn totals for today, this week, and this month."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week_start = (
+        now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    ).isoformat()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    query = """
+        SELECT
+            model,
+            COALESCE(SUM(cost_cents), 0)    AS cost_cents,
+            COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COUNT(*)                         AS turns
+        FROM turns
+        WHERE created_at >= ?
+        GROUP BY model
+    """
+
+    def _rows_to_dict(rows) -> dict:
+        result: dict = {}
+        for row in rows:
+            result[row["model"]] = {
+                "cost_cents": row["cost_cents"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "turns": row["turns"],
+            }
+        return result
+
+    async with get_db() as db:
+        cur = await db.execute(query, (today_start,))
+        today_rows = await cur.fetchall()
+
+        cur = await db.execute(query, (week_start,))
+        week_rows = await cur.fetchall()
+
+        cur = await db.execute(query, (month_start,))
+        month_rows = await cur.fetchall()
+
+    return {
+        "today": _rows_to_dict(today_rows),
+        "week": _rows_to_dict(week_rows),
+        "month": _rows_to_dict(month_rows),
+    }
+
+
+async def get_daily_series(days: int = 30) -> list[dict]:
+    """Return daily cost_cents and turn counts for the last `days` days, oldest-first."""
+    days = min(days, 365)
+    since = (
+        datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        - timedelta(days=days - 1)
+    ).isoformat()
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT
+                substr(created_at, 1, 10)    AS date,
+                COALESCE(SUM(cost_cents), 0) AS cost_cents,
+                COUNT(*)                      AS turns
+            FROM turns
+            WHERE created_at >= ?
+            GROUP BY date
+            ORDER BY date ASC
+            """,
+            (since,),
+        )
+        rows = await cur.fetchall()
+
+    return [
+        {"date": row["date"], "cost_cents": row["cost_cents"], "turns": row["turns"]}
+        for row in rows
+    ]
+
+
 async def get_session_with_turns(session_id: str) -> dict | None:
     async with get_db() as db:
         cur = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))

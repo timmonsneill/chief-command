@@ -21,6 +21,8 @@ from services.project_parser import get_project, get_projects
 from services.team_service import get_team, get_agent_memory, put_agent_memory
 from services.memory_service import get_all_memory, get_memory_file, put_memory_file
 from services.usage_tracker import (
+    get_by_model_totals,
+    get_daily_series,
     get_rolling_totals,
     get_session_totals,
     get_session_with_turns,
@@ -292,6 +294,20 @@ async def api_usage_summary(subject: str = Depends(require_auth)) -> dict:
         alert_level = "none"
 
     return {**totals, "alert_level": alert_level}
+
+
+@app.get("/api/usage/by_model")
+async def api_usage_by_model(subject: str = Depends(require_auth)) -> dict:
+    return await get_by_model_totals()
+
+
+@app.get("/api/usage/daily")
+async def api_usage_daily(
+    days: int = 30,
+    subject: str = Depends(require_auth),
+) -> dict:
+    series = await get_daily_series(days=days)
+    return {"days": series}
 
 
 # ---------------------------------------------------------------------------
