@@ -16,6 +16,7 @@ from config.settings import settings
 from db import init_db
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
+from services.project_context import get_context, set_context
 from services.project_parser import get_project, get_projects
 from services.usage_tracker import (
     get_rolling_totals,
@@ -69,6 +70,10 @@ class LoginResponse(BaseModel):
 class UploadResponse(BaseModel):
     path: str
     filename: str
+
+
+class SetContextRequest(BaseModel):
+    project: str
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +208,26 @@ async def api_usage_summary(subject: str = Depends(require_auth)) -> dict:
         alert_level = "none"
 
     return {**totals, "alert_level": alert_level}
+
+
+# ---------------------------------------------------------------------------
+# Project context (Nova owns this section)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/context")
+async def api_get_context(subject: str = Depends(require_auth)) -> dict:
+    return get_context(subject)
+
+
+@app.post("/api/context")
+async def api_set_context(
+    body: SetContextRequest,
+    subject: str = Depends(require_auth),
+) -> dict:
+    try:
+        return set_context(subject, body.project)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
