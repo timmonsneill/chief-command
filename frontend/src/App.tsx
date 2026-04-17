@@ -6,7 +6,7 @@ import AgentsPage from './pages/AgentsPage'
 import TerminalPage from './pages/TerminalPage'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectDashboard from './pages/ProjectDashboard'
-import SessionsPage from './pages/SessionsPage'
+import UsagePage from './pages/UsagePage'
 import TeamPage from './pages/TeamPage'
 import MemoryPage from './pages/MemoryPage'
 import LoginPage from './pages/LoginPage'
@@ -38,7 +38,8 @@ function ProtectedRoutes() {
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/projects/:slug" element={<ProjectDashboard />} />
         <Route path="/memory" element={<MemoryPage />} />
-        <Route path="/sessions" element={<SessionsPage />} />
+        <Route path="/usage" element={<UsagePage />} />
+        <Route path="/sessions" element={<Navigate to="/usage" replace />} />
         <Route path="*" element={<Navigate to="/voice" replace />} />
       </Routes>
     </Layout>

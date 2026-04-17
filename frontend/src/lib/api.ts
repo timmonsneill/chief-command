@@ -413,11 +413,32 @@ export const api = {
   },
 }
 
+export interface ModelUsageStats {
+  cost_cents: number
+  input_tokens: number
+  output_tokens: number
+  turns: number
+}
+
+export interface UsageByModel {
+  today: Record<string, ModelUsageStats>
+  week: Record<string, ModelUsageStats>
+  month: Record<string, ModelUsageStats>
+}
+
+export interface UsageDayPoint {
+  date: string
+  cost_cents: number
+  turns: number
+}
+
 export const sessionsApi = {
   list: () => request<Session[]>('/sessions'),
   get: (id: string) => request<SessionDetail>(`/sessions/${id}`),
   getCurrent: () => request<SessionUsage | null>('/sessions/current'),
   usageSummary: () => request<UsageSummary>('/usage/summary'),
+  byModel: () => request<UsageByModel>('/usage/by_model'),
+  daily: (days: number = 30) => request<{ days: UsageDayPoint[] }>(`/usage/daily?days=${days}`),
 }
 
 export { ApiError }
