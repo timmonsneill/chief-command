@@ -1,5 +1,9 @@
 # VAD Static Assets
 
+NOTE: `silero_vad.onnx` is excluded from git by `.gitignore` (`*.onnx` rule).
+After cloning or when the onnx file is missing, run the copy commands below before building.
+
+
 These files are served at /vad/ and loaded at runtime by @ricky0123/vad-web.
 
 ## Files and origins
