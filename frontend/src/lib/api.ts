@@ -252,6 +252,53 @@ export interface TerminalOutput {
   timestamp: string
 }
 
+// --- v3 Team / Memory / Context types ---
+
+export interface AgentProfile {
+  name: string
+  role: string
+  lean: string
+  model: 'opus' | 'sonnet'
+  tier: 'chief' | 'opus' | 'sonnet'
+  memory_path: string
+  last_active: string | null
+  invocations_total: number
+  description: string
+}
+
+export interface MemoryEntry {
+  filename: string
+  title: string
+  type: 'user' | 'feedback' | 'project' | 'reference'
+  description: string
+  content: string
+  updated_at: string
+}
+
+export interface ProjectMemory {
+  project: string
+  status: 'active' | 'done'
+  entries: MemoryEntry[]
+}
+
+export interface AgentMemory {
+  name: string
+  content: string
+  updated_at: string | null
+}
+
+export interface AuditEntry {
+  timestamp: string
+  action: 'removed' | 'updated' | 'promoted' | 'demoted' | 'created'
+  target: string
+  reason: string
+}
+
+export interface ProjectContextState {
+  current: string
+  available: string[]
+}
+
 // --- API methods ---
 
 export const api = {
@@ -287,6 +334,40 @@ export const api = {
       }))
     },
     get: (id: string) => request<Project>(`/projects/${id}`),
+  },
+  team: {
+    list: () => request<{ agents: AgentProfile[] }>('/team'),
+    getMemory: (name: string) =>
+      request<{ name: string; content: string; updated_at: string }>(`/team/${encodeURIComponent(name)}/memory`),
+    updateMemory: (name: string, content: string) =>
+      request<{ name: string; content: string; updated_at: string }>(`/team/${encodeURIComponent(name)}/memory`, {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+  },
+  memory: {
+    getAll: () =>
+      request<{
+        global: MemoryEntry[]
+        per_project: ProjectMemory[]
+        per_agent: AgentMemory[]
+        audit_log: AuditEntry[]
+      }>('/memory'),
+    get: (filename: string) =>
+      request<MemoryEntry>(`/memory/${encodeURIComponent(filename)}`),
+    update: (filename: string, content: string) =>
+      request<MemoryEntry>(`/memory/${encodeURIComponent(filename)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+  },
+  context: {
+    get: () => request<ProjectContextState>('/context'),
+    set: (project: string) =>
+      request<{ current: string }>('/context', {
+        method: 'POST',
+        body: JSON.stringify({ project }),
+      }),
   },
   voice: {
     send: (audio: Blob) => {
