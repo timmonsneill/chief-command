@@ -1,13 +1,14 @@
 import { type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Mic, Bot, TerminalSquare, FolderKanban } from 'lucide-react'
+import { Mic, Bot, TerminalSquare, FolderKanban, BarChart2 } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 const tabs = [
   { path: '/voice', label: 'Voice', icon: Mic },
   { path: '/agents', label: 'Agents', icon: Bot },
-  { path: '/terminal', label: 'Terminal', icon: TerminalSquare },
   { path: '/projects', label: 'Projects', icon: FolderKanban },
+  { path: '/sessions', label: 'Sessions', icon: BarChart2 },
+  { path: '/terminal', label: 'Terminal', icon: TerminalSquare },
 ] as const
 
 export default function Layout({ children }: { children: ReactNode }) {

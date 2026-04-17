@@ -1,58 +1,47 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Bot, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
-import { api, type Agent, type ReviewSweep, type ReviewFinding } from '../lib/api'
+import { Bot, RefreshCw, Zap } from 'lucide-react'
+import { api, type Agent } from '../lib/api'
 
-const STATUS_COLORS: Record<Agent['status'], string> = {
-  working: 'bg-status-working',
-  complete: 'bg-status-online',
-  idle: 'bg-white/20',
+const STATUS_CONFIG: Record<string, { dot: string; text: string; label: string }> = {
+  running: { dot: 'bg-status-working animate-pulse', text: 'text-status-working', label: 'Running' },
+  completed: { dot: 'bg-status-online', text: 'text-status-online', label: 'Done' },
+  failed: { dot: 'bg-status-offline', text: 'text-status-offline', label: 'Failed' },
 }
 
-const STATUS_TEXT_COLORS: Record<Agent['status'], string> = {
-  working: 'text-status-working',
-  complete: 'text-status-online',
-  idle: 'text-white/40',
-}
-
-const SEVERITY_COLORS: Record<ReviewFinding['severity'], string> = {
-  CRITICAL: 'bg-red-500/10 border-red-500/30 text-red-400',
-  HIGH: 'bg-orange-500/10 border-orange-500/30 text-orange-400',
-  MEDIUM: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400',
-  LOW: 'bg-white/5 border-white/10 text-white/50',
-}
-
-const SEVERITY_DOT: Record<ReviewFinding['severity'], string> = {
-  CRITICAL: 'bg-red-500',
-  HIGH: 'bg-orange-500',
-  MEDIUM: 'bg-yellow-500',
-  LOW: 'bg-white/30',
-}
-
-function formatDuration(seconds: number | null): string {
-  if (!seconds) return '--'
+function formatElapsed(seconds: number | null): string {
+  if (seconds === null || seconds === undefined) return ''
   if (seconds < 60) return `${Math.round(seconds)}s`
   const m = Math.floor(seconds / 60)
   const s = Math.round(seconds % 60)
   return `${m}m ${s}s`
 }
 
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return ''
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 2) return 'Just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
+function agentDisplayName(agent: Agent): string {
+  if (agent.name && agent.name !== agent.id) return agent.name
+  return agent.subagent_type || 'Agent'
+}
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([])
-  const [reviews, setReviews] = useState<ReviewSweep[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [expandedSeverity, setExpandedSeverity] = useState<string | null>(null)
 
-  const fetchData = useCallback(async () => {
-    setLoading(true)
+  const fetchAgents = useCallback(async () => {
     setError('')
     try {
-      const [agentList, reviewList] = await Promise.all([
-        api.agents.list(),
-        api.agents.recentReviews(),
-      ])
-      setAgents(agentList)
-      setReviews(reviewList)
+      const data = await api.agents.list()
+      setAgents(data)
     } catch {
       setError('Failed to load agents')
     } finally {
@@ -61,23 +50,12 @@ export default function AgentsPage() {
   }, [])
 
   useEffect(() => {
-    fetchData()
-    const interval = setInterval(fetchData, 5000)
+    fetchAgents()
+    const interval = setInterval(fetchAgents, 3000)
     return () => clearInterval(interval)
-  }, [fetchData])
+  }, [fetchAgents])
 
-  const activeCount = agents.filter((a) => a.status === 'working').length
-
-  // Group latest review findings by severity
-  const latestReview = reviews[0]
-  const findingsBySeverity = (latestReview?.findings || []).reduce(
-    (acc, f) => {
-      if (!acc[f.severity]) acc[f.severity] = []
-      acc[f.severity].push(f)
-      return acc
-    },
-    {} as Record<string, ReviewFinding[]>
-  )
+  const runningCount = agents.filter((a) => a.status === 'running').length
 
   if (loading && agents.length === 0) {
     return (
@@ -92,7 +70,7 @@ export default function AgentsPage() {
       <div className="h-full flex flex-col items-center justify-center gap-3">
         <p className="text-white/40 text-sm">{error}</p>
         <button
-          onClick={fetchData}
+          onClick={fetchAgents}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm active:text-white transition-colors"
         >
           <RefreshCw size={14} />
@@ -104,7 +82,6 @@ export default function AgentsPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      {/* Header */}
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -112,13 +89,14 @@ export default function AgentsPage() {
             <h1 className="text-lg font-semibold text-white">Agents</h1>
           </div>
           <div className="flex items-center gap-2">
-            {activeCount > 0 && (
-              <span className="px-2 py-0.5 rounded-full bg-status-working/10 text-status-working text-xs font-medium">
-                {activeCount} active
+            {runningCount > 0 && (
+              <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-status-working/10 text-status-working text-xs font-medium">
+                <Zap size={10} />
+                {runningCount} running
               </span>
             )}
             <button
-              onClick={fetchData}
+              onClick={fetchAgents}
               className="w-8 h-8 flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
             >
               <RefreshCw size={14} />
@@ -127,128 +105,64 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Agent list */}
       <div className="px-4 py-3 space-y-2">
-        {agents.map((agent) => (
-          <div
-            key={agent.id}
-            className="p-3 rounded-xl bg-surface-raised border border-surface-border"
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-2 h-2 rounded-full ${STATUS_COLORS[agent.status]} ${
-                      agent.status === 'working' ? 'animate-pulse' : ''
-                    }`}
-                  />
-                  <span className="text-sm font-medium text-white truncate">
-                    {agent.name}
-                  </span>
-                  <span className="text-xs text-white/30">{agent.model}</span>
+        {agents.map((agent) => {
+          const cfg = STATUS_CONFIG[agent.status] ?? STATUS_CONFIG.completed
+          const displayName = agentDisplayName(agent)
+          const elapsed = formatElapsed(agent.elapsed_seconds ?? null)
+          const lastActive = formatRelativeTime(agent.last_active ?? null)
+
+          return (
+            <div
+              key={agent.id}
+              className="p-3 rounded-xl bg-surface-raised border border-surface-border"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className={`w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} />
+                    <span className="text-sm font-medium text-white truncate">
+                      {displayName}
+                    </span>
+                    {agent.subagent_type && agent.subagent_type !== displayName && (
+                      <span className="text-[10px] text-white/30 shrink-0">
+                        {agent.subagent_type}
+                      </span>
+                    )}
+                  </div>
+                  {agent.summary && (
+                    <p className="text-xs text-white/40 mt-1 ml-4 leading-relaxed line-clamp-2">
+                      {agent.summary}
+                    </p>
+                  )}
+                  {agent.worktree_path && (
+                    <p className="text-[10px] text-white/20 mt-0.5 ml-4 truncate">
+                      {agent.worktree_path.replace(/.*\//, '')}
+                    </p>
+                  )}
                 </div>
-                <p className="text-xs text-white/40 mt-0.5 ml-4">
-                  {agent.role}
-                </p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <span className={`text-xs ${STATUS_TEXT_COLORS[agent.status]}`}>
-                  {agent.status}
-                </span>
-                <span className="text-[10px] text-white/20">
-                  {formatDuration(agent.duration_seconds)}
-                </span>
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <span className={`text-xs font-medium ${cfg.text}`}>
+                    {cfg.label}
+                  </span>
+                  {elapsed && (
+                    <span className="text-[10px] text-white/30">{elapsed}</span>
+                  )}
+                  {lastActive && (
+                    <span className="text-[10px] text-white/20">{lastActive}</span>
+                  )}
+                </div>
               </div>
             </div>
-            {agent.task && agent.status === 'working' && (
-              <p className="text-xs text-white/50 mt-2 ml-4 leading-relaxed">
-                {agent.task}
-              </p>
-            )}
-          </div>
-        ))}
+          )
+        })}
 
-        {agents.length === 0 && (
-          <div className="text-center py-8 text-white/30 text-sm">
-            No agents configured
+        {agents.length === 0 && !loading && (
+          <div className="text-center py-12 text-white/30 text-sm">
+            No agent activity found
           </div>
         )}
       </div>
-
-      {/* Recent Reviews */}
-      {latestReview && (
-        <div className="px-4 pb-4">
-          <h2 className="text-sm font-medium text-white/60 mb-2">
-            Recent Reviews
-          </h2>
-          <div className="space-y-2">
-            {(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const).map(
-              (severity) => {
-                const findings = findingsBySeverity[severity]
-                if (!findings?.length) return null
-                const isExpanded = expandedSeverity === severity
-
-                return (
-                  <div
-                    key={severity}
-                    className={`rounded-xl border ${SEVERITY_COLORS[severity]}`}
-                  >
-                    <button
-                      onClick={() =>
-                        setExpandedSeverity(isExpanded ? null : severity)
-                      }
-                      className="w-full flex items-center justify-between px-3 py-2.5 min-h-[44px]"
-                    >
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`w-2 h-2 rounded-full ${SEVERITY_DOT[severity]}`}
-                        />
-                        <span className="text-sm font-medium">
-                          {severity}
-                        </span>
-                        <span className="text-xs opacity-60">
-                          ({findings.length})
-                        </span>
-                      </div>
-                      {isExpanded ? (
-                        <ChevronDown size={14} />
-                      ) : (
-                        <ChevronRight size={14} />
-                      )}
-                    </button>
-
-                    {isExpanded && (
-                      <div className="px-3 pb-3 space-y-2">
-                        {findings.map((f, i) => (
-                          <div
-                            key={i}
-                            className="text-xs leading-relaxed opacity-80"
-                          >
-                            <span className="font-medium">[{f.agent}]</span>{' '}
-                            {f.message}
-                            {f.file && (
-                              <span className="text-white/30 ml-1">
-                                {f.file}
-                                {f.line ? `:${f.line}` : ''}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              }
-            )}
-
-            {Object.keys(findingsBySeverity).length === 0 && (
-              <div className="text-xs text-white/30 text-center py-3">
-                No findings
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

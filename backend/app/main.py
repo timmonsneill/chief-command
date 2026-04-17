@@ -16,7 +16,8 @@ from app.websockets import router as ws_router
 from config.settings import settings
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.claude_pipe import claude_pipe
-from services.project_parser import get_project, list_projects, parse_memory_index
+from services.project_parser import get_project, get_projects, list_projects, parse_memory_index
+from services.agent_tracker import get_agents as tracker_get_agents
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -114,8 +115,8 @@ async def get_status(subject: str = Depends(require_auth)) -> StatusResponse:
 
 
 @app.get("/api/agents")
-async def get_agents(subject: str = Depends(require_auth)) -> list[dict[str, str]]:
-    return claude_pipe.get_agents()
+async def get_agents_endpoint(subject: str = Depends(require_auth)) -> list[dict]:
+    return tracker_get_agents()
 
 
 @app.get("/api/agents/reviews")
@@ -133,16 +134,15 @@ async def get_agent_reviews(subject: str = Depends(require_auth)) -> list[dict]:
 async def api_list_projects(
     subject: str = Depends(require_auth),
 ) -> dict[str, object]:
-    projects = list_projects()
-    index = parse_memory_index()
-    return {"projects": projects, "memory_index": index}
+    projects = get_projects()
+    return {"projects": projects}
 
 
-@app.get("/api/projects/{slug}")
+@app.get("/api/projects/{project_id}")
 async def api_get_project(
-    slug: str, subject: str = Depends(require_auth)
+    project_id: str, subject: str = Depends(require_auth)
 ) -> dict[str, object]:
-    data = get_project(slug)
+    data = get_project(project_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return data

@@ -6,6 +6,7 @@ import AgentsPage from './pages/AgentsPage'
 import TerminalPage from './pages/TerminalPage'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectDashboard from './pages/ProjectDashboard'
+import SessionsPage from './pages/SessionsPage'
 import LoginPage from './pages/LoginPage'
 import SharePage from './pages/SharePage'
 import { AuthProvider, useAuth } from './hooks/useAuth'
@@ -33,6 +34,7 @@ function ProtectedRoutes() {
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/projects/:slug" element={<ProjectDashboard />} />
+        <Route path="/sessions" element={<SessionsPage />} />
         <Route path="*" element={<Navigate to="/voice" replace />} />
       </Routes>
     </Layout>

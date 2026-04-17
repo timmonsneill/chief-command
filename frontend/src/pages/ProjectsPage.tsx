@@ -3,18 +3,22 @@ import { useNavigate } from 'react-router-dom'
 import { FolderKanban, RefreshCw, ChevronRight } from 'lucide-react'
 import { api, type Project } from '../lib/api'
 
-const TYPE_BADGES: Record<string, string> = {
-  web: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-  mobile: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
-  api: 'bg-green-500/10 text-green-400 border-green-500/20',
-  infra: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
-  default: 'bg-white/5 text-white/40 border-white/10',
+const STATUS_CONFIG: Record<string, { dot: string; label: string }> = {
+  active: { dot: 'bg-status-online', label: 'Active' },
+  paused: { dot: 'bg-status-working', label: 'Paused' },
+  done: { dot: 'bg-white/30', label: 'Done' },
 }
 
-const STATUS_DOT: Record<string, string> = {
-  active: 'bg-status-online',
-  paused: 'bg-status-working',
-  archived: 'bg-white/20',
+function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return 'No activity'
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 2) return 'Just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
 }
 
 export default function ProjectsPage() {
@@ -65,35 +69,27 @@ export default function ProjectsPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      {/* Header */}
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
         <div className="flex items-center gap-2">
           <FolderKanban size={18} className="text-chief" />
           <h1 className="text-lg font-semibold text-white">Projects</h1>
           <span className="text-xs text-white/30 ml-auto">
-            {projects.length} total
+            {projects.length} project{projects.length !== 1 ? 's' : ''}
           </span>
+          <button
+            onClick={fetchProjects}
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+          </button>
         </div>
       </div>
 
-      {/* Project cards */}
       <div className="px-4 py-3 space-y-2">
         {projects.map((project) => {
-          const badgeClass =
-            TYPE_BADGES[project.type] || TYPE_BADGES.default
-          const dotClass = STATUS_DOT[project.status] || 'bg-white/20'
-
-          // Calculate overall progress from backend todo counts
-          const totalTasks = project.todo_total ?? project.phases.reduce(
-            (sum, p) => sum + p.total,
-            0
-          )
-          const completedTasks = project.todo_done ?? project.phases.reduce(
-            (sum, p) => sum + p.completed,
-            0
-          )
-          const progressPct = project.todo_percent ??
-            (totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0)
+          const cfg = STATUS_CONFIG[project.status] ?? STATUS_CONFIG.active
+          const pct = project.todo_percent ?? 0
+          const openTodos = (project.todo_total ?? 0) - (project.todo_done ?? 0)
 
           return (
             <button
@@ -104,41 +100,49 @@ export default function ProjectsPage() {
               <div className="flex items-start justify-between mb-2">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
-                    <div className={`w-2 h-2 rounded-full ${dotClass}`} />
+                    <div className={`w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} />
                     <h3 className="text-sm font-medium text-white truncate">
                       {project.name}
                     </h3>
+                    <span className="text-[10px] text-white/30 shrink-0">
+                      {cfg.label}
+                    </span>
                   </div>
-                  <p className="text-xs text-white/40 line-clamp-2 ml-4">
-                    {project.description}
-                  </p>
+                  {project.description && (
+                    <p className="text-xs text-white/40 line-clamp-2 ml-4">
+                      {project.description}
+                    </p>
+                  )}
                 </div>
-                <ChevronRight size={16} className="text-white/20 shrink-0 mt-0.5" />
+                <ChevronRight size={16} className="text-white/20 shrink-0 mt-0.5 ml-2" />
               </div>
 
-              <div className="flex items-center gap-2 mt-3">
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${badgeClass}`}
-                >
-                  {project.type}
-                </span>
-                <div className="flex-1 h-1.5 bg-surface-border rounded-full overflow-hidden ml-2">
+              <div className="flex items-center gap-3 mt-3 ml-4">
+                <div className="flex-1 h-1.5 bg-surface-border rounded-full overflow-hidden">
                   <div
                     className="h-full bg-chief rounded-full transition-all"
-                    style={{ width: `${progressPct}%` }}
+                    style={{ width: `${pct}%` }}
                   />
                 </div>
-                <span className="text-[10px] text-white/30 shrink-0">
-                  {progressPct}%
+                <span className="text-[10px] text-white/30 shrink-0 w-8 text-right">
+                  {pct}%
+                </span>
+                {openTodos > 0 && (
+                  <span className="text-[10px] text-white/30 shrink-0">
+                    {openTodos} open
+                  </span>
+                )}
+                <span className="text-[10px] text-white/20 shrink-0">
+                  {formatRelativeTime(project.last_activity)}
                 </span>
               </div>
             </button>
           )
         })}
 
-        {projects.length === 0 && (
+        {projects.length === 0 && !loading && (
           <div className="text-center py-12 text-white/30 text-sm">
-            No projects yet
+            No projects configured
           </div>
         )}
       </div>

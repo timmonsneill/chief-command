@@ -1,8 +1,10 @@
-"""Parse Claude Code project memory files into structured JSON."""
+"""Parse real project definitions from PROJECTS.json + memory files."""
 
+import json
 import logging
 import re
-from dataclasses import dataclass, field
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,238 +12,231 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class TodoItem:
-    text: str
-    done: bool
-
-
-@dataclass
-class Phase:
-    name: str
-    description: str = ""
-    complete: bool = False
-    items: list[TodoItem] = field(default_factory=list)
-
-
-@dataclass
-class Milestone:
-    date: str
-    label: str
-
-
-@dataclass
-class ProjectInfo:
-    slug: str
-    name: str
-    description: str
-    file_path: str
-    category: str = "project"  # project, feedback, memory
-    status: str = "active"
-    phases: list[Phase] = field(default_factory=list)
-    todos: list[TodoItem] = field(default_factory=list)
-    milestones: list[Milestone] = field(default_factory=list)
-    raw_content: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        total_todos = len(self.todos)
-        done_todos = sum(1 for t in self.todos if t.done)
-        return {
-            "slug": self.slug,
-            "name": self.name,
-            "description": self.description,
-            "file_path": self.file_path,
-            "category": self.category,
-            "status": self.status,
-            "phases": [
-                {
-                    "name": p.name,
-                    "description": p.description,
-                    "complete": p.complete,
-                    "items": [{"text": i.text, "done": i.done} for i in p.items],
-                }
-                for p in self.phases
-            ],
-            "todos": [{"text": t.text, "done": t.done} for t in self.todos],
-            "todo_progress": {
-                "total": total_todos,
-                "done": done_todos,
-                "percent": round(done_todos / total_todos * 100) if total_todos else 0,
-            },
-            "milestones": [{"date": m.date, "label": m.label} for m in self.milestones],
-        }
-
-
-# ---------------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------------
-
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(.+)$", re.MULTILINE)
 _PHASE_HEADER_RE = re.compile(
-    r"^#{1,3}\s+(?:Phase\s+\d+[:\s]*|Step\s+\d+[:\s]*)(.+?)(?:\s*[✅✓])?$",
+    r"^#{1,4}\s+(?:Phase\s+\d+[:\s]*|Step\s+\d+[:\s]*)(.+?)(?:\s*[✅✓])?$",
     re.MULTILINE,
 )
-_DATE_RE = re.compile(
-    r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})\s*[-:—]\s*(.+)"
-)
-_MEMORY_ENTRY_RE = re.compile(
-    r"^\s*-\s*\[(.+?)\]\((.+?)\)\s*—\s*(.+)$", re.MULTILINE
-)
+_DATE_RE = re.compile(r"(\d{4}[-/]\d{1,2}[-/]\d{1,2})\s*[-:—]\s*(.+)")
+_H2_SECTION_RE = re.compile(r"^#{1,3}\s+(.+)$", re.MULTILINE)
 
 
-def _parse_checkboxes(text: str) -> list[TodoItem]:
-    """Extract all markdown checkbox items."""
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _parse_checkboxes(text: str) -> list[dict[str, Any]]:
     return [
-        TodoItem(text=m.group(2).strip(), done=m.group(1).lower() == "x")
+        {"text": m.group(2).strip(), "done": m.group(1).lower() == "x"}
         for m in _CHECKBOX_RE.finditer(text)
     ]
 
 
-def _parse_phases(text: str) -> list[Phase]:
-    """Extract phase headers and their child checkboxes."""
-    phases: list[Phase] = []
+def _parse_phases(text: str) -> list[dict[str, Any]]:
+    phases: list[dict[str, Any]] = []
     headers = list(_PHASE_HEADER_RE.finditer(text))
     for idx, hdr in enumerate(headers):
         start = hdr.end()
         end = headers[idx + 1].start() if idx + 1 < len(headers) else len(text)
         section = text[start:end]
         items = _parse_checkboxes(section)
-        all_done = bool(items) and all(i.done for i in items)
-        complete = all_done or "✅" in hdr.group(0) or "✓" in hdr.group(0)
-        phases.append(
-            Phase(
-                name=hdr.group(1).strip(),
-                complete=complete,
-                items=items,
-            )
-        )
+        done_count = sum(1 for i in items if i["done"])
+        total = len(items)
+        complete = bool(items) and done_count == total
+        complete = complete or "✅" in hdr.group(0) or "✓" in hdr.group(0)
+        phases.append({
+            "name": hdr.group(1).strip(),
+            "complete": complete,
+            "items": items,
+            "total": total,
+            "completed": done_count,
+            "percent": round(done_count / total * 100) if total else (100 if complete else 0),
+        })
     return phases
 
 
-def _parse_milestones(text: str) -> list[Milestone]:
-    """Extract date-prefixed lines as milestones."""
+def _parse_milestones(text: str) -> list[dict[str, str]]:
     return [
-        Milestone(date=m.group(1), label=m.group(2).strip())
+        {"date": m.group(1), "label": m.group(2).strip()}
         for m in _DATE_RE.finditer(text)
     ]
 
 
-def _slug_from_filename(filename: str) -> str:
-    return filename.removesuffix(".md")
-
-
-def _name_from_slug(slug: str) -> str:
-    """Convert a slug like project_master_todo to 'Master Todo'."""
-    parts = slug.split("_")
-    # Drop category prefix
-    if parts and parts[0] in ("project", "feedback"):
-        parts = parts[1:]
-    return " ".join(p.capitalize() for p in parts)
-
-
-def _detect_category(filename: str) -> str:
-    if filename.startswith("project_"):
-        return "project"
-    if filename.startswith("feedback_"):
-        return "feedback"
-    if filename == "MEMORY.md":
-        return "memory"
-    return "other"
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def parse_memory_index() -> list[dict[str, str]]:
-    """Parse MEMORY.md and return the list of linked project entries."""
-    memory_file = settings.memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        logger.warning("MEMORY.md not found at %s", memory_file)
-        return []
-
-    text = memory_file.read_text(encoding="utf-8")
-    entries: list[dict[str, str]] = []
-    for m in _MEMORY_ENTRY_RE.finditer(text):
-        entries.append(
-            {
-                "name": m.group(1).strip(),
-                "file": m.group(2).strip(),
-                "description": m.group(3).strip(),
-            }
-        )
-    return entries
-
-
-def list_projects() -> list[dict[str, Any]]:
-    """Return lightweight summaries for every memory file."""
-    mem_dir = settings.memory_dir
-    if not mem_dir.exists():
-        logger.warning("Memory dir does not exist: %s", mem_dir)
-        return []
-
-    projects: list[dict[str, Any]] = []
-    for md_file in sorted(mem_dir.glob("*.md")):
-        if md_file.name == "MEMORY.md":
-            continue
-        slug = _slug_from_filename(md_file.name)
-        text = md_file.read_text(encoding="utf-8", errors="replace")
-        todos = _parse_checkboxes(text)
-        total = len(todos)
-        done = sum(1 for t in todos if t.done)
-        projects.append(
-            {
-                "slug": slug,
-                "name": _name_from_slug(slug),
-                "category": _detect_category(md_file.name),
-                "file": md_file.name,
-                "todo_total": total,
-                "todo_done": done,
-                "todo_percent": round(done / total * 100) if total else 0,
-            }
-        )
-    return projects
-
-
-def get_project(slug: str) -> dict[str, Any] | None:
-    """Parse a single project file into a full dashboard payload."""
-    mem_dir = settings.memory_dir
-    # Try with .md extension
-    candidates = [
-        mem_dir / f"{slug}.md",
-        mem_dir / f"project_{slug}.md",
-        mem_dir / f"feedback_{slug}.md",
-    ]
-    md_file: Path | None = None
-    for c in candidates:
-        if c.exists():
-            md_file = c
-            break
-
-    if md_file is None:
-        return None
-
-    text = md_file.read_text(encoding="utf-8", errors="replace")
-
-    info = ProjectInfo(
-        slug=slug,
-        name=_name_from_slug(slug),
-        description=_extract_description(text),
-        file_path=str(md_file),
-        category=_detect_category(md_file.name),
-        todos=_parse_checkboxes(text),
-        phases=_parse_phases(text),
-        milestones=_parse_milestones(text),
-        raw_content=text,
-    )
-    return info.to_dict()
-
-
 def _extract_description(text: str) -> str:
-    """Pull the first non-heading, non-blank line as a description."""
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("#") and not stripped.startswith("-"):
+        if stripped and not stripped.startswith("#") and not stripped.startswith("-") and not stripped.startswith("---"):
             return stripped[:200]
     return ""
+
+
+def _git_log(repo_path: str, n: int = 10) -> list[dict[str, str]]:
+    p = Path(repo_path)
+    if not p.exists():
+        return []
+    try:
+        out = subprocess.check_output(
+            ["git", "log", f"-{n}", "--pretty=format:%H|%ai|%s", "--no-merges"],
+            cwd=str(p),
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="replace")
+        commits = []
+        for line in out.strip().splitlines():
+            parts = line.split("|", 2)
+            if len(parts) == 3:
+                commits.append({"hash": parts[0][:8], "date": parts[1].strip(), "message": parts[2].strip()})
+        return commits
+    except Exception:
+        return []
+
+
+def _load_projects_json() -> list[dict[str, Any]]:
+    projects_file = settings.memory_dir / "PROJECTS.json"
+    if not projects_file.exists():
+        default: list[dict[str, Any]] = [
+            {
+                "id": "arch",
+                "name": "Arch to Freedom EMR",
+                "path": str(Path.home() / "Desktop" / "arch-to-freedom-emr"),
+                "repo_url": str(Path.home() / "Desktop" / "arch-to-freedom-emr"),
+                "memory_files": ["project_archie_voice_app.md", "project_archie_cost_model.md"],
+                "status": "active",
+                "description": "Recovery house EMR — clinical notes, medications, billing, tasks, AI assistant for staff.",
+            },
+            {
+                "id": "chief-command",
+                "name": "Chief Command Center",
+                "path": str(Path.home() / "Desktop" / "chief-command"),
+                "repo_url": str(Path.home() / "Desktop" / "chief-command"),
+                "memory_files": ["project_voice_claude_bridge.md"],
+                "status": "active",
+                "description": "Owner-only AI command center — voice interface to Claude, agent orchestration, usage tracking.",
+            },
+        ]
+        try:
+            projects_file.write_text(json.dumps(default, indent=2), encoding="utf-8")
+            logger.info("Created default PROJECTS.json at %s", projects_file)
+        except OSError as exc:
+            logger.warning("Could not write PROJECTS.json: %s", exc)
+        return default
+
+    try:
+        return json.loads(projects_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("Failed to parse PROJECTS.json: %s", exc)
+        return []
+
+
+def _build_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    mem_dir = settings.memory_dir
+    memory_files: list[str] = entry.get("memory_files", [])
+
+    combined_text = ""
+    last_modified: float = 0.0
+    for fname in memory_files:
+        fp = mem_dir / fname
+        if fp.exists():
+            combined_text += _read_text(fp) + "\n"
+            mtime = fp.stat().st_mtime
+            if mtime > last_modified:
+                last_modified = mtime
+
+    todos = _parse_checkboxes(combined_text)
+    total_todos = len(todos)
+    done_todos = sum(1 for t in todos if t["done"])
+
+    last_activity = (
+        datetime.fromtimestamp(last_modified).isoformat()
+        if last_modified
+        else None
+    )
+
+    return {
+        "id": entry["id"],
+        "name": entry["name"],
+        "status": entry.get("status", "active"),
+        "description": entry.get("description", ""),
+        "todo_total": total_todos,
+        "todo_done": done_todos,
+        "todo_percent": round(done_todos / total_todos * 100) if total_todos else 0,
+        "last_activity": last_activity,
+    }
+
+
+def get_projects() -> list[dict[str, Any]]:
+    """Return lightweight project summaries from PROJECTS.json."""
+    entries = _load_projects_json()
+    return [_build_summary(e) for e in entries]
+
+
+def get_project(project_id: str) -> dict[str, Any] | None:
+    """Return full dashboard payload for a single project."""
+    entries = _load_projects_json()
+    entry = next((e for e in entries if e["id"] == project_id), None)
+    if entry is None:
+        return None
+
+    mem_dir = settings.memory_dir
+    memory_files: list[str] = entry.get("memory_files", [])
+
+    combined_text = ""
+    last_modified: float = 0.0
+    for fname in memory_files:
+        fp = mem_dir / fname
+        if fp.exists():
+            combined_text += _read_text(fp) + "\n"
+            mtime = fp.stat().st_mtime
+            if mtime > last_modified:
+                last_modified = mtime
+
+    todos = _parse_checkboxes(combined_text)
+    phases = _parse_phases(combined_text)
+    milestones = _parse_milestones(combined_text)
+
+    total_todos = len(todos)
+    done_todos = sum(1 for t in todos if t["done"])
+
+    repo_path = entry.get("repo_url") or entry.get("path") or ""
+    recent_activity = _git_log(repo_path, n=10)
+
+    if not recent_activity and last_modified:
+        recent_activity = [{
+            "hash": "",
+            "date": datetime.fromtimestamp(last_modified).isoformat(),
+            "message": "Memory file updated",
+        }]
+
+    description = entry.get("description", "") or _extract_description(combined_text)
+
+    return {
+        "id": entry["id"],
+        "name": entry["name"],
+        "status": entry.get("status", "active"),
+        "description": description,
+        "phases": phases,
+        "todos": todos,
+        "todo_progress": {
+            "total": total_todos,
+            "done": done_todos,
+            "percent": round(done_todos / total_todos * 100) if total_todos else 0,
+        },
+        "milestones": milestones,
+        "recent_activity": recent_activity,
+        "builds": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Legacy aliases kept for any import that still uses the old names
+# ---------------------------------------------------------------------------
+
+def list_projects() -> list[dict[str, Any]]:
+    return get_projects()
+
+
+def parse_memory_index() -> list[dict[str, str]]:
+    return []

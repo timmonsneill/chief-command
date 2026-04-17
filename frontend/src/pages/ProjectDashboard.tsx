@@ -3,19 +3,45 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
   Share2,
-  Check,
   RefreshCw,
-  Clock,
-  AlertTriangle,
+  GitCommit,
+  Calendar,
+  CheckSquare,
+  Square,
+  Activity,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, type Project } from '../lib/api'
 
-const SEVERITY_COLORS: Record<string, string> = {
-  CRITICAL: 'text-red-400',
-  HIGH: 'text-orange-400',
-  MEDIUM: 'text-yellow-400',
-  LOW: 'text-white/40',
+const STATUS_CONFIG: Record<string, { bg: string; text: string; label: string }> = {
+  active: { bg: 'bg-status-online/10', text: 'text-status-online', label: 'Active' },
+  paused: { bg: 'bg-status-working/10', text: 'text-status-working', label: 'Paused' },
+  done: { bg: 'bg-white/5', text: 'text-white/40', label: 'Done' },
+}
+
+function formatDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function formatDateTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
 }
 
 export default function ProjectDashboard() {
@@ -46,11 +72,11 @@ export default function ProjectDashboard() {
   function handleShare() {
     const url = `${window.location.origin}/share/${slug}`
     navigator.clipboard.writeText(url).then(() => {
-      toast.success('Share link copied to clipboard')
+      toast.success('Share link copied')
     })
   }
 
-  if (loading) {
+  if (loading && !project) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-white/30 text-sm">Loading project...</div>
@@ -73,20 +99,31 @@ export default function ProjectDashboard() {
     )
   }
 
-  // Backend todos don't have category — group under a single bucket
-  // Support both {id, category, text, done} and {text, done} shapes
-  const todosByCategory: Record<string, { id: string; category: string; text: string; done: boolean }[]> = {}
-  for (const [i, todo] of (project.todos || []).entries()) {
-    const t = todo as unknown as Record<string, unknown>
-    const cat = (t.category as string) || 'Tasks'
-    const id = (t.id as string) || `todo-${i}`
-    if (!todosByCategory[cat]) todosByCategory[cat] = []
-    todosByCategory[cat].push({ id, category: cat, text: todo.text, done: todo.done })
+  const statusCfg = STATUS_CONFIG[project.status] ?? STATUS_CONFIG.active
+
+  const todos = (project.todos || []) as { text: string; done: boolean }[]
+  const openTodos = todos.filter((t) => !t.done)
+  const doneTodos = todos.filter((t) => t.done)
+
+  const phases = (project.phases || []) as unknown as {
+    name: string
+    complete: boolean
+    percent: number
+    total: number
+    completed: number
+  }[]
+
+  const recentActivity = project.recent_activity || []
+  const milestones = project.milestones || []
+  const builds = project.builds || []
+  const progress = project.todo_progress ?? {
+    total: todos.length,
+    done: doneTodos.length,
+    percent: todos.length > 0 ? Math.round((doneTodos.length / todos.length) * 100) : 0,
   }
 
   return (
     <div className="h-full overflow-y-auto">
-      {/* Header */}
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
         <div className="flex items-center gap-3">
           <button
@@ -96,12 +133,7 @@ export default function ProjectDashboard() {
             <ArrowLeft size={18} />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-base font-semibold text-white truncate">
-              {project.name}
-            </h1>
-            <p className="text-xs text-white/40 truncate">
-              {project.description}
-            </p>
+            <h1 className="text-base font-semibold text-white truncate">{project.name}</h1>
           </div>
           <button
             onClick={handleShare}
@@ -112,189 +144,201 @@ export default function ProjectDashboard() {
         </div>
       </div>
 
-      <div className="px-4 py-4 space-y-6">
+      <div className="px-4 py-4 space-y-5">
+        {/* Header card */}
+        <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-semibold text-white">{project.name}</h2>
+              {project.description && (
+                <p className="text-sm text-white/50 mt-1 leading-relaxed">{project.description}</p>
+              )}
+            </div>
+            <span
+              className={`shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${statusCfg.bg} ${statusCfg.text}`}
+            >
+              {statusCfg.label}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-2 bg-surface-border rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  progress.percent === 100 ? 'bg-status-online' : 'bg-chief'
+                }`}
+                style={{ width: `${progress.percent}%` }}
+              />
+            </div>
+            <span className="text-xs text-white/40 shrink-0">
+              {progress.done}/{progress.total} ({progress.percent}%)
+            </span>
+          </div>
+        </div>
+
         {/* Phases */}
-        <section>
-          <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
-            Phases
-          </h2>
-          <div className="space-y-3">
-            {(project.phases || []).map((phase) => {
-              // Support both backend shapes: {name, complete, items[]} and {name, total, completed}
-              const p = phase as unknown as Record<string, unknown>
-              const items = (p.items as { done: boolean }[]) || []
-              const total = (p.total as number) ?? items.length
-              const completed = (p.completed as number) ?? items.filter((i) => i.done).length
-              const pct =
-                total > 0
-                  ? Math.round((completed / total) * 100)
-                  : (p.complete ? 100 : 0)
-              return (
-                <div key={phase.name}>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm text-white/80">{phase.name}</span>
+        {phases.length > 0 && (
+          <section>
+            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+              Phases
+            </h2>
+            <div className="space-y-3">
+              {phases.map((phase) => (
+                <div key={phase.name} className="p-3 rounded-xl bg-surface-raised border border-surface-border">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          phase.complete ? 'bg-status-online' : 'bg-chief'
+                        }`}
+                      />
+                      <span className="text-sm text-white/80">{phase.name}</span>
+                    </div>
                     <span className="text-xs text-white/40">
-                      {completed}/{total} ({pct}%)
+                      {phase.completed}/{phase.total} · {phase.percent}%
                     </span>
                   </div>
-                  <div className="h-2 bg-surface-border rounded-full overflow-hidden">
+                  <div className="h-1.5 bg-surface-border rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all ${
-                        pct === 100 ? 'bg-status-online' : 'bg-chief'
+                        phase.complete ? 'bg-status-online' : 'bg-chief'
                       }`}
-                      style={{ width: `${pct}%` }}
+                      style={{ width: `${phase.percent}%` }}
                     />
                   </div>
                 </div>
-              )
-            })}
-          </div>
-        </section>
+              ))}
+            </div>
+          </section>
+        )}
 
-        {/* Todos */}
-        <section>
-          <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
-            Todos
-          </h2>
-          <div className="space-y-4">
-            {Object.entries(todosByCategory).map(([category, todos]) => (
-              <div key={category}>
-                <h3 className="text-xs font-medium text-white/40 mb-2">
-                  {category}
-                </h3>
-                <div className="space-y-1">
-                  {todos.map((todo) => (
-                    <div
-                      key={todo.id}
-                      className="flex items-start gap-2.5 py-1.5"
-                    >
-                      <div
-                        className={`w-4 h-4 rounded border shrink-0 mt-0.5 flex items-center justify-center ${
-                          todo.done
-                            ? 'bg-chief border-chief'
-                            : 'border-surface-border'
-                        }`}
-                      >
-                        {todo.done && (
-                          <Check size={10} className="text-white" />
-                        )}
-                      </div>
-                      <span
-                        className={`text-sm leading-relaxed ${
-                          todo.done
-                            ? 'text-white/30 line-through'
-                            : 'text-white/70'
-                        }`}
-                      >
-                        {todo.text}
-                      </span>
-                    </div>
+        {/* Todos — two column open/done */}
+        {todos.length > 0 && (
+          <section>
+            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+              Todos
+            </h2>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-3 rounded-xl bg-surface-raised border border-surface-border">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Square size={12} className="text-white/40" />
+                  <span className="text-xs font-medium text-white/50">Open ({openTodos.length})</span>
+                </div>
+                <div className="space-y-1.5">
+                  {openTodos.slice(0, 15).map((todo, i) => (
+                    <p key={i} className="text-xs text-white/70 leading-snug">
+                      {todo.text}
+                    </p>
                   ))}
+                  {openTodos.length === 0 && (
+                    <p className="text-xs text-white/25 italic">All done</p>
+                  )}
+                  {openTodos.length > 15 && (
+                    <p className="text-xs text-white/30">+{openTodos.length - 15} more</p>
+                  )}
                 </div>
               </div>
-            ))}
-            {project.todos.length === 0 && (
-              <p className="text-xs text-white/30">No todos</p>
-            )}
-          </div>
-        </section>
+              <div className="p-3 rounded-xl bg-surface-raised border border-surface-border">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <CheckSquare size={12} className="text-status-online" />
+                  <span className="text-xs font-medium text-white/50">Done ({doneTodos.length})</span>
+                </div>
+                <div className="space-y-1.5">
+                  {doneTodos.slice(0, 15).map((todo, i) => (
+                    <p key={i} className="text-xs text-white/30 line-through leading-snug">
+                      {todo.text}
+                    </p>
+                  ))}
+                  {doneTodos.length === 0 && (
+                    <p className="text-xs text-white/25 italic">Nothing done yet</p>
+                  )}
+                  {doneTodos.length > 15 && (
+                    <p className="text-xs text-white/30">+{doneTodos.length - 15} more</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
-        {/* Timeline */}
+        {/* Recent Activity */}
         <section>
-          <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
-            Timeline
+          <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+            <Activity size={11} />
+            Recent Activity
           </h2>
-          <div className="space-y-3">
-            {project.timeline.slice(0, 10).map((entry) => (
-              <div key={entry.id} className="flex items-start gap-3">
-                <div className="mt-1">
-                  <Clock size={12} className="text-white/20" />
+          {recentActivity.length > 0 ? (
+            <div className="space-y-2">
+              {recentActivity.map((commit, i) => (
+                <div key={i} className="flex items-start gap-3 py-1.5">
+                  <GitCommit size={12} className="text-white/20 mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-white/70 leading-snug truncate">{commit.message}</p>
+                    <p className="text-[10px] text-white/30 mt-0.5">
+                      {commit.hash && <span className="font-mono mr-1">{commit.hash}</span>}
+                      {formatDateTime(commit.date)}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-sm text-white/70">{entry.description}</p>
-                  <p className="text-[10px] text-white/30 mt-0.5">
-                    {new Date(entry.date).toLocaleDateString(undefined, {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </p>
-                </div>
-              </div>
-            ))}
-            {project.timeline.length === 0 && (
-              <p className="text-xs text-white/30">No activity yet</p>
-            )}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-white/30">No activity yet</p>
+          )}
         </section>
 
         {/* Build History */}
-        <section>
-          <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
-            Build History
-          </h2>
-          <div className="space-y-2">
-            {project.builds.slice(0, 5).map((build) => {
-              const total =
-                build.findings_count.CRITICAL +
-                build.findings_count.HIGH +
-                build.findings_count.MEDIUM +
-                build.findings_count.LOW
-
-              return (
-                <div
-                  key={build.id}
-                  className="p-3 rounded-xl bg-surface-raised border border-surface-border"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs text-white/40">
-                      {new Date(build.timestamp).toLocaleDateString(undefined, {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
-                    {total > 0 && (
-                      <div className="flex items-center gap-1">
-                        <AlertTriangle size={10} className="text-status-working" />
-                        <span className="text-xs text-white/40">
-                          {total} findings
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    {(
-                      ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const
-                    ).map((s) => {
-                      const count =
-                        build.findings_count[s]
-                      if (!count) return null
-                      return (
-                        <span
-                          key={s}
-                          className={`text-xs font-medium ${SEVERITY_COLORS[s]}`}
-                        >
-                          {count} {s.toLowerCase()}
-                        </span>
-                      )
-                    })}
-                    {total === 0 && (
-                      <span className="text-xs text-status-online">
-                        Clean build
+        {builds.length > 0 && (
+          <section>
+            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+              Build History
+            </h2>
+            <div className="space-y-2">
+              {builds.slice(0, 5).map((build) => {
+                const b = build as unknown as Record<string, unknown>
+                const fc = (b.findings_count as Record<string, number>) ?? {}
+                const total = Object.values(fc).reduce((s, v) => s + v, 0)
+                return (
+                  <div
+                    key={b.id as string}
+                    className="p-3 rounded-xl bg-surface-raised border border-surface-border"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-white/40">
+                        {formatDateTime(b.timestamp as string)}
                       </span>
-                    )}
+                      {total === 0 ? (
+                        <span className="text-xs text-status-online">Clean</span>
+                      ) : (
+                        <span className="text-xs text-white/40">{total} findings</span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Timeline / Milestones */}
+        {milestones.length > 0 && (
+          <section>
+            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+              <Calendar size={11} />
+              Timeline
+            </h2>
+            <div className="space-y-3">
+              {milestones.map((m, i) => (
+                <div key={i} className="flex items-start gap-3">
+                  <div className="mt-1 w-1.5 h-1.5 rounded-full bg-chief/50 shrink-0" />
+                  <div>
+                    <p className="text-sm text-white/70 leading-snug">{m.label}</p>
+                    <p className="text-[10px] text-white/30 mt-0.5">{formatDate(m.date)}</p>
                   </div>
                 </div>
-              )
-            })}
-            {project.builds.length === 0 && (
-              <p className="text-xs text-white/30">No builds yet</p>
-            )}
-          </div>
-        </section>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   )

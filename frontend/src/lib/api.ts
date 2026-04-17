@@ -57,12 +57,54 @@ export interface AuthResponse {
 export interface Agent {
   id: string
   name: string
-  role: string
+  status: 'running' | 'completed' | 'failed' | 'working'
+  // New fields from agent_tracker
+  subagent_type?: string
+  started_at?: string | null
+  completed_at?: string | null
+  elapsed_seconds?: number | null
+  summary?: string
+  worktree_path?: string
+  last_active?: string | null
+  // Legacy fields used by VoicePage agent_status events
+  role?: string
+  model?: string
+  task?: string
+  duration_seconds?: number | null
+}
+
+export interface Session {
+  id: string
+  started_at: string
+  ended_at: string | null
+  total_cost_cents: number
+  turn_count: number
+  duration_s: number | null
+}
+
+export interface Turn {
+  id: number
+  session_id: string
+  created_at: string
   model: string
-  status: 'idle' | 'working' | 'complete'
-  task: string
-  started_at: string | null
-  duration_seconds: number | null
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  cost_cents: number
+  user_text: string
+  assistant_text: string
+}
+
+export interface SessionDetail extends Session {
+  turns: Turn[]
+}
+
+export interface UsageSummary {
+  today_cents: number
+  week_cents: number
+  month_cents: number
+  alert_level: 'none' | 'warning' | 'critical'
 }
 
 export interface ReviewFinding {
@@ -89,12 +131,13 @@ export interface Project {
   todos: Todo[]
   timeline: TimelineEntry[]
   builds: Build[]
-  // Fields from backend list endpoint
-  category?: string
-  file?: string
   todo_total?: number
   todo_done?: number
   todo_percent?: number
+  last_activity?: string | null
+  recent_activity?: { hash: string; date: string; message: string }[]
+  milestones?: { date: string; label: string }[]
+  todo_progress?: { total: number; done: number; percent: number }
 }
 
 export interface Phase {
@@ -226,26 +269,24 @@ export const api = {
   },
   projects: {
     list: async (): Promise<Project[]> => {
-      const res = await request<{ projects: Record<string, unknown>[]; memory_index: unknown[] }>('/projects')
-      // Map backend shape to frontend Project interface
+      const res = await request<{ projects: Record<string, unknown>[] }>('/projects')
       return (res.projects || []).map((p) => ({
-        slug: (p.slug as string) || '',
+        slug: ((p.id as string) || (p.slug as string) || ''),
         name: (p.name as string) || '',
         description: (p.description as string) || '',
-        type: (p.category as string) || 'project',
-        status: 'active',
+        type: 'project',
+        status: (p.status as string) || 'active',
         phases: [],
         todos: [],
         timeline: [],
         builds: [],
-        category: (p.category as string) || '',
-        file: (p.file as string) || '',
         todo_total: (p.todo_total as number) || 0,
         todo_done: (p.todo_done as number) || 0,
         todo_percent: (p.todo_percent as number) || 0,
+        last_activity: (p.last_activity as string) || null,
       }))
     },
-    get: (slug: string) => request<Project>(`/projects/${slug}`),
+    get: (id: string) => request<Project>(`/projects/${id}`),
   },
   voice: {
     send: (audio: Blob) => {
@@ -277,10 +318,10 @@ export const api = {
 }
 
 export const sessionsApi = {
+  list: () => request<Session[]>('/sessions'),
+  get: (id: string) => request<SessionDetail>(`/sessions/${id}`),
   getCurrent: () => request<SessionUsage | null>('/sessions/current'),
-  list: () => request<SessionUsage[]>('/sessions'),
-  get: (id: string) => request<SessionUsage>(`/sessions/${id}`),
-  getUsageSummary: () => request<{ total_cents: number; sessions: SessionUsage[] }>('/sessions/usage-summary'),
+  usageSummary: () => request<UsageSummary>('/usage/summary'),
 }
 
 export { ApiError }
