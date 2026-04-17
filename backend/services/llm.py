@@ -76,7 +76,8 @@ async def stream_turn(
 
     extra_kwargs: dict = {}
     if model == "claude-opus-4-7":
-        extra_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2000}
+        extra_kwargs["thinking"] = {"type": "adaptive"}
+        extra_kwargs["output_config"] = {"effort": "high"}
         max_tokens = max(max_tokens, 3072)
 
     async with client.messages.stream(
