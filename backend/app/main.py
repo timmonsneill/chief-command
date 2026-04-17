@@ -1,7 +1,6 @@
 """Chief Command Center — FastAPI application entry point."""
 
 import logging
-import shutil
 import uuid
 from pathlib import Path
 
@@ -14,25 +13,25 @@ from pydantic import BaseModel
 
 from app.websockets import router as ws_router
 from config.settings import settings
+from db import init_db
 from services.auth import create_token, require_auth, verify_password, hash_password
-from services.claude_pipe import claude_pipe
 from services.project_parser import get_project, list_projects, parse_memory_index
+from services.usage_tracker import (
+    get_rolling_totals,
+    get_session_totals,
+    get_session_with_turns,
+    list_sessions,
+)
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Chief Command Center",
-    version="0.1.0",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url=None,
 )
@@ -45,11 +44,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount WebSocket routes
 app.include_router(ws_router)
 
-# Precomputed password hash for the owner password
 _OWNER_HASH: str = hash_password(settings.OWNER_PASSWORD)
+
+MONTHLY_WARNING_CENTS = 20_000
+MONTHLY_CRITICAL_CENTS = 30_000
 
 
 # ---------------------------------------------------------------------------
@@ -65,29 +65,19 @@ class LoginResponse(BaseModel):
     expires_days: int
 
 
-class StatusResponse(BaseModel):
-    claude_reachable: bool
-    claude_path: str
-    projects_dir: str
-    tunnel_url: str | None
-
-
 class UploadResponse(BaseModel):
     path: str
     filename: str
 
 
 # ---------------------------------------------------------------------------
-# Auth endpoints
+# Auth
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(body: LoginRequest) -> LoginResponse:
     if not verify_password(body.password, _OWNER_HASH):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid password",
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
     token = create_token(subject="owner")
     logger.info("Owner logged in")
     return LoginResponse(token=token, expires_days=settings.JWT_EXPIRE_DAYS)
@@ -102,26 +92,22 @@ async def verify_auth(subject: str = Depends(require_auth)) -> dict[str, str]:
 # Status / agents
 # ---------------------------------------------------------------------------
 
-@app.get("/api/status", response_model=StatusResponse)
-async def get_status(subject: str = Depends(require_auth)) -> StatusResponse:
-    reachable = await claude_pipe.is_reachable()
-    return StatusResponse(
-        claude_reachable=reachable,
-        claude_path=settings.CLAUDE_CODE_PATH,
-        projects_dir=settings.PROJECTS_DIR,
-        tunnel_url=settings.TUNNEL_URL,
-    )
+@app.get("/api/status")
+async def get_status(subject: str = Depends(require_auth)) -> dict:
+    return {
+        "api": "anthropic",
+        "projects_dir": settings.PROJECTS_DIR,
+        "tunnel_url": settings.TUNNEL_URL,
+    }
 
 
 @app.get("/api/agents")
-async def get_agents(subject: str = Depends(require_auth)) -> list[dict[str, str]]:
-    return claude_pipe.get_agents()
+async def get_agents(subject: str = Depends(require_auth)) -> list[dict]:
+    return []
 
 
 @app.get("/api/agents/reviews")
 async def get_agent_reviews(subject: str = Depends(require_auth)) -> list[dict]:
-    """Return recent review sweeps. Currently returns empty list since reviews
-    are only populated during active build cycles."""
     return []
 
 
@@ -130,18 +116,14 @@ async def get_agent_reviews(subject: str = Depends(require_auth)) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/projects")
-async def api_list_projects(
-    subject: str = Depends(require_auth),
-) -> dict[str, object]:
+async def api_list_projects(subject: str = Depends(require_auth)) -> dict[str, object]:
     projects = list_projects()
     index = parse_memory_index()
     return {"projects": projects, "memory_index": index}
 
 
 @app.get("/api/projects/{slug}")
-async def api_get_project(
-    slug: str, subject: str = Depends(require_auth)
-) -> dict[str, object]:
+async def api_get_project(slug: str, subject: str = Depends(require_auth)) -> dict[str, object]:
     data = get_project(slug)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -150,7 +132,6 @@ async def api_get_project(
 
 @app.get("/api/share/{slug}")
 async def api_share_project(slug: str) -> dict[str, object]:
-    """Public endpoint for shared project dashboards — no auth required."""
     data = get_project(slug)
     if data is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -162,10 +143,7 @@ async def api_share_project(slug: str) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload_file(
-    file: UploadFile,
-    subject: str = Depends(require_auth),
-) -> UploadResponse:
+async def upload_file(file: UploadFile, subject: str = Depends(require_auth)) -> UploadResponse:
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -177,8 +155,52 @@ async def upload_file(
         while chunk := await file.read(1024 * 64):
             await f.write(chunk)
 
-    logger.info("File uploaded: %s -> %s", file.filename, dest)
+    logger.info("File uploaded to %s", dest)
     return UploadResponse(path=str(dest), filename=file.filename)
+
+
+# ---------------------------------------------------------------------------
+# Sessions & usage (v2)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sessions")
+async def api_list_sessions(subject: str = Depends(require_auth)) -> list[dict]:
+    return await list_sessions(limit=50)
+
+
+@app.get("/api/sessions/current")
+async def api_current_session(subject: str = Depends(require_auth)) -> dict:
+    sessions = await list_sessions(limit=1)
+    if not sessions:
+        return {}
+    session = sessions[0]
+    if session.get("ended_at"):
+        return {}
+    totals = await get_session_totals(session["id"])
+    return {**session, **totals}
+
+
+@app.get("/api/sessions/{session_id}")
+async def api_get_session(session_id: str, subject: str = Depends(require_auth)) -> dict:
+    data = await get_session_with_turns(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return data
+
+
+@app.get("/api/usage/summary")
+async def api_usage_summary(subject: str = Depends(require_auth)) -> dict:
+    totals = await get_rolling_totals()
+    month_cents = totals["month_cents"]
+
+    if month_cents >= MONTHLY_CRITICAL_CENTS:
+        alert_level = "critical"
+    elif month_cents >= MONTHLY_WARNING_CENTS:
+        alert_level = "warning"
+    else:
+        alert_level = "none"
+
+    return {**totals, "alert_level": alert_level}
 
 
 # ---------------------------------------------------------------------------
@@ -188,25 +210,19 @@ async def upload_file(
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 if FRONTEND_DIR.exists():
-    # Serve static assets (JS, CSS, images)
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="static-assets")
 
-    # Serve other static files from dist root (manifest, icons, sw.js)
     @app.get("/manifest.json")
     async def manifest():
         return FileResponse(FRONTEND_DIR / "manifest.json")
 
-    # SPA catch-all — must be LAST route
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
-        # Don't catch API or WebSocket routes
         if full_path.startswith(("api/", "ws/", "docs", "openapi.json")):
             raise HTTPException(status_code=404)
-        # Try to serve the exact file first (e.g., favicon.ico)
         file_path = FRONTEND_DIR / full_path
         if file_path.is_file():
             return FileResponse(file_path)
-        # Otherwise serve index.html for SPA routing
         return FileResponse(FRONTEND_DIR / "index.html")
 
 
@@ -216,14 +232,12 @@ if FRONTEND_DIR.exists():
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    logger.info("Chief Command Center starting on %s:%s", settings.HOST, settings.PORT)
-    logger.info("Claude Code path: %s", settings.CLAUDE_CODE_PATH)
-    logger.info("Projects dir: %s", settings.PROJECTS_DIR)
+    await init_db()
+    logger.info("Chief Command Center v2 starting on %s:%s", settings.HOST, settings.PORT)
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    await claude_pipe.stop()
     logger.info("Chief Command Center stopped")
 
 
@@ -234,9 +248,4 @@ async def on_shutdown() -> None:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "app.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=True,
-    )
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)
