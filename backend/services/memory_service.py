@@ -1,0 +1,251 @@
+"""Memory service — global, per-project, per-agent, and audit-log memory I/O.
+
+File locations
+--------------
+Global memory : ~/.claude/projects/-Users-user/memory/*.md
+                (excluding MEMORY.md and PROJECTS.json)
+Per-agent memory: ~/.claude/agents/memory/<name>.md
+Audit log     : ~/.claude/projects/-Users-user/memory/audit_log.md
+                (return empty list if missing; never crash)
+"""
+
+import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_GLOBAL_MEMORY_DIR = Path.home() / ".claude" / "projects" / "-Users-user" / "memory"
+_AGENT_MEMORY_DIR = Path.home() / ".claude" / "agents" / "memory"
+_AUDIT_LOG_PATH = _GLOBAL_MEMORY_DIR / "audit_log.md"
+
+# Files to exclude from the global memory listing
+_GLOBAL_EXCLUDE = {"MEMORY.md", "PROJECTS.json", "audit_log.md"}
+
+# Named agents — must match team_service.ROSTER names
+_AGENT_NAMES = [
+    "Chief", "Atlas", "Forge", "Riggs", "Finn", "Nova",
+    "Vera", "Hawke", "Sable", "Pax", "Quill", "Hip",
+]
+
+# Keywords used to classify a filename into type
+_TYPE_RULES: list[tuple[str, str]] = [
+    ("feedback_", "feedback"),
+    ("project_", "project"),
+    ("user_", "user"),
+]
+
+# Project classification: filename keywords -> project label.
+# More-specific keywords MUST come before more-general ones because
+# _classify_project returns on the first match (substring search).
+_PROJECT_KEYWORDS: dict[str, str] = {
+    "archie_cost": "Archie",
+    "archie_voice": "Archie",
+    "archie": "Archie",
+    "arch": "Arch",
+    "voice_claude": "Chief Command",
+    "chief_command": "Chief Command",
+    "agent_framework": "Chief Command",
+    "agent_roster": "Chief Command",
+    "infrastructure": "Chief Command",
+    "api_transition": "Chief Command",
+    "butler_orchestration": "Butler",
+    "butler": "Butler",
+}
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _mtime_iso(path: Path) -> str:
+    """Return file mtime as ISO 8601 UTC string."""
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def _parse_frontmatter(content: str) -> dict[str, str]:
+    """Extract YAML-ish frontmatter fields from a markdown file.
+
+    Supports the simple ``key: value`` block between ``---`` delimiters.
+    Returns an empty dict if no frontmatter is present.
+    """
+    stripped = content.lstrip()
+    if not stripped.startswith("---"):
+        return {}
+    end = stripped.find("\n---", 3)
+    if end == -1:
+        return {}
+    block = stripped[3:end].strip()
+    fields: dict[str, str] = {}
+    for line in block.splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def _classify_type(filename: str) -> str:
+    for prefix, ttype in _TYPE_RULES:
+        if filename.startswith(prefix):
+            return ttype
+    return "reference"
+
+
+def _classify_project(filename: str) -> str | None:
+    """Return a project label for a filename, or None if it doesn't belong to one."""
+    stem = filename.lower().replace(".md", "")
+    for keyword, project in _PROJECT_KEYWORDS.items():
+        if keyword in stem:
+            return project
+    return None
+
+
+def _build_entry(path: Path) -> dict[str, Any]:
+    """Build a MemoryEntry dict from a file path."""
+    content = ""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not read memory file %s: %s", path.name, exc)
+
+    fm = _parse_frontmatter(content)
+    title = fm.get("name") or path.stem
+    description = fm.get("description", "")
+    ftype = fm.get("type") or _classify_type(path.name)
+
+    return {
+        "filename": path.name,
+        "title": title,
+        "type": ftype,
+        "description": description,
+        "content": content,
+        "updated_at": _mtime_iso(path),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Audit log parsing
+# ---------------------------------------------------------------------------
+
+_AUDIT_LINE_RE = re.compile(
+    r"\*\*(?P<ts>[^*]+)\*\*\s*[—\-]\s*(?P<action>\w+)\s*[—\-]\s*`?(?P<target>[^`\n]+?)`?\s*[—\-]\s*(?P<reason>.+)"
+)
+
+
+def _parse_audit_log(content: str) -> list[dict[str, str]]:
+    """Parse the audit_log.md into a list of AuditEntry dicts.
+
+    Expected line format (flexible):
+        **<timestamp>** — <action> — `<target>` — <reason>
+
+    Returns entries most-recent-first.
+    """
+    entries: list[dict[str, str]] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _AUDIT_LINE_RE.search(line)
+        if m:
+            entries.append(
+                {
+                    "timestamp": m.group("ts").strip(),
+                    "action": m.group("action").strip().lower(),
+                    "target": m.group("target").strip(),
+                    "reason": m.group("reason").strip(),
+                }
+            )
+    # Most-recent first — preserve file order (assumed newest at bottom)
+    entries.reverse()
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_all_memory() -> dict[str, Any]:
+    """Return the full memory payload: global, per_project, per_agent, audit_log."""
+
+    # --- Global entries -------------------------------------------------
+    global_entries: list[dict[str, Any]] = []
+    project_buckets: dict[str, list[dict[str, Any]]] = {}
+
+    if _GLOBAL_MEMORY_DIR.exists():
+        for path in sorted(_GLOBAL_MEMORY_DIR.glob("*.md")):
+            if path.name in _GLOBAL_EXCLUDE:
+                continue
+            entry = _build_entry(path)
+            project = _classify_project(path.name)
+            if project:
+                project_buckets.setdefault(project, []).append(entry)
+            else:
+                global_entries.append(entry)
+
+    # --- Per-project list -----------------------------------------------
+    per_project: list[dict[str, Any]] = []
+    for project_name, entries in sorted(project_buckets.items()):
+        per_project.append(
+            {
+                "project": project_name,
+                "status": "active",
+                "entries": entries,
+            }
+        )
+
+    # --- Per-agent memory -----------------------------------------------
+    per_agent: list[dict[str, Any]] = []
+    for name in _AGENT_NAMES:
+        path = _AGENT_MEMORY_DIR / f"{name.lower()}.md"
+        if path.exists():
+            try:
+                content = path.read_text(encoding="utf-8")
+                updated_at: str | None = _mtime_iso(path)
+            except OSError:
+                content, updated_at = "", None
+        else:
+            content, updated_at = "", None
+        per_agent.append({"name": name, "content": content, "updated_at": updated_at})
+
+    # --- Audit log ------------------------------------------------------
+    audit_entries: list[dict[str, str]] = []
+    if _AUDIT_LOG_PATH.exists():
+        try:
+            audit_content = _AUDIT_LOG_PATH.read_text(encoding="utf-8")
+            audit_entries = _parse_audit_log(audit_content)
+        except OSError as exc:
+            logger.warning("Could not read audit log: %s", exc)
+
+    return {
+        "global": global_entries,
+        "per_project": per_project,
+        "per_agent": per_agent,
+        "audit_log": audit_entries,
+    }
+
+
+def get_memory_file(filename: str) -> dict[str, Any]:
+    """Return a single MemoryEntry by filename.  Raises FileNotFoundError if missing."""
+    path = _GLOBAL_MEMORY_DIR / filename
+    if not path.exists() or path.name in _GLOBAL_EXCLUDE:
+        raise FileNotFoundError(f"Memory file not found: {filename!r}")
+    return _build_entry(path)
+
+
+def put_memory_file(filename: str, content: str) -> dict[str, Any]:
+    """Write content to a global memory file and return the updated MemoryEntry.
+
+    Raises ValueError if the filename is in the exclusion list.
+    """
+    if filename in _GLOBAL_EXCLUDE:
+        raise ValueError(f"Cannot write to protected file: {filename!r}")
+    path = _GLOBAL_MEMORY_DIR / filename
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        logger.error("Could not write memory file %s: %s", filename, exc)
+        raise
+    return _build_entry(path)
