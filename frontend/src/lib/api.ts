@@ -252,6 +252,70 @@ export interface TerminalOutput {
   timestamp: string
 }
 
+// --- Team types (spec: GET /api/team) ---
+
+export interface AgentProfile {
+  name: string
+  role: string
+  lean: string
+  model: 'opus' | 'sonnet'
+  tier: 'chief' | 'opus' | 'sonnet'
+  memory_path: string
+  last_active: string | null
+  invocations_total: number
+  description: string
+}
+
+export interface AgentMemoryResponse {
+  name: string
+  content: string
+  updated_at: string
+}
+
+// --- Memory types (spec: GET /api/memory) ---
+
+export interface MemoryEntry {
+  filename: string
+  title: string
+  type: 'user' | 'feedback' | 'project' | 'reference'
+  description: string
+  content: string
+  updated_at: string
+}
+
+export interface ProjectMemory {
+  project: string
+  status: 'active' | 'done'
+  entries: MemoryEntry[]
+}
+
+export interface AgentMemory {
+  name: string
+  content: string
+  updated_at: string | null
+}
+
+export interface AuditEntry {
+  timestamp: string
+  action: 'removed' | 'updated' | 'promoted' | 'demoted' | 'created'
+  target: string
+  reason: string
+}
+
+export interface MemoryListResponse {
+  global: MemoryEntry[]
+  per_project: ProjectMemory[]
+  per_agent: AgentMemory[]
+  audit_log: AuditEntry[]
+}
+
+// --- Project context types (spec: GET /api/context) ---
+
+export interface ProjectContext {
+  current: string
+  available: string[]
+}
+
 // --- API methods ---
 
 export const api = {
@@ -314,6 +378,33 @@ export const api = {
         body: formData,
       })
     },
+  },
+  // v3 endpoints — types defined above, implementations owned by Finn / coordinated with Nova
+  team: {
+    list: () => request<{ agents: AgentProfile[] }>('/team'),
+    getMemory: (name: string) => request<AgentMemoryResponse>(`/team/${name}/memory`),
+    putMemory: (name: string, content: string) =>
+      request<AgentMemoryResponse>(`/team/${name}/memory`, {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+  },
+  memory: {
+    list: () => request<MemoryListResponse>('/memory'),
+    get: (filename: string) => request<MemoryEntry>(`/memory/${filename}`),
+    put: (filename: string, content: string) =>
+      request<MemoryEntry>(`/memory/${filename}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      }),
+  },
+  context: {
+    get: () => request<ProjectContext>('/context'),
+    set: (project: string) =>
+      request<{ current: string }>('/context', {
+        method: 'POST',
+        body: JSON.stringify({ project }),
+      }),
   },
 }
 
