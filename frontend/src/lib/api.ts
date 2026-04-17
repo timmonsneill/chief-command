@@ -135,6 +135,74 @@ export interface VoiceMessage {
   timestamp: string
 }
 
+export type ActiveModel = 'claude-haiku-4-5' | 'claude-sonnet-4-6'
+
+export interface WsTranscriptEvent {
+  type: 'transcript'
+  content: string
+  final: boolean
+}
+
+export interface WsActiveModelEvent {
+  type: 'active_model'
+  model: ActiveModel
+}
+
+export interface WsTokenEvent {
+  type: 'token'
+  text: string
+}
+
+export interface WsMessageDoneEvent {
+  type: 'message_done'
+}
+
+export interface WsTtsStartEvent {
+  type: 'tts_start'
+}
+
+export interface WsTtsEndEvent {
+  type: 'tts_end'
+}
+
+export interface WsUsageEvent {
+  type: 'usage'
+  session_id: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  turn_cost_cents: number
+  session_total_cents: number
+}
+
+export interface WsAgentStatusEvent {
+  type: 'agent_status'
+  agents: Record<string, string>[]
+}
+
+export type WsEvent =
+  | WsTranscriptEvent
+  | WsActiveModelEvent
+  | WsTokenEvent
+  | WsMessageDoneEvent
+  | WsTtsStartEvent
+  | WsTtsEndEvent
+  | WsUsageEvent
+  | WsAgentStatusEvent
+
+export interface SessionUsage {
+  session_id: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  turn_cost_cents: number
+  session_total_cents: number
+  turn_count: number
+  started_at: string
+}
+
 export interface TerminalOutput {
   type: 'command' | 'output' | 'error'
   content: string
@@ -206,6 +274,13 @@ export const api = {
       })
     },
   },
+}
+
+export const sessionsApi = {
+  getCurrent: () => request<SessionUsage | null>('/sessions/current'),
+  list: () => request<SessionUsage[]>('/sessions'),
+  get: (id: string) => request<SessionUsage>(`/sessions/${id}`),
+  getUsageSummary: () => request<{ total_cents: number; sessions: SessionUsage[] }>('/sessions/usage-summary'),
 }
 
 export { ApiError }
