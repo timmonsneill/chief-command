@@ -1,11 +1,26 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Bot, RefreshCw, Zap } from 'lucide-react'
+import { Bot, RefreshCw, Zap, ArrowLeft, ChevronRight } from 'lucide-react'
 import { api, type Agent } from '../lib/api'
 
-const STATUS_CONFIG: Record<string, { dot: string; text: string; label: string }> = {
-  running: { dot: 'bg-status-working animate-pulse', text: 'text-status-working', label: 'Running' },
-  completed: { dot: 'bg-status-online', text: 'text-status-online', label: 'Done' },
-  failed: { dot: 'bg-status-offline', text: 'text-status-offline', label: 'Failed' },
+const STATUS_CONFIG: Record<string, { dot: string; text: string; label: string; pill: string }> = {
+  running: {
+    dot: 'bg-status-working animate-pulse',
+    text: 'text-status-working',
+    label: 'Running',
+    pill: 'bg-status-working/10 text-status-working',
+  },
+  completed: {
+    dot: 'bg-status-online',
+    text: 'text-status-online',
+    label: 'Done',
+    pill: 'bg-status-online/10 text-status-online',
+  },
+  failed: {
+    dot: 'bg-status-offline',
+    text: 'text-status-offline',
+    label: 'Failed',
+    pill: 'bg-status-offline/10 text-status-offline',
+  },
 }
 
 function formatElapsed(seconds: number | null): string {
@@ -27,21 +42,191 @@ function formatRelativeTime(iso: string | null): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+function formatAbsoluteTime(iso: string | null): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 function agentDisplayName(agent: Agent): string {
   if (agent.name && agent.name !== agent.id) return agent.name
   return agent.subagent_type || 'Agent'
 }
 
+// ─── Detail View ─────────────────────────────────────────────────────────────
+
+function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
+  const cfg = STATUS_CONFIG[agent.status] ?? STATUS_CONFIG.completed
+  const displayName = agentDisplayName(agent)
+  const elapsed = formatElapsed(agent.elapsed_seconds ?? null)
+
+  const [showStartedAbsolute, setShowStartedAbsolute] = useState(false)
+  const [showCompletedAbsolute, setShowCompletedAbsolute] = useState(false)
+
+  const hasContent = Boolean(agent.task || agent.summary)
+
+  return (
+    <div className="h-full overflow-y-auto">
+      {/* Header */}
+      <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onBack}
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-white/40 active:text-white/80 transition-colors shrink-0"
+            aria-label="Back to agent list"
+          >
+            <ArrowLeft size={18} />
+          </button>
+          <div className="flex-1 min-w-0">
+            <h1 className="font-display text-xl font-semibold text-white leading-tight truncate">
+              {displayName}
+            </h1>
+            {agent.subagent_type && agent.subagent_type !== displayName && (
+              <p className="text-xs text-white/40 truncate">{agent.subagent_type}</p>
+            )}
+          </div>
+          <span className={`shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.pill}`}>
+            {cfg.label}
+          </span>
+        </div>
+      </div>
+
+      <div className="px-4 py-4 space-y-4">
+        {/* Meta strip */}
+        <div className="p-3 rounded-xl bg-surface-raised border border-surface-border space-y-2.5">
+          {agent.model && (
+            <MetaRow label="Model">
+              <span className="px-2 py-0.5 rounded bg-surface-overlay text-white/70 text-xs font-mono">
+                {agent.model}
+              </span>
+            </MetaRow>
+          )}
+
+          {agent.started_at && (
+            <MetaRow label="Started">
+              <button
+                onClick={() => setShowStartedAbsolute((v) => !v)}
+                className="text-xs text-white/60 hover:text-white/80 transition-colors"
+              >
+                {showStartedAbsolute
+                  ? formatAbsoluteTime(agent.started_at)
+                  : formatRelativeTime(agent.started_at)}
+              </button>
+            </MetaRow>
+          )}
+
+          {agent.completed_at && (
+            <MetaRow label="Completed">
+              <button
+                onClick={() => setShowCompletedAbsolute((v) => !v)}
+                className="text-xs text-white/60 hover:text-white/80 transition-colors"
+              >
+                {showCompletedAbsolute
+                  ? formatAbsoluteTime(agent.completed_at)
+                  : formatRelativeTime(agent.completed_at)}
+              </button>
+            </MetaRow>
+          )}
+
+          {elapsed && (
+            <MetaRow label="Elapsed">
+              <span className="text-xs text-white/60">{elapsed}</span>
+            </MetaRow>
+          )}
+
+          {agent.worktree_path && (
+            <MetaRow label="Worktree">
+              <span className="text-[11px] font-mono text-white/50 break-all">
+                {agent.worktree_path}
+              </span>
+            </MetaRow>
+          )}
+        </div>
+
+        {/* Task section */}
+        {agent.task && (
+          <section>
+            <h2 className="text-[11px] font-medium text-white/30 uppercase tracking-wider mb-2 px-1">
+              Task
+            </h2>
+            <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
+              <p className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+                {agent.task}
+              </p>
+            </div>
+          </section>
+        )}
+
+        {/* Summary section */}
+        {agent.summary && (
+          <section>
+            <h2 className="text-[11px] font-medium text-white/30 uppercase tracking-wider mb-2 px-1">
+              Summary
+            </h2>
+            <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
+              <p className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+                {agent.summary}
+              </p>
+            </div>
+          </section>
+        )}
+
+        {!hasContent && (
+          <p className="text-center text-white/20 text-sm py-4">No task or summary recorded</p>
+        )}
+
+        {/* Raw JSON expander */}
+        <details className="group">
+          <summary className="flex items-center gap-2 cursor-pointer list-none px-3 py-2.5 rounded-xl bg-surface-raised border border-surface-border text-xs text-white/30 hover:text-white/50 transition-colors select-none">
+            <ChevronRight
+              size={13}
+              className="transition-transform duration-200 group-open:rotate-90"
+            />
+            View raw
+          </summary>
+          <div className="mt-2 p-4 rounded-xl bg-surface-raised border border-surface-border overflow-x-auto">
+            <pre className="text-[11px] font-mono text-white/40 leading-relaxed whitespace-pre">
+              {JSON.stringify(agent, null, 2)}
+            </pre>
+          </div>
+        </details>
+      </div>
+    </div>
+  )
+}
+
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="text-[11px] text-white/30 w-20 shrink-0 pt-0.5">{label}</span>
+      <div className="flex-1 min-w-0">{children}</div>
+    </div>
+  )
+}
+
+// ─── List View ────────────────────────────────────────────────────────────────
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [viewingAgent, setViewingAgent] = useState<Agent | null>(null)
 
   const fetchAgents = useCallback(async () => {
     setError('')
     try {
       const data = await api.agents.list()
       setAgents(data)
+      // Silently update detail view if the agent is refreshed
+      setViewingAgent((current) => {
+        if (!current) return null
+        const updated = data.find((a) => a.id === current.id)
+        return updated ?? current
+      })
     } catch {
       setError('Failed to load agents')
     } finally {
@@ -80,6 +265,17 @@ export default function AgentsPage() {
     )
   }
 
+  // Detail view
+  if (viewingAgent) {
+    return (
+      <AgentDetail
+        agent={viewingAgent}
+        onBack={() => setViewingAgent(null)}
+      />
+    )
+  }
+
+  // List view
   return (
     <div className="h-full overflow-y-auto">
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
@@ -113,9 +309,10 @@ export default function AgentsPage() {
           const lastActive = formatRelativeTime(agent.last_active ?? null)
 
           return (
-            <div
+            <button
               key={agent.id}
-              className="p-3 rounded-xl bg-surface-raised border border-surface-border"
+              onClick={() => setViewingAgent(agent)}
+              className="w-full text-left p-3 rounded-xl bg-surface-raised border border-surface-border cursor-pointer active:bg-surface-overlay transition-colors group"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1 min-w-0">
@@ -130,7 +327,12 @@ export default function AgentsPage() {
                       </span>
                     )}
                   </div>
-                  {agent.summary && (
+                  {agent.task && (
+                    <p className="text-xs text-white/40 mt-1 ml-4 leading-relaxed line-clamp-2">
+                      {agent.task}
+                    </p>
+                  )}
+                  {!agent.task && agent.summary && (
                     <p className="text-xs text-white/40 mt-1 ml-4 leading-relaxed line-clamp-2">
                       {agent.summary}
                     </p>
@@ -151,9 +353,13 @@ export default function AgentsPage() {
                   {lastActive && (
                     <span className="text-[10px] text-white/20">{lastActive}</span>
                   )}
+                  <ChevronRight
+                    size={13}
+                    className="text-white/20 group-hover:text-white/40 transition-colors mt-0.5"
+                  />
                 </div>
               </div>
-            </div>
+            </button>
           )
         })}
 
