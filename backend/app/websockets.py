@@ -87,23 +87,35 @@ async def voice_ws(ws: WebSocket) -> None:
 
             if "text" in message:
                 raw = message["text"]
+                logger.info("Voice WS TEXT inbound: %s", raw[:200])
                 try:
                     data = json.loads(raw)
-                    text_content = data.get("content", raw)
+                    msg_type = data.get("type")
+                    text_content = data.get("content", "")
                 except json.JSONDecodeError:
+                    msg_type = None
                     text_content = raw
 
+                if msg_type and msg_type != "text":
+                    logger.info("Voice WS ignoring non-text message type: %s", msg_type)
+                    continue
+
                 if not text_content or not text_content.strip():
+                    logger.info("Voice WS empty text — skipping")
                     continue
 
                 sid = await ensure_session()
+                logger.info("Voice WS handling text turn session=%s len=%d", sid, len(text_content))
                 await _handle_text_turn(ws, sid, history, text_content)
 
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
-                logger.info("Voice WS audio frame: %d bytes", len(audio_data))
+                logger.info("Voice WS AUDIO inbound: %d bytes", len(audio_data))
                 sid = await ensure_session()
                 await _handle_audio_turn(ws, sid, history, audio_data)
+
+            else:
+                logger.warning("Voice WS unknown message shape keys=%s", list(message.keys()))
 
     except WebSocketDisconnect:
         logger.info("Voice WS disconnected session=%s", session_id)

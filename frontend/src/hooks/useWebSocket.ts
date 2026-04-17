@@ -14,7 +14,7 @@ interface UseWebSocketOptions {
 }
 
 interface UseWebSocketReturn {
-  send: (data: string | ArrayBuffer | Blob) => void
+  send: (data: string | ArrayBuffer | Blob) => boolean
   lastMessage: string | null
   isConnected: boolean
   connectionState: ConnectionState
@@ -114,10 +114,13 @@ export function useWebSocket({
     setConnectionState('disconnected')
   }, [cleanup])
 
-  const send = useCallback((data: string | ArrayBuffer | Blob) => {
+  const send = useCallback((data: string | ArrayBuffer | Blob): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(data)
+      return true
     }
+    console.warn('[WS] send dropped — readyState=', wsRef.current?.readyState)
+    return false
   }, [])
 
   useEffect(() => {
