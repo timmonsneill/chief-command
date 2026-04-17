@@ -23,22 +23,6 @@ SYSTEM_PROMPT = {
     "cache_control": {"type": "ephemeral"},
 }
 
-ESCALATE_TOOL = {
-    "name": "escalate_to_sonnet",
-    "description": (
-        "Call this when the question requires nuanced reasoning, multi-step planning, "
-        "complex code generation, or any task where haiku-quality output is insufficient. "
-        "Provide a brief reason."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "reason": {"type": "string", "description": "Why Sonnet is needed."}
-        },
-        "required": ["reason"],
-    },
-}
-
 UsageRecord = dict
 
 
@@ -89,16 +73,18 @@ async def stream_turn(
     full_text: list[str] = []
     sentence_buf: list[str] = []
     stop_reason = "end_turn"
-    escalate_reason: Optional[str] = None
 
-    tools = [ESCALATE_TOOL] if model == "claude-haiku-4-5" else []
+    extra_kwargs: dict = {}
+    if model == "claude-opus-4-7":
+        extra_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2000}
+        max_tokens = max(max_tokens, 3072)
 
     async with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=[SYSTEM_PROMPT],
         messages=history,
-        tools=tools if tools else [],
+        **extra_kwargs,
     ) as stream:
         async for event in stream:
             event_type = getattr(event, "type", None)
@@ -132,11 +118,6 @@ async def stream_turn(
 
         final_msg = await stream.get_final_message()
 
-        if stop_reason == "tool_use":
-            for block in final_msg.content:
-                if getattr(block, "type", None) == "tool_use" and block.name == "escalate_to_sonnet":
-                    escalate_reason = block.input.get("reason", "escalation requested")
-
         remainder = "".join(sentence_buf).strip()
         if remainder:
             await send_tts_sentence(remainder)
@@ -150,7 +131,6 @@ async def stream_turn(
             "model": model,
             "stop_reason": stop_reason,
             "assistant_text": "".join(full_text),
-            "escalate_reason": escalate_reason,
         }
         usage_dict["cost_cents"] = _compute_cost_cents(model, usage_dict)
         return usage_dict

@@ -13,7 +13,7 @@ from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav
 from services.llm import stream_turn
-from services.router import classify_and_route, SONNET_MODEL
+from services.router import classify_and_route, random_thinking_phrase
 from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,8 @@ async def voice_ws(ws: WebSocket) -> None:
 
     Outbound frames:
       {"type": "transcript", "content": "..."}       — STT result
-      {"type": "active_model", "model": "..."}        — model selected for this turn
+      {"type": "active_model", "model": "...", "is_deep": bool} — routing decision
+      {"type": "bridge_phrase", "text": "..."}        — spoken while Opus thinks
       {"type": "token", "text": "..."}                — streaming token
       {"type": "tts_start"}                           — TTS about to begin
       binary                                          — WAV audio chunk
@@ -112,10 +113,15 @@ async def _run_llm_turn(
     user_text: str,
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record."""
-    model = classify_and_route(user_text)
-    await ws.send_json({"type": "active_model", "model": model})
+    model, is_deep = classify_and_route(user_text)
+    await ws.send_json({"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+    if is_deep:
+        bridge = random_thinking_phrase()
+        await ws.send_json({"type": "bridge_phrase", "text": bridge})
+        await tts_queue.put(bridge)
 
     async def send_token(text: str) -> None:
         await ws.send_json({"type": "token", "text": text})
@@ -149,19 +155,6 @@ async def _run_llm_turn(
             send_token=send_token,
             send_tts_sentence=send_tts_sentence,
         )
-
-        if usage.get("escalate_reason") and model != SONNET_MODEL:
-            logger.info("Escalating to Sonnet: %s", usage["escalate_reason"])
-            history.pop()
-            history.append({"role": "user", "content": user_text})
-            model = SONNET_MODEL
-            await ws.send_json({"type": "active_model", "model": model})
-            usage = await stream_turn(
-                history=history,
-                model=model,
-                send_token=send_token,
-                send_tts_sentence=send_tts_sentence,
-            )
 
         await tts_queue.put(None)
         await tts_task
