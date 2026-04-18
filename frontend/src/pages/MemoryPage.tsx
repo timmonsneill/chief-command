@@ -344,7 +344,7 @@ export default function MemoryPage() {
         {activeTab === 'per_project' && (
           <div className="space-y-4">
             {(data?.per_project ?? [])
-              .filter((pm) => currentProject === 'All' || pm.project === currentProject)
+              .filter((pm) => pm.project === currentProject)
               .map((pm) => {
               const filtered = filterEntries(pm.entries)
               if (q && filtered.length === 0) return null

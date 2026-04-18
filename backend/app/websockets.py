@@ -12,9 +12,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav
-from services.chief_context import build_chief_system, DEFAULT_SCOPE
+from services.chief_context import build_chief_system
 from services.llm import stream_turn
-from services.project_context import AVAILABLE_PROJECTS, detect_project_switch
+from services.project_context import AVAILABLE_PROJECTS, DEFAULT_PROJECT, detect_project_switch
 from services.router import classify_and_route, random_thinking_phrase
 from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
 
@@ -74,7 +74,7 @@ async def voice_ws(ws: WebSocket) -> None:
     session_id: Optional[str] = None
     history: list[dict] = []
     # Default scope: Chief Command. Per owner: scope is ALWAYS a concrete single project.
-    current_project: str = DEFAULT_SCOPE
+    current_project: str = DEFAULT_PROJECT
     current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
@@ -151,7 +151,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     if raw_proj in AVAILABLE_PROJECTS:
                         current_project = raw_proj
                     else:
-                        current_project = DEFAULT_SCOPE
+                        current_project = DEFAULT_PROJECT
                     logger.info("Voice WS context updated project=%s", current_project)
                     continue
 

@@ -30,7 +30,7 @@ WS_URL = BASE_URL.replace("http", "ws") + "/ws/voice"
 
 OWNER_PASSWORD = os.environ.get("CHIEF_OWNER_PASSWORD")
 if not OWNER_PASSWORD:
-    env_file = Path("/Users/user/Desktop/chief-command/backend/.env")
+    env_file = BACKEND_DIR / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("OWNER_PASSWORD="):

@@ -408,7 +408,7 @@ if FRONTEND_DIR.exists():
     _SPA_INDEX = _FRONTEND_ROOT / "index.html"
 
     @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str):
+    async def serve_spa(full_path: str):
         if full_path.startswith(("api/", "ws/", "docs", "openapi.json")):
             raise HTTPException(status_code=404)
         # Path traversal guard: resolve the requested path and confirm it stays
