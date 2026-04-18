@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import Layout from './components/Layout'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import VoicePage from './pages/VoicePage'
 import AgentsPage from './pages/AgentsPage'
 import TerminalPage from './pages/TerminalPage'
@@ -31,14 +32,14 @@ function ProtectedRoutes() {
   return (
     <Layout>
       <Routes>
-        <Route path="/voice" element={<VoicePage />} />
-        <Route path="/team" element={<TeamPage />} />
-        <Route path="/agents" element={<AgentsPage />} />
-        <Route path="/terminal" element={<TerminalPage />} />
-        <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/projects/:slug" element={<ProjectDashboard />} />
-        <Route path="/memory" element={<MemoryPage />} />
-        <Route path="/usage" element={<UsagePage />} />
+        <Route path="/voice" element={<ErrorBoundary label="Voice page"><VoicePage /></ErrorBoundary>} />
+        <Route path="/team" element={<ErrorBoundary label="Team page"><TeamPage /></ErrorBoundary>} />
+        <Route path="/agents" element={<ErrorBoundary label="Agents page"><AgentsPage /></ErrorBoundary>} />
+        <Route path="/terminal" element={<ErrorBoundary label="Terminal page"><TerminalPage /></ErrorBoundary>} />
+        <Route path="/projects" element={<ErrorBoundary label="Projects page"><ProjectsPage /></ErrorBoundary>} />
+        <Route path="/projects/:slug" element={<ErrorBoundary label="Project dashboard"><ProjectDashboard /></ErrorBoundary>} />
+        <Route path="/memory" element={<ErrorBoundary label="Memory page"><MemoryPage /></ErrorBoundary>} />
+        <Route path="/usage" element={<ErrorBoundary label="Usage page"><UsagePage /></ErrorBoundary>} />
         <Route path="/sessions" element={<Navigate to="/usage" replace />} />
         <Route path="*" element={<Navigate to="/voice" replace />} />
       </Routes>
