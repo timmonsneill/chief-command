@@ -30,14 +30,14 @@ def compute_cost_cents(model: str, input_tokens: int, output_tokens: int, cache_
     return round(cost_dollars * 100)
 
 
-async def create_session(session_id: str, user_id: str = "owner") -> None:
+async def create_session(session_id: str, user_id: str = "owner", project: str | None = None) -> None:
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO sessions (id, user_id, started_at, total_cost_cents, turn_count) VALUES (?, ?, ?, 0, 0)",
-            (session_id, user_id, _now_iso()),
+            "INSERT INTO sessions (id, user_id, started_at, total_cost_cents, turn_count, project) VALUES (?, ?, ?, 0, 0, ?)",
+            (session_id, user_id, _now_iso(), project),
         )
         await db.commit()
-    logger.info("Session created: %s", session_id)
+    logger.info("Session created: %s project=%s", session_id, project)
 
 
 async def close_session(session_id: str) -> None:
@@ -160,11 +160,17 @@ async def get_rolling_totals() -> dict:
     }
 
 
-async def list_sessions(limit: int = 50) -> list[dict]:
+async def list_sessions(limit: int = 50, project: str | None = None) -> list[dict]:
     async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?", (limit,)
-        )
+        if project and project != "All":
+            cursor = await db.execute(
+                "SELECT * FROM sessions WHERE project = ? ORDER BY started_at DESC LIMIT ?",
+                (project, limit),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?", (limit,)
+            )
         rows = await cursor.fetchall()
 
     now = datetime.now(timezone.utc)

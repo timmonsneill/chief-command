@@ -67,6 +67,7 @@ async def voice_ws(ws: WebSocket) -> None:
 
     session_id: Optional[str] = None
     history: list[dict] = []
+    current_project: Optional[str] = None
 
     async def ensure_session() -> str:
         """Lazy-create session on first real turn to avoid ghost rows from
@@ -74,8 +75,8 @@ async def voice_ws(ws: WebSocket) -> None:
         nonlocal session_id
         if session_id is None:
             session_id = str(uuid.uuid4())
-            await create_session(session_id)
-            logger.info("Voice WS session started session=%s", session_id)
+            await create_session(session_id, project=current_project)
+            logger.info("Voice WS session started session=%s project=%s", session_id, current_project)
         return session_id
 
     try:
@@ -96,6 +97,12 @@ async def voice_ws(ws: WebSocket) -> None:
                     msg_type = None
                     text_content = raw
 
+                if msg_type == "context":
+                    # Project context frame — update local scope, no LLM turn
+                    current_project = data.get("project") or None
+                    logger.info("Voice WS context updated project=%s", current_project)
+                    continue
+
                 if msg_type and msg_type != "text":
                     logger.info("Voice WS ignoring non-text message type: %s", msg_type)
                     continue
@@ -106,13 +113,13 @@ async def voice_ws(ws: WebSocket) -> None:
 
                 sid = await ensure_session()
                 logger.info("Voice WS handling text turn session=%s len=%d", sid, len(text_content))
-                await _handle_text_turn(ws, sid, history, text_content)
+                await _handle_text_turn(ws, sid, history, text_content, current_project)
 
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
                 logger.info("Voice WS AUDIO inbound: %d bytes", len(audio_data))
                 sid = await ensure_session()
-                await _handle_audio_turn(ws, sid, history, audio_data)
+                await _handle_audio_turn(ws, sid, history, audio_data, current_project)
 
             else:
                 logger.warning("Voice WS unknown message shape keys=%s", list(message.keys()))
@@ -135,6 +142,7 @@ async def _run_llm_turn(
     session_id: str,
     history: list[dict],
     user_text: str,
+    project_scope: Optional[str] = None,
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record."""
     model, is_deep = classify_and_route(user_text)
@@ -178,6 +186,7 @@ async def _run_llm_turn(
             model=model,
             send_token=send_token,
             send_tts_sentence=send_tts_sentence,
+            project_scope=project_scope,
         )
 
         await tts_queue.put(None)
@@ -229,9 +238,10 @@ async def _handle_text_turn(
     session_id: str,
     history: list[dict],
     text: str,
+    project_scope: Optional[str] = None,
 ) -> None:
     try:
-        await _run_llm_turn(ws, session_id, history, text)
+        await _run_llm_turn(ws, session_id, history, text, project_scope)
     except Exception as exc:
         logger.exception("Error processing text turn session=%s: %s", session_id, exc)
         await ws.send_json({"type": "error", "message": str(exc)})
@@ -242,6 +252,7 @@ async def _handle_audio_turn(
     session_id: str,
     history: list[dict],
     audio_data: bytes,
+    project_scope: Optional[str] = None,
 ) -> None:
     try:
         wav_data = await convert_webm_to_wav(audio_data)
@@ -251,7 +262,7 @@ async def _handle_audio_turn(
             return
 
         await ws.send_json({"type": "transcript", "content": transcript})
-        await _run_llm_turn(ws, session_id, history, transcript)
+        await _run_llm_turn(ws, session_id, history, transcript, project_scope)
 
     except Exception as exc:
         logger.exception("Audio turn error session=%s: %s", session_id, exc)

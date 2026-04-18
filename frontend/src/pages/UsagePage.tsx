@@ -9,6 +9,7 @@ import {
   type UsageByModel,
   type UsageDayPoint,
 } from '../lib/api'
+import { useProjectContext } from '../hooks/useProjectContext'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -415,12 +416,13 @@ export default function UsagePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const { current: currentProject } = useProjectContext()
 
   const fetchData = useCallback(async () => {
     setError('')
     try {
       const [sessionList, usageSummary, current] = await Promise.allSettled([
-        sessionsApi.list(),
+        sessionsApi.list(currentProject),
         sessionsApi.usageSummary(),
         sessionsApi.getCurrent(),
       ])
@@ -447,7 +449,7 @@ export default function UsagePage() {
     } catch {
       setDailyUnavailable(true)
     }
-  }, [])
+  }, [currentProject])
 
   useEffect(() => {
     fetchData()

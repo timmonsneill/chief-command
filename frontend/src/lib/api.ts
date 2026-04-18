@@ -433,7 +433,10 @@ export interface UsageDayPoint {
 }
 
 export const sessionsApi = {
-  list: () => request<Session[]>('/sessions'),
+  list: (project?: string) => {
+    const qs = project && project !== 'All' ? `?project=${encodeURIComponent(project)}` : ''
+    return request<Session[]>(`/sessions${qs}`)
+  },
   get: (id: string) => request<SessionDetail>(`/sessions/${id}`),
   getCurrent: () => request<SessionUsage | null>('/sessions/current'),
   usageSummary: () => request<UsageSummary>('/usage/summary'),

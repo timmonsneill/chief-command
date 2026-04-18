@@ -68,12 +68,16 @@ async def stream_turn(
     send_token: Callable[[str], Awaitable[None]],
     send_tts_sentence: Callable[[str], Awaitable[None]],
     max_tokens: int = 1024,
+    project_scope: Optional[str] = None,
 ) -> UsageRecord:
     """Stream one conversation turn via the Anthropic API.
 
     Calls send_token for each text delta.
     Buffers text and flushes complete sentences to send_tts_sentence.
     Returns a usage dict with token counts, model, stop_reason, and cost_cents.
+
+    If project_scope is provided (and not "All"), prepends a scope hint to the
+    system prompt so Chief knows which project the user is talking about.
     """
     client = _get_client()
     full_text: list[str] = []
@@ -86,10 +90,18 @@ async def stream_turn(
         extra_kwargs["output_config"] = {"effort": "high"}
         max_tokens = max(max_tokens, 3072)
 
+    system_blocks: list[dict] = []
+    if project_scope and project_scope != "All":
+        system_blocks.append({
+            "type": "text",
+            "text": f"[Current project: {project_scope}]",
+        })
+    system_blocks.append(SYSTEM_PROMPT)
+
     async with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
-        system=[SYSTEM_PROMPT],
+        system=system_blocks,
         messages=history,
         **extra_kwargs,
     ) as stream:
