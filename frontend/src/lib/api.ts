@@ -234,6 +234,39 @@ export interface WsAgentStatusEvent {
   agents: Record<string, string>[]
 }
 
+// --- Dispatch Bridge events (Nova v1) ---
+// Every frame carries `task_id` (= ISO timestamp of dispatch start). Frontend
+// MUST route outputs by id, not by "most-recently-started" — otherwise a late
+// task_output from task A arriving after task B started will be misattributed.
+export interface WsTaskStartedEvent {
+  type: 'task_started'
+  task_id: string
+  task_spec: string
+  repo: string
+  started_at: string
+}
+
+export interface WsTaskOutputEvent {
+  type: 'task_output'
+  task_id: string
+  text: string
+  stream: 'stdout' | 'stderr'
+}
+
+export interface WsTaskCompleteEvent {
+  type: 'task_complete'
+  task_id: string
+  exit_code: number
+  duration_seconds: number
+  summary: string
+}
+
+export interface WsTaskCancelledEvent {
+  type: 'task_cancelled'
+  task_id: string
+  reason: string
+}
+
 export type WsEvent =
   | WsTranscriptEvent
   | WsActiveModelEvent
@@ -245,6 +278,10 @@ export type WsEvent =
   | WsContextSwitchedEvent
   | WsUsageEvent
   | WsAgentStatusEvent
+  | WsTaskStartedEvent
+  | WsTaskOutputEvent
+  | WsTaskCompleteEvent
+  | WsTaskCancelledEvent
 
 export interface SessionUsage {
   session_id: string
