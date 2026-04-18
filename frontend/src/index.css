@@ -37,3 +37,23 @@ body {
     transform: translateY(0);
   }
 }
+
+/* Tab panel switch fade — 200ms ease-out */
+@keyframes tabFade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Hide scrollbar for tab bars while keeping scroll behaviour */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
