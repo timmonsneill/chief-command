@@ -132,23 +132,49 @@ def _build_entry(path: Path) -> dict[str, Any]:
 _AUDIT_LINE_RE = re.compile(
     r"\*\*(?P<ts>[^*]+)\*\*\s*[—\-]\s*(?P<action>\w+)\s*[—\-]\s*`?(?P<target>[^`\n]+?)`?\s*[—\-]\s*(?P<reason>.+)"
 )
+# Matches section headers like: ## 2026-04-17 — session title
+_AUDIT_SECTION_RE = re.compile(r"^##\s+(?P<date>\d{4}-\d{2}-\d{2})\s*[—\-]\s*(?P<title>.+)$")
 
 
 def _parse_audit_log(content: str) -> list[dict[str, str]]:
     """Parse the audit_log.md into a list of AuditEntry dicts.
 
-    Expected line format (flexible):
-        **<timestamp>** — <action> — `<target>` — <reason>
+    Supports two formats:
+    1. Inline: **<timestamp>** — <action> — `<target>` — <reason>
+    2. Section header: ## YYYY-MM-DD — <session title>  (with bullet list body)
 
     Returns entries most-recent-first.
     """
     entries: list[dict[str, str]] = []
+    current_section: dict[str, str] | None = None
+    current_body_lines: list[str] = []
+
+    def _flush_section() -> None:
+        if current_section is not None:
+            body = " ".join(current_body_lines).strip()
+            entries.append({**current_section, "reason": body[:300] if body else ""})
+
     for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        stripped = line.strip()
+
+        # Try section-header format first.
+        sec_m = _AUDIT_SECTION_RE.match(stripped)
+        if sec_m:
+            _flush_section()
+            current_section = {
+                "timestamp": sec_m.group("date"),
+                "action": "session",
+                "target": sec_m.group("title").strip(),
+            }
+            current_body_lines = []
             continue
-        m = _AUDIT_LINE_RE.search(line)
+
+        # Try inline **ts** — action — target — reason format.
+        m = _AUDIT_LINE_RE.search(stripped)
         if m:
+            _flush_section()
+            current_section = None
+            current_body_lines = []
             entries.append(
                 {
                     "timestamp": m.group("ts").strip(),
@@ -157,8 +183,18 @@ def _parse_audit_log(content: str) -> list[dict[str, str]]:
                     "reason": m.group("reason").strip(),
                 }
             )
-    # Most-recent first — preserve file order (assumed newest at bottom)
-    entries.reverse()
+            continue
+
+        # Accumulate body lines for the current section (bullet points, context lines).
+        if current_section is not None and stripped and not stripped.startswith("#"):
+            # Strip markdown bullet/bold markers for readability.
+            clean = stripped.lstrip("-* ").strip()
+            if clean:
+                current_body_lines.append(clean)
+
+    _flush_section()
+
+    # Most-recent-first — file has newest entries at the top per audit_log.md convention.
     return entries
 
 
