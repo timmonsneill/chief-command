@@ -31,6 +31,44 @@ router = APIRouter()
 _dispatcher = TaskDispatcher()
 
 
+# ---------------------------------------------------------------------------
+# Serialized WS send helpers (Hawke CRITICAL — concurrent WS writes)
+#
+# Starlette's WebSocket.send_{json,bytes} is NOT guaranteed to serialize
+# concurrent writes from separate tasks. In the dispatch-glue world the
+# voice WS has several concurrent producers:
+#   - main receive loop (sends transcript / token / etc.)
+#   - turn task (_run_llm_turn) streaming tokens + TTS bytes
+#   - dispatcher stdout pump (_route_task on_output)
+#   - dispatcher completion callback (_route_task on_complete)
+#   - narration (_narrate) emitting tts_start / bytes / tts_end / message_done
+#
+# Without explicit serialization two of these can interleave mid-frame on
+# the underlying transport and corrupt bytes on the wire. Per-connection
+# asyncio.Lock funnels every write through a single critical section; the
+# lock lives on the `ws` object as an attribute so all module-level helpers
+# share it across call sites.
+# ---------------------------------------------------------------------------
+
+
+def _get_send_lock(ws: WebSocket) -> asyncio.Lock:
+    lock: Optional[asyncio.Lock] = getattr(ws, "_send_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        ws._send_lock = lock  # type: ignore[attr-defined]
+    return lock
+
+
+async def ws_send_json(ws: WebSocket, payload: dict) -> None:
+    async with _get_send_lock(ws):
+        await ws.send_json(payload)
+
+
+async def ws_send_bytes(ws: WebSocket, data: bytes) -> None:
+    async with _get_send_lock(ws):
+        await ws.send_bytes(data)
+
+
 async def _authenticate_ws(ws: WebSocket) -> bool:
     token = ws.query_params.get("token")
     if token and verify_token(token):
@@ -75,7 +113,7 @@ async def voice_ws(ws: WebSocket) -> None:
     """
     await ws.accept()
     if not await _authenticate_ws(ws):
-        await ws.send_json({"type": "error", "message": "Unauthorized"})
+        await ws_send_json(ws, {"type": "error", "message": "Unauthorized"})
         await ws.close(code=4001)
         return
 
@@ -107,7 +145,7 @@ async def voice_ws(ws: WebSocket) -> None:
             except (asyncio.CancelledError, Exception):
                 pass
             try:
-                await ws.send_json({"type": "turn_cancelled", "reason": reason})
+                await ws_send_json(ws, {"type": "turn_cancelled", "reason": reason})
             except Exception:
                 pass
         current_turn_task = None
@@ -130,7 +168,7 @@ async def voice_ws(ws: WebSocket) -> None:
             user_text[:80], current_project,
         )
         try:
-            await ws.send_json({"type": "context_switched", "project": detected})
+            await ws_send_json(ws, {"type": "context_switched", "project": detected})
         except Exception as exc:  # client gone, swallow
             logger.warning("Failed to send context_switched frame: %s", exc)
 
@@ -171,6 +209,14 @@ async def voice_ws(ws: WebSocket) -> None:
                     # Direct from the TaskBubble Cancel button. Bypass the
                     # classifier — known intent with a known action, no need
                     # to spend a Haiku call on it.
+                    #
+                    # Hawke CRITICAL: cancel must supersede any in-flight turn
+                    # (chat or dispatched narration) BEFORE we issue the
+                    # dispatcher cancel + cancel-narration. If we don't, the
+                    # prior turn's TTS worker can still be emitting frames
+                    # while _route_cancel emits turn_cancelled + narration ->
+                    # two concurrent writers on the same WS.
+                    await cancel_current_turn("user-cancelled")
                     sid = await ensure_session()
                     await _route_cancel(ws, sid)
                     continue
@@ -207,14 +253,14 @@ async def voice_ws(ws: WebSocket) -> None:
                     transcript = await stt_service.transcribe(wav_data)
                 except Exception as exc:
                     logger.exception("Audio conversion/transcription failed: %s", exc)
-                    await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
+                    await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
                     continue
 
                 if not transcript:
-                    await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
+                    await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
                     continue
 
-                await ws.send_json({"type": "transcript", "content": transcript})
+                await ws_send_json(ws, {"type": "transcript", "content": transcript})
                 await _maybe_switch_project(transcript)
                 current_turn_task = asyncio.create_task(
                     _route_user_turn(ws, sid, history, transcript, current_project)
@@ -228,7 +274,7 @@ async def voice_ws(ws: WebSocket) -> None:
     except Exception as exc:
         logger.exception("Voice WS error session=%s: %s", session_id, exc)
         try:
-            await ws.send_json({"type": "error", "message": "Internal error"})
+            await ws_send_json(ws, {"type": "error", "message": "Internal error"})
         except Exception:
             pass
     finally:
@@ -258,35 +304,35 @@ async def _run_llm_turn(
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record."""
     model, is_deep = classify_and_route(user_text)
-    await ws.send_json({"type": "active_model", "model": model, "is_deep": is_deep})
+    await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
     if is_deep:
         bridge = random_thinking_phrase()
-        await ws.send_json({"type": "bridge_phrase", "text": bridge})
+        await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
         await tts_queue.put(bridge)
 
     async def send_token(text: str) -> None:
-        await ws.send_json({"type": "token", "text": text})
+        await ws_send_json(ws, {"type": "token", "text": text})
 
     async def send_tts_sentence(sentence: str) -> None:
         await tts_queue.put(sentence)
 
     async def tts_worker() -> None:
         try:
-            await ws.send_json({"type": "tts_start"})
+            await ws_send_json(ws, {"type": "tts_start"})
             while True:
                 sentence = await tts_queue.get()
                 if sentence is None:
                     break
                 try:
                     async for chunk in tts_service.synthesize_stream(sentence):
-                        await ws.send_bytes(chunk)
+                        await ws_send_bytes(ws, chunk)
                 except Exception as tts_err:
                     logger.warning("TTS failed for sentence: %s", tts_err)
         finally:
-            await ws.send_json({"type": "tts_end"})
+            await ws_send_json(ws, {"type": "tts_end"})
 
     history.append({"role": "user", "content": user_text})
 
@@ -313,7 +359,7 @@ async def _run_llm_turn(
         assistant_text = usage.get("assistant_text", "")
         history.append({"role": "assistant", "content": assistant_text})
 
-        await ws.send_json({"type": "message_done"})
+        await ws_send_json(ws, {"type": "message_done"})
 
         turn = await record_turn(
             session_id=session_id,
@@ -324,7 +370,7 @@ async def _run_llm_turn(
         )
         totals = await get_session_totals(session_id)
 
-        await ws.send_json({
+        await ws_send_json(ws, {
             "type": "usage",
             "session_id": session_id,
             "model": model,
@@ -367,7 +413,7 @@ async def _handle_text_turn(
     except Exception as exc:
         logger.exception("Error processing text turn session=%s: %s", session_id, exc)
         try:
-            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws_send_json(ws, {"type": "error", "message": str(exc)})
         except Exception:
             pass
 
@@ -420,92 +466,128 @@ async def _route_task(
     task_spec: str,
     current_project: str,
 ) -> None:
-    # Defense-in-depth alongside the "--" end-of-options marker in
-    # dispatcher.dispatch(). Even if the downstream CLI argv parser didn't
-    # honor "--", a task_spec whose first non-whitespace char is "-" is
-    # almost never a legitimate Claude Code prompt — it's either a prompt
-    # injection attempt or a classifier misfire. Reject and clarify rather
-    # than spawn. Vera HIGH finding.
-    if task_spec.lstrip().startswith("-"):
-        logger.warning(
-            "route_task: rejecting task_spec with leading dash (session=%s spec=%r)",
+    # Hawke HIGH: wrap the entire body so FileNotFoundError (claude missing
+    # on PATH), OSError (exec failures), ValueError (task_spec length cap),
+    # and anything else that isn't TaskAlreadyRunning surfaces to the user
+    # instead of dying silently in a background task.
+    try:
+        # Defense-in-depth alongside the "--" end-of-options marker in
+        # dispatcher.dispatch(). Even if the downstream CLI argv parser didn't
+        # honor "--", a task_spec whose first non-whitespace char is "-" is
+        # almost never a legitimate Claude Code prompt — it's either a prompt
+        # injection attempt or a classifier misfire. Reject and clarify rather
+        # than spawn. Vera HIGH finding.
+        if task_spec.lstrip().startswith("-"):
+            logger.warning(
+                "route_task: rejecting task_spec with leading dash (session=%s spec=%r)",
+                session_id,
+                task_spec[:120],
+            )
+            await _narrate(
+                ws,
+                "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
+            )
+            return
+
+        repo = get_repo_path(current_project)
+        if repo is None or not repo.exists():
+            # No local repo configured for this scope. Fall back to chat so
+            # Chief can explain rather than silently fail.
+            await ws_send_json(ws, {
+                "type": "token",
+                "text": f"I can't dispatch — no local repo configured for {current_project}. ",
+            })
+            await _handle_text_turn(ws, session_id, history, task_spec, current_project)
+            return
+
+        # `task_id` must appear on every task_* frame or the frontend silently
+        # drops them (routes by id, not by most-recently-active ref). The id is
+        # `handle.started_at.isoformat()` which is only set after dispatch
+        # spawns. Use a one-element box so callbacks can close over it and see
+        # the id assigned on the line after dispatch returns.
+        tid_box: list[str] = [""]
+
+        async def on_output(text: str, stream: str) -> None:
+            await ws_send_json(ws, {
+                "type": "task_output",
+                "task_id": tid_box[0],
+                "text": text,
+                "stream": stream,
+            })
+
+        async def on_complete(exit_code: int, summary: str) -> None:
+            await ws_send_json(ws, {
+                "type": "task_complete",
+                "task_id": tid_box[0],
+                "exit_code": exit_code,
+                "duration_seconds": int(
+                    (datetime.now(timezone.utc) - handle.started_at).total_seconds()
+                ),
+                "summary": summary,
+            })
+            # Terminal narration: the conversational unit is fully done.
+            await _narrate(
+                ws,
+                f"Task complete. Exit code {exit_code}. {summary[:160]}",
+            )
+
+        try:
+            handle = await _dispatcher.dispatch(
+                session_id=session_id,
+                task_spec=task_spec,
+                repo=repo,
+                on_output=on_output,
+                on_complete=on_complete,
+            )
+        except TaskAlreadyRunning:
+            await _narrate(
+                ws,
+                "Still working on the previous task. Say status for an update, or stop to cancel.",
+            )
+            return
+
+        tid_box[0] = handle.task_id  # closures above now see the real id
+
+        # Initial narration: immediate, deterministic (no LLM call needed).
+        await ws_send_json(ws, {
+            "type": "task_started",
+            "task_id": handle.task_id,
+            "task_spec": task_spec,
+            "repo": str(repo),
+            "started_at": handle.started_at.isoformat(),
+        })
+        # NOT terminal — the task is still running. Hawke HIGH: emitting
+        # message_done here would tell the frontend the assistant is done
+        # speaking before the task actually completes, which races against
+        # the later task_complete + terminal narration.
+        await _narrate(
+            ws,
+            f"Dispatching to Claude Code on your Mac. Working in {current_project}. "
+            "I'll let you know when it's done.",
+            terminal=False,
+        )
+    except asyncio.CancelledError:
+        # Turn was cancelled (barge-in / superseded) — propagate so the
+        # caller can clean up. Don't emit a user-facing error.
+        raise
+    except Exception as exc:
+        logger.exception(
+            "route_task: dispatch failed session=%s task_spec=%r: %s",
             session_id,
             task_spec[:120],
+            exc,
         )
         await _narrate(
             ws,
-            "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
+            f"Task dispatch failed: {exc}. Staying on chat.",
         )
-        return
-
-    repo = get_repo_path(current_project)
-    if repo is None or not repo.exists():
-        # No local repo configured for this scope. Fall back to chat so Chief
-        # can explain rather than silently fail.
-        await ws.send_json({
-            "type": "token",
-            "text": f"I can't dispatch — no local repo configured for {current_project}. ",
-        })
-        await _handle_text_turn(ws, session_id, history, task_spec, current_project)
-        return
-
-    # `task_id` must appear on every task_* frame or the frontend silently
-    # drops them (routes by id, not by most-recently-active ref). The id is
-    # `handle.started_at.isoformat()` which is only set after dispatch spawns.
-    # Use a one-element box so callbacks can close over it and see the id
-    # assigned on the line after dispatch returns.
-    tid_box: list[str] = [""]
-
-    async def on_output(text: str, stream: str) -> None:
-        await ws.send_json({
-            "type": "task_output",
-            "task_id": tid_box[0],
-            "text": text,
-            "stream": stream,
-        })
-
-    async def on_complete(exit_code: int, summary: str) -> None:
-        await ws.send_json({
-            "type": "task_complete",
-            "task_id": tid_box[0],
-            "exit_code": exit_code,
-            "duration_seconds": int(
-                (datetime.now(timezone.utc) - handle.started_at).total_seconds()
-            ),
-            "summary": summary,
-        })
-        await _narrate(ws, f"Task complete. Exit code {exit_code}. {summary[:160]}")
-
-    try:
-        handle = await _dispatcher.dispatch(
-            session_id=session_id,
-            task_spec=task_spec,
-            repo=repo,
-            on_output=on_output,
-            on_complete=on_complete,
-        )
-    except TaskAlreadyRunning:
-        await _narrate(
-            ws,
-            "Still working on the previous task. Say status for an update, or stop to cancel.",
-        )
-        return
-
-    tid_box[0] = handle.task_id  # closures above now see the real id
-
-    # Initial narration: immediate, deterministic (no LLM call needed).
-    await ws.send_json({
-        "type": "task_started",
-        "task_id": handle.task_id,
-        "task_spec": task_spec,
-        "repo": str(repo),
-        "started_at": handle.started_at.isoformat(),
-    })
-    await _narrate(
-        ws,
-        f"Dispatching to Claude Code on your Mac. Working in {current_project}. "
-        "I'll let you know when it's done.",
-    )
+        # Fall back to chat so the user still gets a response.
+        try:
+            await _handle_text_turn(ws, session_id, history, task_spec, current_project)
+        except Exception:
+            logger.exception(
+                "route_task: chat fallback also failed session=%s", session_id,
+            )
 
 
 async def _route_status(
@@ -557,7 +639,7 @@ async def _route_cancel(ws: WebSocket, session_id: str) -> None:
     handle = _dispatcher.get_handle(session_id)
     killed = await _dispatcher.cancel(session_id)
     if killed and handle is not None:
-        await ws.send_json({
+        await ws_send_json(ws, {
             "type": "task_cancelled",
             "task_id": handle.task_id,
             "reason": "owner-requested",
@@ -567,23 +649,40 @@ async def _route_cancel(ws: WebSocket, session_id: str) -> None:
         await _narrate(ws, "Nothing to cancel — no task running.")
 
 
-async def _narrate(ws: WebSocket, text: str) -> None:
+async def _narrate(ws: WebSocket, text: str, *, terminal: bool = True) -> None:
     """Send a short line of text as a token + trigger TTS.
 
     Reuses ``tts_service.synthesize_stream`` directly — mirrors the pattern in
     ``_run_llm_turn``'s tts_worker. Keeps voice consistent between chat
     narration and task narration.
+
+    Frame ordering (Hawke HIGH): match the chat path exactly —
+        token -> tts_start -> (audio bytes...) -> tts_end -> message_done
+
+    Previously we emitted ``message_done`` before TTS bytes, which told the
+    frontend the assistant was "done speaking" while audio was still
+    streaming. The chat path (``_run_llm_turn``) emits ``message_done`` last
+    for a reason; narration should match.
+
+    ``terminal`` controls whether we emit ``message_done`` at all. The
+    initial "dispatching..." narration is NOT terminal — a task_complete
+    frame + a follow-up terminal narration will arrive later, and firing
+    ``message_done`` up front would clear the "assistant speaking" state
+    prematurely. Defaults to True (terminal) because the majority of
+    narrations — task_complete, task_cancelled, "nothing to cancel",
+    rejection messages — are the end of a conversational unit.
     """
     try:
-        await ws.send_json({"type": "token", "text": text + " "})
-        await ws.send_json({"type": "message_done"})
-        await ws.send_json({"type": "tts_start"})
+        await ws_send_json(ws, {"type": "token", "text": text + " "})
+        await ws_send_json(ws, {"type": "tts_start"})
         try:
             async for chunk in tts_service.synthesize_stream(text):
-                await ws.send_bytes(chunk)
+                await ws_send_bytes(ws, chunk)
         except Exception as exc:
             logger.warning("narration TTS failed: %s", exc)
-        await ws.send_json({"type": "tts_end"})
+        await ws_send_json(ws, {"type": "tts_end"})
+        if terminal:
+            await ws_send_json(ws, {"type": "message_done"})
     except Exception as exc:
         # WS may be gone mid-narration — swallow so the caller (callback or
         # router) doesn't propagate a disconnect as a turn error.
