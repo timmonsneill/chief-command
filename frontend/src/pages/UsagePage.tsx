@@ -418,57 +418,35 @@ export default function UsagePage() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const { current: currentProject } = useProjectContext()
 
-  const [fetchDiag, setFetchDiag] = useState<Record<string, string>>({})
-
   const fetchData = useCallback(async () => {
     setError('')
     setByModelUnavailable(false)
     setDailyUnavailable(false)
-    const diag: Record<string, string> = {}
     const [sessionList, usageSummary, current] = await Promise.allSettled([
       sessionsApi.list(currentProject),
       sessionsApi.usageSummary(),
       sessionsApi.getCurrent(),
     ])
-    if (sessionList.status === 'fulfilled') {
-      setSessions(sessionList.value)
-      diag.sessions = `ok (${sessionList.value.length})`
-    } else {
-      diag.sessions = `err: ${String((sessionList.reason as Error)?.message ?? sessionList.reason).slice(0, 40)}`
-    }
-    if (usageSummary.status === 'fulfilled') {
-      setSummary(usageSummary.value)
-      diag.summary = `ok`
-    } else {
-      diag.summary = `err: ${String((usageSummary.reason as Error)?.message ?? usageSummary.reason).slice(0, 40)}`
-    }
-    if (current.status === 'fulfilled') {
-      setCurrentSession(current.value)
-      diag.current = `ok`
-    } else {
-      diag.current = `err: ${String((current.reason as Error)?.message ?? current.reason).slice(0, 40)}`
+    if (sessionList.status === 'fulfilled') setSessions(sessionList.value)
+    if (usageSummary.status === 'fulfilled') setSummary(usageSummary.value)
+    if (current.status === 'fulfilled') setCurrentSession(current.value)
+    if (sessionList.status === 'rejected' && usageSummary.status === 'rejected') {
+      setError('Failed to load usage data')
     }
     setLoading(false)
 
     try {
-      const bm = await sessionsApi.byModel()
-      setByModel(bm)
-      diag.byModel = 'ok'
-    } catch (e) {
+      setByModel(await sessionsApi.byModel())
+    } catch {
       setByModelUnavailable(true)
-      diag.byModel = `err: ${String((e as Error)?.message ?? e).slice(0, 40)}`
     }
 
     try {
       const dl = await sessionsApi.daily(30)
       setDailyPoints(dl.days)
-      diag.daily = `ok (${dl.days.length} days)`
-    } catch (e) {
+    } catch {
       setDailyUnavailable(true)
-      diag.daily = `err: ${String((e as Error)?.message ?? e).slice(0, 40)}`
     }
-
-    setFetchDiag(diag)
   }, [currentProject])
 
   useEffect(() => {
@@ -527,19 +505,6 @@ export default function UsagePage() {
           <HeroCostCard label="Today" cents={summary?.today_cents ?? 0} />
           <HeroCostCard label="Week" cents={summary?.week_cents ?? 0} />
           <HeroCostCard label="Month" cents={summary?.month_cents ?? 0} alertLevel={alertLevel} />
-        </div>
-
-        {/* Tiny diagnostic strip — remove once verified */}
-        <div className="rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
-          {Object.entries(fetchDiag).map(([key, val]) => (
-            <div key={key} className="flex justify-between">
-              <span>{key}</span>
-              <span className={val.startsWith('ok') ? 'text-emerald-400' : 'text-red-400'}>{val}</span>
-            </div>
-          ))}
-          {Object.keys(fetchDiag).length === 0 && (
-            <div className="text-white/30">Fetching…</div>
-          )}
         </div>
 
         {/* Current session strip */}

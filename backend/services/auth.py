@@ -4,8 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import hashlib
-import hmac
+import bcrypt
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -19,13 +18,16 @@ bearer_scheme = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
-    """Return SHA-256 hash of the given password. Simple and sufficient for single-owner auth."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Return bcrypt hash of the given password — salted + work-factored."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Check a plaintext password against its hash using constant-time comparison."""
-    return hmac.compare_digest(hash_password(plain), hashed)
+    """Check a plaintext password against its bcrypt hash."""
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 
 def create_token(subject: str = "owner") -> str:

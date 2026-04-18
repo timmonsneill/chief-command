@@ -1,6 +1,5 @@
 """Application settings loaded from environment variables."""
 
-import secrets
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -16,7 +15,7 @@ class Settings(BaseSettings):
     """
 
     OWNER_PASSWORD: str  # No default — MUST be set in .env
-    JWT_SECRET: str = secrets.token_urlsafe(32)
+    JWT_SECRET: str  # No default — MUST be set in .env (tokens invalidated on restart otherwise)
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_DAYS: int = 30
     ALLOWED_ORIGINS: str = "https://chiefcommand.app,http://localhost:3000,http://localhost:8000"

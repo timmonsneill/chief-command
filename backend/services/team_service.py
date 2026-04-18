@@ -181,9 +181,9 @@ def get_team() -> list[dict[str, Any]]:
                 "lean": agent["lean"],
                 "model": agent["model"],
                 "tier": agent["tier"],
-                "memory_path": str(mem_path),
-                "last_active": None,       # TODO: wire from agent_tracker
-                "invocations_total": 0,    # TODO: count from subagent JSONL
+                "has_memory": mem_path.exists(),
+                "last_active": None,
+                "invocations_total": 0,
                 "description": agent["description"],
             }
         )

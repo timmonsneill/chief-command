@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 
 import aiofiles
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -320,7 +320,7 @@ async def api_usage_by_model(subject: str = Depends(require_auth)) -> dict:
 
 @app.get("/api/usage/daily")
 async def api_usage_daily(
-    days: int = 30,
+    days: int = Query(default=30, ge=1, le=365),
     subject: str = Depends(require_auth),
 ) -> dict:
     series = await get_daily_series(days=days)

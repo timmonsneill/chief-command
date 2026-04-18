@@ -13,6 +13,7 @@ from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav
 from services.llm import stream_turn
+from services.project_context import AVAILABLE_PROJECTS
 from services.router import classify_and_route, random_thinking_phrase
 from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
 
@@ -98,8 +99,9 @@ async def voice_ws(ws: WebSocket) -> None:
                     text_content = raw
 
                 if msg_type == "context":
-                    # Project context frame — update local scope, no LLM turn
-                    current_project = data.get("project") or None
+                    # Project context frame — validate against allowlist, no LLM turn
+                    raw_proj = data.get("project") or None
+                    current_project = raw_proj if raw_proj in AVAILABLE_PROJECTS and raw_proj != "All" else None
                     logger.info("Voice WS context updated project=%s", current_project)
                     continue
 

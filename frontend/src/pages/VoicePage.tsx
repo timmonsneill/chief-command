@@ -161,7 +161,7 @@ function VoiceOrb({ state, userSpeaking }: VoiceOrbProps) {
 const STATE_LABELS: Record<VoiceState, string> = {
   idle: 'Ready',
   listening: 'Listening...',
-  speaking: 'Thinking...',
+  speaking: 'Chief is speaking...',
   thinking: 'Thinking...',
 }
 

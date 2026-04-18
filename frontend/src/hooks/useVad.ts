@@ -58,19 +58,16 @@ export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): 
         onSpeechStart: () => {
           setSpeaking(true)
           setSpeechStartCount((n) => n + 1)
-          console.log('[VAD] speech start')
           onSpeechStartRef.current?.()
         },
         onSpeechEnd: (audio: Float32Array) => {
           setSpeaking(false)
           setSpeechEndCount((n) => n + 1)
           setLastAudioSamples(audio.length)
-          console.log('[VAD] speech end, samples=', audio.length)
           onSpeechEndRef.current(audio)
         },
         onVADMisfire: () => {
           setSpeaking(false)
-          console.log('[VAD] misfire')
         },
         onFrameProcessed: () => {
           setFrameCount((n) => n + 1)
@@ -80,10 +77,8 @@ export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): 
       vadRef.current = vad
       vad.start()
       setStatus('listening')
-      console.log('[VAD] initialized and listening')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'VAD init failed'
-      console.error('[VAD] init error:', msg, err)
       setError(msg)
       setStatus('error')
     }

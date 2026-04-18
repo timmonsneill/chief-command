@@ -226,9 +226,27 @@ def get_all_memory() -> dict[str, Any]:
     }
 
 
+def _safe_memory_path(filename: str) -> Path:
+    """Resolve filename inside the memory dir. Rejects path traversal + non-.md."""
+    if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+        raise ValueError(f"Invalid filename: {filename!r}")
+    if not filename.endswith(".md"):
+        raise ValueError("Only .md files permitted")
+    dir_real = _GLOBAL_MEMORY_DIR.resolve()
+    path = (_GLOBAL_MEMORY_DIR / filename).resolve()
+    try:
+        path.relative_to(dir_real)
+    except ValueError:
+        raise ValueError(f"Invalid filename: {filename!r}")
+    return path
+
+
 def get_memory_file(filename: str) -> dict[str, Any]:
     """Return a single MemoryEntry by filename.  Raises FileNotFoundError if missing."""
-    path = _GLOBAL_MEMORY_DIR / filename
+    try:
+        path = _safe_memory_path(filename)
+    except ValueError as exc:
+        raise FileNotFoundError(str(exc))
     if not path.exists() or path.name in _GLOBAL_EXCLUDE:
         raise FileNotFoundError(f"Memory file not found: {filename!r}")
     return _build_entry(path)
@@ -237,11 +255,11 @@ def get_memory_file(filename: str) -> dict[str, Any]:
 def put_memory_file(filename: str, content: str) -> dict[str, Any]:
     """Write content to a global memory file and return the updated MemoryEntry.
 
-    Raises ValueError if the filename is in the exclusion list.
+    Rejects traversal, non-.md, and protected filenames.
     """
     if filename in _GLOBAL_EXCLUDE:
         raise ValueError(f"Cannot write to protected file: {filename!r}")
-    path = _GLOBAL_MEMORY_DIR / filename
+    path = _safe_memory_path(filename)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
