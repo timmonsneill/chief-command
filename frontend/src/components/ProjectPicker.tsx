@@ -3,7 +3,7 @@ import { ChevronDown, Check } from 'lucide-react'
 import { useProjectContext } from '../hooks/useProjectContext'
 
 export default function ProjectPicker() {
-  const { current, available, setContext } = useProjectContext()
+  const { current, available, setContext, isLoading } = useProjectContext()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -35,7 +35,7 @@ export default function ProjectPicker() {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setOpen((v) => !v)}
-        disabled={loading}
+        disabled={loading || isLoading}
         className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-surface-overlay border border-surface-border text-xs text-white/60 active:text-white/80 transition-colors disabled:opacity-50"
       >
         <span className="font-medium text-white/80">{current}</span>
