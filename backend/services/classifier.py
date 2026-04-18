@@ -8,8 +8,19 @@ branch:
 - status → summarize a running dispatched task
 - cancel → kill the running dispatched task
 
-If the API call fails or returns unparseable output, defaults to `chat` — the
+Two zero-API-call shortcuts (``_CANCEL_SHORTCUTS`` / ``_STATUS_SHORTCUTS``)
+skip the round-trip for common voice commands like "stop" or "status" —
+~300ms saved on perceived latency.
+
+If the API call fails or returns unparseable output, defaults to ``chat`` — the
 safe, non-destructive option (no subprocess spawned, no cancellation applied).
+Same conservative default applies when the model says ``task`` but gives no
+usable ``task_spec`` — dispatching a task with an empty spec is almost
+certainly a misclassification, so we demote to chat.
+
+Length cap: we truncate ``user_text`` to 4000 chars before sending to the
+classifier. Anything longer is almost certainly a paste / STT runaway; the
+classifier doesn't need it and it's a cost / prompt-injection concern.
 """
 
 import json
@@ -17,9 +28,7 @@ import logging
 import re
 from typing import Literal, Optional, TypedDict
 
-from anthropic import AsyncAnthropic
-
-from config.settings import settings
+from services.llm import _get_client  # shared AsyncAnthropic client
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +42,11 @@ class ClassificationResult(TypedDict):
 
 
 _CLASSIFIER_MODEL = "claude-haiku-4-5"
+
+# Hard cap on user_text length before we send it to the classifier. STT
+# runaways and pasted essays are both noise for intent classification — the
+# first 4KB carries the signal.
+_MAX_USER_TEXT_CHARS = 4000
 
 # System prompt is large-ish (~500 tokens) because the examples do heavy lifting
 # for a Haiku-sized model. cache_control keeps per-turn cost under a tenth of a
@@ -94,16 +108,6 @@ _SYSTEM_PROMPT = {
 }
 
 
-_client: Optional[AsyncAnthropic] = None
-
-
-def _get_client() -> AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-    return _client
-
-
 # Grab the first balanced {...} from the response, tolerant of trailing chatter.
 _JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
 
@@ -131,11 +135,23 @@ async def classify_intent(user_text: str, current_project: str) -> Classificatio
 
     Returns:
         ClassificationResult with intent + optional task_spec + confidence.
-        Always returns a value; never raises. Defaults to `chat` on any error.
+        Always returns a value; never raises. Defaults to `chat` on any error
+        or on a "task" classification with no usable task_spec.
     """
     text = (user_text or "").strip()
     if not text:
         return {"intent": "chat", "task_spec": None, "confidence": 0.0}
+
+    # Length cap — STT runaways and pasted essays are both noise for intent
+    # classification. Keeps token cost bounded and curtails prompt-injection
+    # payloads that smuggle instructions via extreme length.
+    if len(text) > _MAX_USER_TEXT_CHARS:
+        logger.warning(
+            "classifier: user_text truncated from %d to %d chars",
+            len(text),
+            _MAX_USER_TEXT_CHARS,
+        )
+        text = text[:_MAX_USER_TEXT_CHARS]
 
     lower = text.lower()
     if lower in _CANCEL_SHORTCUTS:
@@ -173,9 +189,19 @@ async def classify_intent(user_text: str, current_project: str) -> Classificatio
         logger.warning("classifier returned invalid intent: %r", intent_raw)
         return {"intent": "chat", "task_spec": None, "confidence": 0.0}
 
-    task_spec = parsed.get("task_spec") if intent_raw == "task" else None
-    if intent_raw == "task" and not isinstance(task_spec, str):
-        # Model chose task but didn't give a spec — fall back to raw text.
-        task_spec = text
+    if intent_raw == "task":
+        task_spec = parsed.get("task_spec")
+        if not isinstance(task_spec, str) or not task_spec.strip():
+            # Task intent without a usable spec is almost certainly a
+            # misclassification — we'd rather under-dispatch than dispatch the
+            # raw utterance as-is. Demote to chat.
+            logger.info(
+                "classifier: 'task' intent with no usable task_spec "
+                "(got %r) — demoting to chat",
+                task_spec,
+            )
+            return {"intent": "chat", "task_spec": None, "confidence": 0.0}
+        task_spec = task_spec.strip()
+        return {"intent": "task", "task_spec": task_spec, "confidence": 1.0}
 
-    return {"intent": intent_raw, "task_spec": task_spec, "confidence": 1.0}
+    return {"intent": intent_raw, "task_spec": None, "confidence": 1.0}
