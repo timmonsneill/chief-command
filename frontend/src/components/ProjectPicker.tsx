@@ -1,31 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { ChevronDown, Check } from 'lucide-react'
-import { api } from '../lib/api'
+import { useProjectContext } from '../hooks/useProjectContext'
 
 export default function ProjectPicker() {
-  const [current, setCurrent] = useState<string>('All')
-  const [available, setAvailable] = useState<string[]>(['All'])
+  const { current, available, setContext } = useProjectContext()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
-
-  // Fetch initial context on mount
-  useEffect(() => {
-    let cancelled = false
-    async function fetchContext() {
-      try {
-        const data = await api.context.get()
-        if (!cancelled) {
-          setCurrent(data.current)
-          setAvailable(data.available)
-        }
-      } catch {
-        // silently fail — defaults to "All"
-      }
-    }
-    fetchContext()
-    return () => { cancelled = true }
-  }, [])
 
   // Close on outside click
   useEffect(() => {
@@ -44,10 +25,7 @@ export default function ProjectPicker() {
     if (project === current) return
     setLoading(true)
     try {
-      const data = await api.context.set(project)
-      setCurrent(data.current)
-    } catch {
-      // silently fail — keep current
+      await setContext(project)
     } finally {
       setLoading(false)
     }
