@@ -5,9 +5,23 @@ import { useVad } from '../hooks/useVad'
 import { useProjectContext } from '../hooks/useProjectContext'
 import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
+import { TaskBubble, type TaskBubbleStatus } from '../components/TaskBubble'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
 
 type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
+
+interface TaskState {
+  id: string              // = task_id from backend (ISO timestamp, unique per dispatch)
+  taskSpec: string
+  repo: string
+  startedAt: string
+  status: TaskBubbleStatus
+  stdoutLines: string[]
+  exitCode?: number
+  durationSeconds?: number
+  summary?: string
+  cancelReason?: string
+}
 
 function float32ToWav(samples: Float32Array, sampleRate = 16000): ArrayBuffer {
   const numSamples = samples.length
@@ -62,6 +76,7 @@ const STATE_COLORS: Record<VoiceState, string> = {
 
 export default function VoicePage() {
   const [messages, setMessages] = useState<VoiceMessage[]>([])
+  const [tasks, setTasks] = useState<Record<string, TaskState>>({})
   const [agents, setAgents] = useState<Agent[]>([])
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [textInput, setTextInput] = useState('')
@@ -78,6 +93,12 @@ export default function VoicePage() {
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const responseBuffer = useRef('')
+  // Tracks the id of the most recently-started task so the Cancel button on
+  // the bubble UI can issue a {type:'cancel'} frame without dragging the
+  // task_id through component props. Event routing itself uses parsed.task_id
+  // from the frame — NOT this ref — so a late output from an older task can't
+  // be misattributed to a newer one.
+  const activeTaskIdRef = useRef<string | null>(null)
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
@@ -263,6 +284,85 @@ export default function VoicePage() {
           )
         }
 
+        // Dispatch Bridge: task_* frames always carry task_id. We key state
+        // by id and route ALL subsequent events (output / complete / cancel)
+        // by the id on the frame — never by "which task is currently active".
+        // That way a late task_output from task A arriving after task B has
+        // started doesn't get stamped onto B.
+        if (parsed.type === 'task_started') {
+          const id = parsed.task_id
+          activeTaskIdRef.current = id
+          setTasks((prev) => ({
+            ...prev,
+            [id]: {
+              id,
+              taskSpec: parsed.task_spec,
+              repo: parsed.repo,
+              startedAt: parsed.started_at,
+              status: 'running',
+              stdoutLines: [],
+            },
+          }))
+          // While a task is running the voice orb should return to listening —
+          // the task itself owns the "doing work" affordance via its bubble.
+          setVoiceState(conversationActive ? 'listening' : 'idle')
+        }
+
+        if (parsed.type === 'task_output') {
+          const id = parsed.task_id
+          setTasks((prev) => {
+            const t = prev[id]
+            if (!t) return prev
+            return {
+              ...prev,
+              [id]: {
+                ...t,
+                stdoutLines: [...t.stdoutLines, parsed.text.replace(/\n$/, '')],
+              },
+            }
+          })
+        }
+
+        if (parsed.type === 'task_complete') {
+          const id = parsed.task_id
+          setTasks((prev) => {
+            const t = prev[id]
+            if (!t) return prev
+            return {
+              ...prev,
+              [id]: {
+                ...t,
+                status: 'complete',
+                exitCode: parsed.exit_code,
+                durationSeconds: parsed.duration_seconds,
+                summary: parsed.summary,
+              },
+            }
+          })
+          if (activeTaskIdRef.current === id) {
+            activeTaskIdRef.current = null
+          }
+        }
+
+        if (parsed.type === 'task_cancelled') {
+          const id = parsed.task_id
+          setTasks((prev) => {
+            const t = prev[id]
+            if (!t) return prev
+            return {
+              ...prev,
+              [id]: {
+                ...t,
+                status: 'cancelled',
+                cancelReason: parsed.reason,
+              },
+            }
+          })
+          if (activeTaskIdRef.current === id) {
+            activeTaskIdRef.current = null
+          }
+        }
+
         if (parsed.type === 'error' as string) {
           const err = parsed as unknown as { type: 'error'; message: string }
           setMessages((prev) => [
@@ -424,6 +524,20 @@ export default function VoicePage() {
 
   const workingAgents = agents.filter((a) => a.status === 'working')
 
+  // Interleave messages and task bubbles by timestamp for a single chronological
+  // timeline. task.id === task_id which is the started_at ISO timestamp key.
+  type TimelineItem =
+    | { kind: 'message'; ts: string; msg: VoiceMessage }
+    | { kind: 'task'; ts: string; task: TaskState }
+  const timeline: TimelineItem[] = [
+    ...messages.map((m): TimelineItem => ({ kind: 'message', ts: m.timestamp, msg: m })),
+    ...Object.values(tasks).map((t): TimelineItem => ({ kind: 'task', ts: t.startedAt, task: t })),
+  ].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
+
+  const handleCancelTask = () => {
+    send(JSON.stringify({ type: 'cancel' }))
+  }
+
   // Determine label shown under orb during active session
   function getActiveLabel(): string {
     if (vadSpeaking) return 'Listening to you...'
@@ -509,9 +623,11 @@ export default function VoicePage() {
           </div>
         )}
 
-        {/* Message history — full-height scroll area */}
+        {/* Message history — full-height scroll area. Interleaves chat messages
+            and dispatched-task bubbles by timestamp so the conversation shows
+            tasks inline where they were issued. */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {messages.length === 0 && (
+          {timeline.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
               <p className="text-white/40 text-sm font-medium">
                 {conversationActive ? 'Speak to start a conversation' : 'Tap the mic to talk, or type a message'}
@@ -522,25 +638,46 @@ export default function VoicePage() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
+          {timeline.map((item) => {
+            if (item.kind === 'task') {
+              const t = item.task
+              return (
+                <TaskBubble
+                  key={`task-${t.id}`}
+                  taskSpec={t.taskSpec}
+                  startedAt={t.startedAt}
+                  status={t.status}
+                  repo={t.repo}
+                  exitCode={t.exitCode}
+                  durationSeconds={t.durationSeconds}
+                  summary={t.summary}
+                  cancelReason={t.cancelReason}
+                  stdoutLines={t.stdoutLines}
+                  onCancel={t.status === 'running' ? handleCancelTask : undefined}
+                />
+              )
+            }
+            const msg = item.msg
+            return (
               <div
-                className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
-                  msg.role === 'user'
-                    ? 'bg-chief text-white rounded-br-md'
-                    : 'bg-surface-raised text-white/90 rounded-bl-md'
-                }`}
+                key={msg.id}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
-                  {formatTime(msg.timestamp)}
-                </p>
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                    msg.role === 'user'
+                      ? 'bg-chief text-white rounded-br-md'
+                      : 'bg-surface-raised text-white/90 rounded-bl-md'
+                  }`}
+                >
+                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                  <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
+                    {formatTime(msg.timestamp)}
+                  </p>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
 
           {voiceState === 'thinking' && (
             <div className="flex justify-start">
