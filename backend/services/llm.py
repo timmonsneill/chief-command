@@ -69,6 +69,7 @@ async def stream_turn(
     send_tts_sentence: Callable[[str], Awaitable[None]],
     max_tokens: int = 1024,
     project_scope: Optional[str] = None,
+    system_blocks: Optional[list[dict]] = None,
 ) -> UsageRecord:
     """Stream one conversation turn via the Anthropic API.
 
@@ -76,8 +77,10 @@ async def stream_turn(
     Buffers text and flushes complete sentences to send_tts_sentence.
     Returns a usage dict with token counts, model, stop_reason, and cost_cents.
 
-    If project_scope is provided (and not "All"), prepends a scope hint to the
-    system prompt so Chief knows which project the user is talking about.
+    ``system_blocks`` — if provided, used as-is (each block should already have
+    cache_control set by the caller). If omitted, falls back to the legacy
+    ``SYSTEM_PROMPT`` + optional scope-hint behavior so existing callers keep
+    working.
     """
     client = _get_client()
     full_text: list[str] = []
@@ -90,13 +93,16 @@ async def stream_turn(
         extra_kwargs["output_config"] = {"effort": "high"}
         max_tokens = max(max_tokens, 3072)
 
-    system_blocks: list[dict] = []
-    if project_scope and project_scope != "All":
-        system_blocks.append({
-            "type": "text",
-            "text": f"[Current project: {project_scope}]",
-        })
-    system_blocks.append(SYSTEM_PROMPT)
+    if system_blocks is None:
+        # Legacy path — preserved for any caller that hasn't adopted
+        # chief_context.build_chief_system() yet.
+        system_blocks = []
+        if project_scope and project_scope != "All":
+            system_blocks.append({
+                "type": "text",
+                "text": f"[Current project: {project_scope}]",
+            })
+        system_blocks.append(SYSTEM_PROMPT)
 
     async with client.messages.stream(
         model=model,
@@ -152,4 +158,23 @@ async def stream_turn(
             "assistant_text": "".join(full_text),
         }
         usage_dict["cost_cents"] = _compute_cost_cents(model, usage_dict)
+
+        # Cache telemetry — hits once the prompt is stable across turns.
+        cached = usage_dict["cache_read_input_tokens"]
+        created = usage_dict["cache_creation_input_tokens"]
+        if cached > 0:
+            logger.info(
+                "llm cache HIT model=%s cached=%d input=%d output=%d",
+                model, cached, usage_dict["input_tokens"], usage_dict["output_tokens"],
+            )
+        elif created > 0:
+            logger.info(
+                "llm cache MISS (seed) model=%s created=%d input=%d output=%d",
+                model, created, usage_dict["input_tokens"], usage_dict["output_tokens"],
+            )
+        else:
+            logger.info(
+                "llm cache MISS model=%s input=%d output=%d",
+                model, usage_dict["input_tokens"], usage_dict["output_tokens"],
+            )
         return usage_dict

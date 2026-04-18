@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
 import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown } from 'lucide-react'
+import { toast } from 'sonner'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useVad } from '../hooks/useVad'
 import { useProjectContext } from '../hooks/useProjectContext'
@@ -187,7 +188,7 @@ export default function VoicePage() {
   const [usage, setUsage] = useState<WsUsageEvent | null>(null)
   const [turnCount, setTurnCount] = useState(0)
 
-  const { current: currentProject } = useProjectContext()
+  const { current: currentProject, setContext: setProjectContext } = useProjectContext()
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const responseBuffer = useRef('')
@@ -247,6 +248,17 @@ export default function VoicePage() {
     onMessage: useCallback((data: string) => {
       try {
         const parsed = JSON.parse(data) as WsEvent
+
+        // `context_switched` is not in WsEvent (lib/api.ts is Nova's lane);
+        // read through an untyped view to avoid narrowing-to-never.
+        if ((parsed as { type?: string }).type === 'context_switched') {
+          const proj = (parsed as { project?: string }).project
+          if (proj) {
+            // Fire-and-forget — backend already knows; this keeps the picker UI in sync.
+            setProjectContext(proj)
+            toast.success(`Switched to ${proj}`)
+          }
+        }
 
         if (parsed.type === 'transcript') {
           setMessages((prev) => [
@@ -350,7 +362,7 @@ export default function VoicePage() {
       } catch {
         // ignore non-JSON
       }
-    }, [conversationActive, playNextChunk]),
+    }, [conversationActive, playNextChunk, setProjectContext]),
   })
 
   const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError, status: vadStatus, frameCount: vadFrames, speechStartCount: vadStarts, speechEndCount: vadEnds, lastAudioSamples: vadLastSamples } = useVad({

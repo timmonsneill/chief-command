@@ -17,6 +17,7 @@ from slowapi.util import get_remote_address
 from app.websockets import router as ws_router
 from config.settings import settings
 from db import init_db
+from services import stt_service, tts_service
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
 from services.project_context import get_context, set_context
@@ -430,6 +431,31 @@ if FRONTEND_DIR.exists():
 async def on_startup() -> None:
     await init_db()
     logger.info("Chief Command Center v2 starting on %s:%s", settings.HOST, settings.PORT)
+
+    # Warm Whisper so the first user turn doesn't eat the ~4s cold-start hit.
+    # Fire-and-forget: don't block server startup if load takes a while.
+    import asyncio as _asyncio
+
+    async def _warm_stt() -> None:
+        try:
+            logger.info("Warming faster-whisper model in background...")
+            await stt_service._ensure_model()
+            logger.info("Whisper warmed")
+        except Exception as exc:
+            logger.warning("Whisper warm-up failed (first turn will pay cold-start): %s", exc)
+
+    async def _warm_tts() -> None:
+        try:
+            logger.info("Warming Kokoro TTS pipeline in background...")
+            await tts_service._ensure_pipeline()
+            logger.info("Kokoro warmed")
+        except Exception as exc:
+            logger.warning("Kokoro warm-up failed (first turn will pay cold-start): %s", exc)
+
+    # Both run concurrently in the background — server is ready to accept
+    # connections immediately.
+    _asyncio.create_task(_warm_stt())
+    _asyncio.create_task(_warm_tts())
 
 
 @app.on_event("shutdown")

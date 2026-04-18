@@ -12,8 +12,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav
+from services.chief_context import build_chief_system, DEFAULT_SCOPE
 from services.llm import stream_turn
-from services.project_context import AVAILABLE_PROJECTS
+from services.project_context import AVAILABLE_PROJECTS, detect_project_switch
 from services.router import classify_and_route, random_thinking_phrase
 from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
 
@@ -46,6 +47,8 @@ async def voice_ws(ws: WebSocket) -> None:
 
     Inbound frames:
       text  {"type": "text", "content": "..."}
+      text  {"type": "interrupt"}
+      text  {"type": "context", "project": "..."}
       binary  raw audio (WebM/Opus)
 
     Outbound frames:
@@ -58,6 +61,8 @@ async def voice_ws(ws: WebSocket) -> None:
       {"type": "tts_end"}                             — TTS done
       {"type": "message_done"}                        — full turn complete
       {"type": "usage", ...}                          — token/cost summary
+      {"type": "context_switched", "project": "..."}  — owner switched scope
+      {"type": "turn_cancelled", "reason": "..."}     — prior turn aborted
       {"type": "error", "message": "..."}
     """
     await ws.accept()
@@ -68,7 +73,8 @@ async def voice_ws(ws: WebSocket) -> None:
 
     session_id: Optional[str] = None
     history: list[dict] = []
-    current_project: Optional[str] = None
+    # Default scope: Chief Command. Per owner: scope is ALWAYS a concrete single project.
+    current_project: str = DEFAULT_SCOPE
     current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
@@ -98,6 +104,28 @@ async def voice_ws(ws: WebSocket) -> None:
                 pass
         current_turn_task = None
 
+    async def _maybe_switch_project(user_text: str) -> None:
+        """Run switch-intent detection on user text; update scope + notify client.
+
+        Scope is ALWAYS a concrete project. If detection returns a value, we
+        switch to it; if the new scope matches the current one, we no-op.
+        """
+        nonlocal current_project
+        detected = detect_project_switch(user_text)
+        if detected is None:
+            return
+        if detected == current_project:
+            return
+        current_project = detected
+        logger.info(
+            "Voice WS project-switch intent detected text=%r -> project=%s",
+            user_text[:80], current_project,
+        )
+        try:
+            await ws.send_json({"type": "context_switched", "project": detected})
+        except Exception as exc:  # client gone, swallow
+            logger.warning("Failed to send context_switched frame: %s", exc)
+
     try:
         while True:
             message = await ws.receive()
@@ -117,9 +145,13 @@ async def voice_ws(ws: WebSocket) -> None:
                     text_content = raw
 
                 if msg_type == "context":
-                    # Project context frame — validate against allowlist, no LLM turn
+                    # Project context frame — validate against allowlist, no LLM turn.
+                    # Scope is always concrete; unknown values fall back to default.
                     raw_proj = data.get("project") or None
-                    current_project = raw_proj if raw_proj in AVAILABLE_PROJECTS and raw_proj != "All" else None
+                    if raw_proj in AVAILABLE_PROJECTS:
+                        current_project = raw_proj
+                    else:
+                        current_project = DEFAULT_SCOPE
                     logger.info("Voice WS context updated project=%s", current_project)
                     continue
 
@@ -137,7 +169,12 @@ async def voice_ws(ws: WebSocket) -> None:
 
                 await cancel_current_turn("superseded")
                 sid = await ensure_session()
-                logger.info("Voice WS handling text turn session=%s len=%d", sid, len(text_content))
+                # Check for switch intent BEFORE the LLM call. If the owner said
+                # "switch to Arch", we update scope and still continue the turn
+                # with the new scope so Chief replies already-oriented.
+                await _maybe_switch_project(text_content)
+                logger.info("Voice WS handling text turn session=%s len=%d scope=%s",
+                            sid, len(text_content), current_project)
                 current_turn_task = asyncio.create_task(
                     _handle_text_turn(ws, sid, history, text_content, current_project)
                 )
@@ -147,8 +184,24 @@ async def voice_ws(ws: WebSocket) -> None:
                 logger.info("Voice WS AUDIO inbound: %d bytes", len(audio_data))
                 await cancel_current_turn("superseded")
                 sid = await ensure_session()
+                # Transcribe inline (not in a background task) so we can run
+                # switch detection on the utterance before starting the turn.
+                try:
+                    wav_data = await convert_webm_to_wav(audio_data)
+                    transcript = await stt_service.transcribe(wav_data)
+                except Exception as exc:
+                    logger.exception("Audio conversion/transcription failed: %s", exc)
+                    await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
+                    continue
+
+                if not transcript:
+                    await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
+                    continue
+
+                await ws.send_json({"type": "transcript", "content": transcript})
+                await _maybe_switch_project(transcript)
                 current_turn_task = asyncio.create_task(
-                    _handle_audio_turn(ws, sid, history, audio_data, current_project)
+                    _handle_text_turn(ws, sid, history, transcript, current_project)
                 )
 
             else:
@@ -178,7 +231,7 @@ async def _run_llm_turn(
     session_id: str,
     history: list[dict],
     user_text: str,
-    project_scope: Optional[str] = None,
+    project_scope: str,
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record."""
     model, is_deep = classify_and_route(user_text)
@@ -216,6 +269,11 @@ async def _run_llm_turn(
 
     tts_task = asyncio.create_task(tts_worker())
 
+    # Build Chief system prompt blocks — identity + memory + roster + project scope.
+    # Deterministic for (scope, file-contents) so Anthropic prompt caching works.
+    # File reads are blocking I/O — wrap in to_thread to avoid stalling the loop.
+    system_blocks = await asyncio.to_thread(build_chief_system, project_scope)
+
     try:
         usage = await stream_turn(
             history=history,
@@ -223,6 +281,7 @@ async def _run_llm_turn(
             send_token=send_token,
             send_tts_sentence=send_tts_sentence,
             project_scope=project_scope,
+            system_blocks=system_blocks,
         )
 
         await tts_queue.put(None)
@@ -274,35 +333,20 @@ async def _handle_text_turn(
     session_id: str,
     history: list[dict],
     text: str,
-    project_scope: Optional[str] = None,
+    project_scope: str,
 ) -> None:
     try:
         await _run_llm_turn(ws, session_id, history, text, project_scope)
+    except asyncio.CancelledError:
+        # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
+        # error. The caller already sent turn_cancelled.
+        raise
     except Exception as exc:
         logger.exception("Error processing text turn session=%s: %s", session_id, exc)
-        await ws.send_json({"type": "error", "message": str(exc)})
-
-
-async def _handle_audio_turn(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    audio_data: bytes,
-    project_scope: Optional[str] = None,
-) -> None:
-    try:
-        wav_data = await convert_webm_to_wav(audio_data)
-        transcript = await stt_service.transcribe(wav_data)
-        if not transcript:
-            await ws.send_json({"type": "error", "message": "Could not transcribe audio"})
-            return
-
-        await ws.send_json({"type": "transcript", "content": transcript})
-        await _run_llm_turn(ws, session_id, history, transcript, project_scope)
-
-    except Exception as exc:
-        logger.exception("Audio turn error session=%s: %s", session_id, exc)
-        await ws.send_json({"type": "error", "message": str(exc)})
+        try:
+            await ws.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
 
 
 @router.websocket("/ws/terminal")
