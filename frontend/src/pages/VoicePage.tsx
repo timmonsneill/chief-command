@@ -350,7 +350,7 @@ export default function VoicePage() {
     }, [conversationActive, playNextChunk]),
   })
 
-  const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError } = useVad({
+  const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError, status: vadStatus, frameCount: vadFrames, speechStartCount: vadStarts, speechEndCount: vadEnds, lastAudioSamples: vadLastSamples } = useVad({
     enabled: conversationActive,
     onSpeechStart: useCallback(() => {
       // Barge-in: if Chief is speaking, cut audio immediately and switch to listening
@@ -628,6 +628,16 @@ export default function VoicePage() {
             {!isConnected && (
               <p className="text-white/30 text-xs">Connecting to server...</p>
             )}
+
+            {/* Always-visible VAD debug strip */}
+            <div className="mt-3 w-full max-w-sm rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
+              <div className="flex justify-between"><span>VAD status</span><span className={vadStatus === 'error' ? 'text-red-400' : vadStatus === 'listening' ? 'text-emerald-400' : 'text-white/40'}>{vadStatus}</span></div>
+              {vadError && <div className="flex justify-between"><span>VAD error</span><span className="text-red-400 truncate max-w-[12rem]">{vadError}</span></div>}
+              <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
+              <div className="flex justify-between"><span>Speech start events</span><span>{vadStarts}</span></div>
+              <div className="flex justify-between"><span>Speech end events</span><span>{vadEnds}</span></div>
+              <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
+            </div>
 
             {/* Past messages if any */}
             {messages.length > 0 && (
