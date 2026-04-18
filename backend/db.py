@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     total_cost_cents INTEGER NOT NULL DEFAULT 0,
-    turn_count INTEGER NOT NULL DEFAULT 0
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    project TEXT
 );
 
 CREATE TABLE IF NOT EXISTS turns (
@@ -42,7 +43,14 @@ async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_DDL)
-        await db.commit()
+        # Idempotent migration: add project column to existing sessions tables
+        try:
+            await db.execute("ALTER TABLE sessions ADD COLUMN project TEXT")
+            await db.commit()
+            logger.info("Migrated sessions table: added project column")
+        except Exception:
+            # Column already exists — ignore
+            pass
     logger.info("DB initialised at %s", DB_PATH)
 
 

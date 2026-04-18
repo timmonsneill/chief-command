@@ -257,8 +257,11 @@ async def upload_file(file: UploadFile, subject: str = Depends(require_auth)) ->
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sessions")
-async def api_list_sessions(subject: str = Depends(require_auth)) -> list[dict]:
-    return await list_sessions(limit=50)
+async def api_list_sessions(
+    subject: str = Depends(require_auth),
+    project: str | None = None,
+) -> list[dict]:
+    return await list_sessions(limit=50, project=project)
 
 
 @app.get("/api/sessions/current")

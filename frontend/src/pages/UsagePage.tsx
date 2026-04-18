@@ -9,6 +9,7 @@ import {
   type UsageByModel,
   type UsageDayPoint,
 } from '../lib/api'
+import { useProjectContext } from '../hooks/useProjectContext'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -415,6 +416,7 @@ export default function UsagePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const { current: currentProject } = useProjectContext()
 
   const [fetchDiag, setFetchDiag] = useState<Record<string, string>>({})
 
@@ -422,7 +424,7 @@ export default function UsagePage() {
     setError('')
     const diag: Record<string, string> = {}
     const [sessionList, usageSummary, current] = await Promise.allSettled([
-      sessionsApi.list(),
+      sessionsApi.list(currentProject),
       sessionsApi.usageSummary(),
       sessionsApi.getCurrent(),
     ])
@@ -465,7 +467,7 @@ export default function UsagePage() {
     }
 
     setFetchDiag(diag)
-  }, [])
+  }, [currentProject])
 
   useEffect(() => {
     fetchData()

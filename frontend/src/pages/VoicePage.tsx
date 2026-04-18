@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
 import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useVad } from '../hooks/useVad'
+import { useProjectContext } from '../hooks/useProjectContext'
 import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
@@ -185,6 +186,8 @@ export default function VoicePage() {
   const [activeModel, setActiveModel] = useState<ActiveModel | null>(null)
   const [usage, setUsage] = useState<WsUsageEvent | null>(null)
   const [turnCount, setTurnCount] = useState(0)
+
+  const { current: currentProject } = useProjectContext()
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const responseBuffer = useRef('')
@@ -371,6 +374,13 @@ export default function VoicePage() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [messages])
+
+  // Send project context frame to backend whenever the context changes or WS connects.
+  // This keeps the backend in sync so it can scope the system prompt correctly.
+  useEffect(() => {
+    if (!isConnected) return
+    send(JSON.stringify({ type: 'context', project: currentProject }))
+  }, [isConnected, currentProject, send])
 
   useEffect(() => {
     if (!conversationActive) {

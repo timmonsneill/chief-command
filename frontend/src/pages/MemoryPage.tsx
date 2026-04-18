@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { BookOpen, RefreshCw, ChevronDown, ChevronRight, Save, Search } from 'lucide-react'
 import { api, type MemoryEntry, type ProjectMemory, type AgentMemory, type AuditEntry } from '../lib/api'
+import { useProjectContext } from '../hooks/useProjectContext'
 
 type TabId = 'global' | 'per_project' | 'per_agent' | 'audit'
 
@@ -184,6 +185,7 @@ export default function MemoryPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const { current: currentProject } = useProjectContext()
 
   const fetchMemory = useCallback(async () => {
     setError('')
@@ -341,7 +343,9 @@ export default function MemoryPage() {
 
         {activeTab === 'per_project' && (
           <div className="space-y-4">
-            {(data?.per_project ?? []).map((pm) => {
+            {(data?.per_project ?? [])
+              .filter((pm) => currentProject === 'All' || pm.project === currentProject)
+              .map((pm) => {
               const filtered = filterEntries(pm.entries)
               if (q && filtered.length === 0) return null
               return (
