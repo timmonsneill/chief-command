@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+
+<!--
+  Install this to run the memory audit every Monday at 8:00 AM.
+
+  1. Copy to LaunchAgents:
+       cp backend/scripts/com.chief.audit-weekly.plist ~/Library/LaunchAgents/
+
+  2. Load it (activate):
+       launchctl load ~/Library/LaunchAgents/com.chief.audit-weekly.plist
+
+  3. To unload / deactivate:
+       launchctl unload ~/Library/LaunchAgents/com.chief.audit-weekly.plist
+
+  4. To test immediately (without waiting for Monday):
+       launchctl start com.chief.audit-weekly
+
+  The script output is logged to /tmp/chief-audit.log.
+  Errors are logged to /tmp/chief-audit-error.log.
+
+  IMPORTANT: Update ProgramArguments paths below if your repo lives somewhere
+  other than ~/Desktop/chief-command/.
+-->
+
+<plist version="1.0">
+<dict>
+
+  <key>Label</key>
+  <string>com.chief.audit-weekly</string>
+
+  <!-- Run every Monday at 08:00 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Absolute paths — update if your repo location differs -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/user/Desktop/chief-command/backend/.venv/bin/python3</string>
+    <string>/Users/user/Desktop/chief-command/backend/scripts/audit_runner.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/user/Desktop/chief-command</string>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/chief-audit.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/chief-audit-error.log</string>
+
+  <!-- Start on boot if missed while machine was off -->
+  <key>RunAtLoad</key>
+  <false/>
+
+</dict>
+</plist>

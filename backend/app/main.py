@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.websockets import router as ws_router
 from config.settings import settings
@@ -35,12 +38,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Rate limiter — 5 login attempts per minute per IP
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="Chief Command Center",
     version="2.0.0",
     docs_url="/docs",
     redoc_url=None,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,6 +67,7 @@ _OWNER_HASH: str = hash_password(settings.OWNER_PASSWORD)
 
 MONTHLY_WARNING_CENTS = 20_000
 MONTHLY_CRITICAL_CENTS = 30_000
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +112,8 @@ class SetContextRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(body: LoginRequest) -> LoginResponse:
+@limiter.limit("5/minute")
+async def login(request: Request, body: LoginRequest) -> LoginResponse:
     if not verify_password(body.password, _OWNER_HASH):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
     token = create_token(subject="owner")
@@ -244,11 +257,20 @@ async def upload_file(file: UploadFile, subject: str = Depends(require_auth)) ->
     unique_name = f"{uuid.uuid4().hex}{ext}"
     dest = settings.upload_path / unique_name
 
+    bytes_written = 0
     async with aiofiles.open(dest, "wb") as f:
         while chunk := await file.read(1024 * 64):
+            bytes_written += len(chunk)
+            if bytes_written > MAX_UPLOAD_BYTES:
+                # Delete partial file before raising
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="File too large",
+                )
             await f.write(chunk)
 
-    logger.info("File uploaded to %s", dest)
+    logger.info("File uploaded to %s (%d bytes)", dest, bytes_written)
     return UploadResponse(path=str(dest), filename=file.filename)
 
 
