@@ -14,7 +14,7 @@ Usage:
     python3 backend/scripts/audit_runner.py
 """
 
-import os
+import fcntl
 import re
 import sys
 from datetime import datetime, timezone
@@ -143,11 +143,14 @@ def run_audit() -> None:
     # Print to stdout for visibility
     print(entry)
 
-    # Append to audit_log.md (create if missing)
+    # Append to audit_log.md with an exclusive file lock so concurrent runs
+    # (e.g., launchd + manual invocation overlapping) don't interleave writes.
     with open(AUDIT_LOG, "a", encoding="utf-8") as log:
-        if AUDIT_LOG.stat().st_size == 0 if AUDIT_LOG.exists() else False:
-            pass  # file was just created, no preamble needed
-        log.write(entry)
+        fcntl.flock(log.fileno(), fcntl.LOCK_EX)
+        try:
+            log.write(entry)
+        finally:
+            fcntl.flock(log.fileno(), fcntl.LOCK_UN)
 
     print(f"Appended audit entry to {AUDIT_LOG}", file=sys.stderr)
 

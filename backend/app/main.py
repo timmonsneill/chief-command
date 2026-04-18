@@ -39,9 +39,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Rate limiter — 5 login attempts per minute per IP
+# Rate limiter — 5 login attempts per minute per IP (Cloudflare-aware)
 # ---------------------------------------------------------------------------
-limiter = Limiter(key_func=get_remote_address)
+def _real_client_ip(request: Request) -> str:
+    """Resolve the real client IP behind Cloudflare tunnel.
+
+    Order: CF-Connecting-IP (set by Cloudflare itself) → first X-Forwarded-For hop
+    → slowapi default. Without this, request.client.host is always 127.0.0.1
+    (tunnel process), collapsing all users into one rate-limit bucket.
+    """
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf.strip()
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_real_client_ip)
 
 app = FastAPI(
     title="Chief Command Center",
@@ -258,17 +274,21 @@ async def upload_file(file: UploadFile, subject: str = Depends(require_auth)) ->
     dest = settings.upload_path / unique_name
 
     bytes_written = 0
-    async with aiofiles.open(dest, "wb") as f:
-        while chunk := await file.read(1024 * 64):
-            bytes_written += len(chunk)
-            if bytes_written > MAX_UPLOAD_BYTES:
-                # Delete partial file before raising
-                dest.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="File too large",
-                )
-            await f.write(chunk)
+    try:
+        async with aiofiles.open(dest, "wb") as f:
+            while chunk := await file.read(1024 * 64):
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="File too large",
+                    )
+                await f.write(chunk)
+    except Exception:
+        # Any failure (HTTP 413, disk full on write, client disconnect during read)
+        # leaves a partial file on disk — always clean it up.
+        dest.unlink(missing_ok=True)
+        raise
 
     logger.info("File uploaded to %s (%d bytes)", dest, bytes_written)
     return UploadResponse(path=str(dest), filename=file.filename)

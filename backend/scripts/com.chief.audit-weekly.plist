@@ -57,9 +57,11 @@
   <key>StandardErrorPath</key>
   <string>/tmp/chief-audit-error.log</string>
 
-  <!-- Start on boot if missed while machine was off -->
+  <!-- Catch up on missed runs: if the Mac was off at the scheduled time,
+       launchd will fire the job once when the machine boots back up.
+       Without this, a Mac off on Monday 8am skips that week entirely. -->
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
 </dict>
 </plist>
