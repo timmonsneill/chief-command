@@ -7,6 +7,9 @@ Global memory : ~/.claude/projects/-Users-user/memory/*.md
 Per-agent memory: ~/.claude/agents/memory/<name>.md
 Audit log     : ~/.claude/projects/-Users-user/memory/audit_log.md
                 (return empty list if missing; never crash)
+
+Shared constants + helpers live in ``memory_paths``; this module imports
+from there so Chief's prompt builder and the REST memory API agree.
 """
 
 import logging
@@ -15,26 +18,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.memory_paths import (
+    AGENT_MEMORY_DIR,
+    AUDIT_LOG_PATH,
+    GLOBAL_EXCLUDE,
+    USER_MEMORY_DIR as _GLOBAL_MEMORY_DIR,
+    classify_type,
+    parse_frontmatter,
+    safe_md_files,
+)
+
 logger = logging.getLogger(__name__)
-
-_GLOBAL_MEMORY_DIR = Path.home() / ".claude" / "projects" / "-Users-user" / "memory"
-_AGENT_MEMORY_DIR = Path.home() / ".claude" / "agents" / "memory"
-_AUDIT_LOG_PATH = _GLOBAL_MEMORY_DIR / "audit_log.md"
-
-# Files to exclude from the global memory listing
-_GLOBAL_EXCLUDE = {"MEMORY.md", "PROJECTS.json", "audit_log.md"}
 
 # Named agents — must match team_service.ROSTER names
 _AGENT_NAMES = [
     "Chief", "Atlas", "Forge", "Riggs", "Finn", "Nova",
     "Vera", "Hawke", "Sable", "Pax", "Quill", "Hip",
-]
-
-# Keywords used to classify a filename into type
-_TYPE_RULES: list[tuple[str, str]] = [
-    ("feedback_", "feedback"),
-    ("project_", "project"),
-    ("user_", "user"),
 ]
 
 # Project classification: filename keywords -> project label.
@@ -65,34 +64,6 @@ def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
-def _parse_frontmatter(content: str) -> dict[str, str]:
-    """Extract YAML-ish frontmatter fields from a markdown file.
-
-    Supports the simple ``key: value`` block between ``---`` delimiters.
-    Returns an empty dict if no frontmatter is present.
-    """
-    stripped = content.lstrip()
-    if not stripped.startswith("---"):
-        return {}
-    end = stripped.find("\n---", 3)
-    if end == -1:
-        return {}
-    block = stripped[3:end].strip()
-    fields: dict[str, str] = {}
-    for line in block.splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
-    return fields
-
-
-def _classify_type(filename: str) -> str:
-    for prefix, ttype in _TYPE_RULES:
-        if filename.startswith(prefix):
-            return ttype
-    return "reference"
-
-
 def _classify_project(filename: str) -> str | None:
     """Return a project label for a filename, or None if it doesn't belong to one."""
     stem = filename.lower().replace(".md", "")
@@ -110,10 +81,10 @@ def _build_entry(path: Path) -> dict[str, Any]:
     except OSError as exc:
         logger.warning("Could not read memory file %s: %s", path.name, exc)
 
-    fm = _parse_frontmatter(content)
+    fm = parse_frontmatter(content)
     title = fm.get("name") or path.stem
     description = fm.get("description", "")
-    ftype = fm.get("type") or _classify_type(path.name)
+    ftype = fm.get("type") or classify_type(path.name)
 
     return {
         "filename": path.name,
@@ -209,16 +180,15 @@ def get_all_memory() -> dict[str, Any]:
     global_entries: list[dict[str, Any]] = []
     project_buckets: dict[str, list[dict[str, Any]]] = {}
 
-    if _GLOBAL_MEMORY_DIR.exists():
-        for path in sorted(_GLOBAL_MEMORY_DIR.glob("*.md")):
-            if path.name in _GLOBAL_EXCLUDE:
-                continue
-            entry = _build_entry(path)
-            project = _classify_project(path.name)
-            if project:
-                project_buckets.setdefault(project, []).append(entry)
-            else:
-                global_entries.append(entry)
+    for path in safe_md_files(_GLOBAL_MEMORY_DIR):
+        if path.name in GLOBAL_EXCLUDE:
+            continue
+        entry = _build_entry(path)
+        project = _classify_project(path.name)
+        if project:
+            project_buckets.setdefault(project, []).append(entry)
+        else:
+            global_entries.append(entry)
 
     # --- Per-project list -----------------------------------------------
     per_project: list[dict[str, Any]] = []
@@ -234,8 +204,8 @@ def get_all_memory() -> dict[str, Any]:
     # --- Per-agent memory -----------------------------------------------
     per_agent: list[dict[str, Any]] = []
     for name in _AGENT_NAMES:
-        path = _AGENT_MEMORY_DIR / f"{name.lower()}.md"
-        if path.exists():
+        path = AGENT_MEMORY_DIR / f"{name.lower()}.md"
+        if path.exists() and not path.is_symlink():
             try:
                 content = path.read_text(encoding="utf-8")
                 updated_at: str | None = _mtime_iso(path)
@@ -247,9 +217,9 @@ def get_all_memory() -> dict[str, Any]:
 
     # --- Audit log ------------------------------------------------------
     audit_entries: list[dict[str, str]] = []
-    if _AUDIT_LOG_PATH.exists():
+    if AUDIT_LOG_PATH.exists() and not AUDIT_LOG_PATH.is_symlink():
         try:
-            audit_content = _AUDIT_LOG_PATH.read_text(encoding="utf-8")
+            audit_content = AUDIT_LOG_PATH.read_text(encoding="utf-8")
             audit_entries = _parse_audit_log(audit_content)
         except OSError as exc:
             logger.warning("Could not read audit log: %s", exc)
@@ -283,7 +253,9 @@ def get_memory_file(filename: str) -> dict[str, Any]:
         path = _safe_memory_path(filename)
     except ValueError as exc:
         raise FileNotFoundError(str(exc))
-    if not path.exists() or path.name in _GLOBAL_EXCLUDE:
+    if not path.exists() or path.name in GLOBAL_EXCLUDE:
+        raise FileNotFoundError(f"Memory file not found: {filename!r}")
+    if path.is_symlink():
         raise FileNotFoundError(f"Memory file not found: {filename!r}")
     return _build_entry(path)
 
@@ -293,9 +265,11 @@ def put_memory_file(filename: str, content: str) -> dict[str, Any]:
 
     Rejects traversal, non-.md, and protected filenames.
     """
-    if filename in _GLOBAL_EXCLUDE:
+    if filename in GLOBAL_EXCLUDE:
         raise ValueError(f"Cannot write to protected file: {filename!r}")
     path = _safe_memory_path(filename)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"Refusing to overwrite symlink: {filename!r}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")

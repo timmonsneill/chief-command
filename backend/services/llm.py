@@ -95,9 +95,10 @@ async def stream_turn(
 
     if system_blocks is None:
         # Legacy path — preserved for any caller that hasn't adopted
-        # chief_context.build_chief_system() yet.
+        # chief_context.build_chief_system() yet. Keeps Chief functional as a
+        # generic assistant if the full context builder ever errors out.
         system_blocks = []
-        if project_scope and project_scope != "All":
+        if project_scope and project_scope.strip():
             system_blocks.append({
                 "type": "text",
                 "text": f"[Current project: {project_scope}]",

@@ -1,7 +1,10 @@
 import { createContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react'
 import { api } from '../lib/api'
 
-const FALLBACK_PROJECTS = ['All', 'Arch', 'Chief Command', 'Butler', 'Archie'] as const
+// Scope is always a concrete single project — no "All" mode (owner design
+// decision — the project switcher is the only way to change focus).
+const FALLBACK_PROJECTS = ['Chief Command', 'Arch', 'Butler', 'Archie'] as const
+const DEFAULT_PROJECT = 'Chief Command'
 
 export interface ProjectContextValue {
   current: string
@@ -17,10 +20,10 @@ interface Props {
 }
 
 export function ProjectContextProvider({ children }: Props) {
-  const [current, setCurrent] = useState<string>('All')
+  const [current, setCurrent] = useState<string>(DEFAULT_PROJECT)
   const [available, setAvailable] = useState<string[]>([...FALLBACK_PROJECTS])
   const [isLoading, setIsLoading] = useState(true)
-  const previousRef = useRef<string>('All')
+  const previousRef = useRef<string>(DEFAULT_PROJECT)
 
   useEffect(() => {
     let cancelled = false

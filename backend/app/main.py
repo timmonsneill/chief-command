@@ -1,5 +1,6 @@
 """Chief Command Center — FastAPI application entry point."""
 
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -432,14 +433,12 @@ async def on_startup() -> None:
     await init_db()
     logger.info("Chief Command Center v2 starting on %s:%s", settings.HOST, settings.PORT)
 
-    # Warm Whisper so the first user turn doesn't eat the ~4s cold-start hit.
-    # Fire-and-forget: don't block server startup if load takes a while.
-    import asyncio as _asyncio
-
+    # Warm Whisper + Kokoro so the first user turn doesn't eat the ~4s cold-start
+    # hit. Fire-and-forget so server readiness isn't blocked on model load.
     async def _warm_stt() -> None:
         try:
             logger.info("Warming faster-whisper model in background...")
-            await stt_service._ensure_model()
+            await stt_service.warm()
             logger.info("Whisper warmed")
         except Exception as exc:
             logger.warning("Whisper warm-up failed (first turn will pay cold-start): %s", exc)
@@ -447,15 +446,14 @@ async def on_startup() -> None:
     async def _warm_tts() -> None:
         try:
             logger.info("Warming Kokoro TTS pipeline in background...")
-            await tts_service._ensure_pipeline()
+            await tts_service.warm()
             logger.info("Kokoro warmed")
         except Exception as exc:
             logger.warning("Kokoro warm-up failed (first turn will pay cold-start): %s", exc)
 
-    # Both run concurrently in the background — server is ready to accept
-    # connections immediately.
-    _asyncio.create_task(_warm_stt())
-    _asyncio.create_task(_warm_tts())
+    # Both run concurrently in the background.
+    asyncio.create_task(_warm_stt())
+    asyncio.create_task(_warm_tts())
 
 
 @app.on_event("shutdown")

@@ -249,15 +249,11 @@ export default function VoicePage() {
       try {
         const parsed = JSON.parse(data) as WsEvent
 
-        // `context_switched` is not in WsEvent (lib/api.ts is Nova's lane);
-        // read through an untyped view to avoid narrowing-to-never.
-        if ((parsed as { type?: string }).type === 'context_switched') {
-          const proj = (parsed as { project?: string }).project
-          if (proj) {
-            // Fire-and-forget — backend already knows; this keeps the picker UI in sync.
-            setProjectContext(proj)
-            toast.success(`Switched to ${proj}`)
-          }
+        if (parsed.type === 'context_switched') {
+          // Backend already updated scope — mirror it into the picker so the UI
+          // matches and project-aware views re-fetch with the new scope.
+          setProjectContext(parsed.project)
+          toast.success(`Switched to ${parsed.project}`)
         }
 
         if (parsed.type === 'transcript') {

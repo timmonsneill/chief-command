@@ -49,6 +49,14 @@ class TTSService:
         """Output sample rate."""
         return self._sample_rate
 
+    async def warm(self) -> None:
+        """Public warm-up entry point — loads the Kokoro pipeline if not already loaded.
+
+        Called by FastAPI startup to avoid cold-start latency on the first turn.
+        Thin wrapper over ``_ensure_pipeline`` so callers don't reach into private API.
+        """
+        await self._ensure_pipeline()
+
     async def _ensure_pipeline(self) -> None:
         """Lazy-load the Kokoro TTS pipeline on first use. Thread-safe."""
         if self._pipeline is not None:
