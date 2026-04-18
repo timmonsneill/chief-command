@@ -356,12 +356,14 @@ export default function VoicePage() {
   const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError, status: vadStatus, frameCount: vadFrames, speechStartCount: vadStarts, speechEndCount: vadEnds, lastAudioSamples: vadLastSamples } = useVad({
     enabled: conversationActive,
     onSpeechStart: useCallback(() => {
-      // Barge-in: if Chief is speaking, cut audio immediately and switch to listening
+      // Barge-in: if Chief is speaking, cut local audio AND tell backend to stop
+      // generating tokens / synthesizing TTS so we don't bill for output we'll never hear.
       if (isPlayingAudioRef.current) {
         stopAudioPlayback()
+        send(JSON.stringify({ type: 'interrupt' }))
       }
       setVoiceState('speaking')
-    }, [stopAudioPlayback]),
+    }, [stopAudioPlayback, send]),
     onSpeechEnd: useCallback((audio: Float32Array) => {
       setVoiceState('thinking')
       const wav = float32ToWav(audio)

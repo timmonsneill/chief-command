@@ -402,14 +402,24 @@ if FRONTEND_DIR.exists():
     async def manifest():
         return FileResponse(FRONTEND_DIR / "manifest.json")
 
+    _FRONTEND_ROOT = FRONTEND_DIR.resolve()
+    _SPA_INDEX = _FRONTEND_ROOT / "index.html"
+
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
         if full_path.startswith(("api/", "ws/", "docs", "openapi.json")):
             raise HTTPException(status_code=404)
-        file_path = FRONTEND_DIR / full_path
-        if file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(FRONTEND_DIR / "index.html")
+        # Path traversal guard: resolve the requested path and confirm it stays
+        # within FRONTEND_DIR. Encoded "../" (%2e%2e) and symlink escapes both
+        # fall through to index.html rather than serving arbitrary files.
+        candidate = (FRONTEND_DIR / full_path).resolve()
+        try:
+            candidate.relative_to(_FRONTEND_ROOT)
+        except ValueError:
+            return FileResponse(_SPA_INDEX)
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_SPA_INDEX)
 
 
 # ---------------------------------------------------------------------------

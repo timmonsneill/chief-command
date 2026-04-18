@@ -208,6 +208,11 @@ export interface WsTtsEndEvent {
   type: 'tts_end'
 }
 
+export interface WsTurnCancelledEvent {
+  type: 'turn_cancelled'
+  reason: string
+}
+
 export interface WsUsageEvent {
   type: 'usage'
   session_id: string
@@ -231,6 +236,7 @@ export type WsEvent =
   | WsMessageDoneEvent
   | WsTtsStartEvent
   | WsTtsEndEvent
+  | WsTurnCancelledEvent
   | WsUsageEvent
   | WsAgentStatusEvent
 

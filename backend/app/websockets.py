@@ -69,6 +69,7 @@ async def voice_ws(ws: WebSocket) -> None:
     session_id: Optional[str] = None
     history: list[dict] = []
     current_project: Optional[str] = None
+    current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
         """Lazy-create session on first real turn to avoid ghost rows from
@@ -79,6 +80,23 @@ async def voice_ws(ws: WebSocket) -> None:
             await create_session(session_id, project=current_project)
             logger.info("Voice WS session started session=%s project=%s", session_id, current_project)
         return session_id
+
+    async def cancel_current_turn(reason: str) -> None:
+        """Cancel an in-flight turn and notify the client. Awaits full teardown
+        so sends are serialized on the WS — no concurrent writes with the turn task."""
+        nonlocal current_turn_task
+        if current_turn_task and not current_turn_task.done():
+            logger.info("Voice WS cancelling turn session=%s reason=%s", session_id, reason)
+            current_turn_task.cancel()
+            try:
+                await current_turn_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await ws.send_json({"type": "turn_cancelled", "reason": reason})
+            except Exception:
+                pass
+        current_turn_task = None
 
     try:
         while True:
@@ -105,6 +123,10 @@ async def voice_ws(ws: WebSocket) -> None:
                     logger.info("Voice WS context updated project=%s", current_project)
                     continue
 
+                if msg_type == "interrupt":
+                    await cancel_current_turn("barge-in")
+                    continue
+
                 if msg_type and msg_type != "text":
                     logger.info("Voice WS ignoring non-text message type: %s", msg_type)
                     continue
@@ -113,15 +135,21 @@ async def voice_ws(ws: WebSocket) -> None:
                     logger.info("Voice WS empty text — skipping")
                     continue
 
+                await cancel_current_turn("superseded")
                 sid = await ensure_session()
                 logger.info("Voice WS handling text turn session=%s len=%d", sid, len(text_content))
-                await _handle_text_turn(ws, sid, history, text_content, current_project)
+                current_turn_task = asyncio.create_task(
+                    _handle_text_turn(ws, sid, history, text_content, current_project)
+                )
 
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
                 logger.info("Voice WS AUDIO inbound: %d bytes", len(audio_data))
+                await cancel_current_turn("superseded")
                 sid = await ensure_session()
-                await _handle_audio_turn(ws, sid, history, audio_data, current_project)
+                current_turn_task = asyncio.create_task(
+                    _handle_audio_turn(ws, sid, history, audio_data, current_project)
+                )
 
             else:
                 logger.warning("Voice WS unknown message shape keys=%s", list(message.keys()))
@@ -135,6 +163,12 @@ async def voice_ws(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        if current_turn_task and not current_turn_task.done():
+            current_turn_task.cancel()
+            try:
+                await current_turn_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if session_id is not None:
             await close_session(session_id)
 
