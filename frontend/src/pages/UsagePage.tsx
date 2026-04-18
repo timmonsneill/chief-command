@@ -422,6 +422,8 @@ export default function UsagePage() {
 
   const fetchData = useCallback(async () => {
     setError('')
+    setByModelUnavailable(false)
+    setDailyUnavailable(false)
     const diag: Record<string, string> = {}
     const [sessionList, usageSummary, current] = await Promise.allSettled([
       sessionsApi.list(currentProject),

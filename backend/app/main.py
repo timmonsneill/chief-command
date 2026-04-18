@@ -265,15 +265,29 @@ async def api_list_sessions(
 
 
 @app.get("/api/sessions/current")
-async def api_current_session(subject: str = Depends(require_auth)) -> dict:
+async def api_current_session(subject: str = Depends(require_auth)) -> dict | None:
     sessions = await list_sessions(limit=1)
     if not sessions:
-        return {}
+        return None
     session = sessions[0]
     if session.get("ended_at"):
-        return {}
+        return None
     totals = await get_session_totals(session["id"])
-    return {**session, **totals}
+    detail = await get_session_with_turns(session["id"])
+    last_model = ""
+    if detail and detail.get("turns"):
+        last_model = detail["turns"][-1].get("model", "")
+    return {
+        "session_id": session["id"],
+        "model": last_model,
+        "started_at": session["started_at"],
+        "turn_count": session.get("turn_count", 0),
+        "session_total_cents": session.get("total_cost_cents", 0),
+        "input_tokens": totals.get("input_tokens", 0),
+        "output_tokens": totals.get("output_tokens", 0),
+        "cached_tokens": totals.get("cache_read_tokens", 0),
+        "turn_cost_cents": 0,
+    }
 
 
 @app.get("/api/sessions/{session_id}")
