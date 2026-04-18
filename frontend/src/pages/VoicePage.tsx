@@ -622,22 +622,9 @@ export default function VoicePage() {
               <p className="text-white/70 text-sm font-medium">Tap to start voice</p>
               <p className="text-white/30 text-xs">Always-listening conversation</p>
             </div>
-            {vadError && (
-              <p className="text-destructive text-xs">{vadError}</p>
-            )}
             {!isConnected && (
               <p className="text-white/30 text-xs">Connecting to server...</p>
             )}
-
-            {/* Always-visible VAD debug strip */}
-            <div className="mt-3 w-full max-w-sm rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
-              <div className="flex justify-between"><span>VAD status</span><span className={vadStatus === 'error' ? 'text-red-400' : vadStatus === 'listening' ? 'text-emerald-400' : 'text-white/40'}>{vadStatus}</span></div>
-              {vadError && <div className="flex justify-between"><span>VAD error</span><span className="text-red-400 truncate max-w-[12rem]">{vadError}</span></div>}
-              <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
-              <div className="flex justify-between"><span>Speech start events</span><span>{vadStarts}</span></div>
-              <div className="flex justify-between"><span>Speech end events</span><span>{vadEnds}</span></div>
-              <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
-            </div>
 
             {/* Past messages if any */}
             {messages.length > 0 && (
@@ -733,6 +720,15 @@ export default function VoicePage() {
             <Send size={16} />
           </button>
         </form>
+
+        {/* Always-visible VAD debug strip */}
+        <div className="rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
+          <div className="flex justify-between"><span>VAD status</span><span className={vadStatus === 'error' ? 'text-red-400' : vadStatus === 'listening' ? 'text-emerald-400' : 'text-white/40'}>{vadStatus}</span></div>
+          {vadError && <div className="flex justify-between"><span>VAD error</span><span className="text-red-400 truncate max-w-[16rem]">{vadError}</span></div>}
+          <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
+          <div className="flex justify-between"><span>Speech events</span><span>{vadStarts} start / {vadEnds} end</span></div>
+          <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
+        </div>
       </div>
     </div>
   )
