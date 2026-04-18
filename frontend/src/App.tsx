@@ -13,6 +13,7 @@ import MemoryPage from './pages/MemoryPage'
 import LoginPage from './pages/LoginPage'
 import SharePage from './pages/SharePage'
 import { AuthProvider, useAuth } from './hooks/useAuth'
+import { ProjectContextProvider } from './contexts/ProjectContextProvider'
 
 function ProtectedRoutes() {
   const { isAuthenticated, isLoading } = useAuth()
@@ -30,6 +31,7 @@ function ProtectedRoutes() {
   }
 
   return (
+    <ProjectContextProvider>
     <Layout>
       <Routes>
         <Route path="/voice" element={<ErrorBoundary label="Voice page"><VoicePage /></ErrorBoundary>} />
@@ -44,6 +46,7 @@ function ProtectedRoutes() {
         <Route path="*" element={<Navigate to="/voice" replace />} />
       </Routes>
     </Layout>
+    </ProjectContextProvider>
   )
 }
 
