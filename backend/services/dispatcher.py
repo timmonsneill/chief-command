@@ -251,9 +251,16 @@ class TaskDispatcher:
                 "--print",
                 "--model",
                 "claude-opus-4-7",
+                # End-of-options marker. Without this, a task_spec starting
+                # with "-" or "--" (e.g. a classifier-emitted "--help ...")
+                # would be interpreted by commander.js as a CLI flag rather
+                # than the prompt positional. Vera HIGH finding.
+                "--",
                 task_spec,
             ]
             if command is None and self._extra_args:
+                # Inject extra_args before the flags so the "--" terminator
+                # stays adjacent to task_spec.
                 argv = [argv[0], *self._extra_args, *argv[1:]]
 
             logger.info(

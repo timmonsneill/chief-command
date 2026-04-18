@@ -519,6 +519,77 @@ async def test_serialized_sender_preserves_order() -> None:
         assert got == list(range(10)), f"producer {prefix} order scrambled: {got}"
 
 
+@pytest.mark.asyncio
+async def test_task_spec_with_leading_dashes_reaches_subprocess_as_prompt() -> None:
+    """A task_spec starting with "--" must be delivered as a positional to the
+    subprocess, not interpreted as a flag.
+
+    Vera HIGH — without an end-of-options "--" terminator in argv, a
+    classifier-emitted ``task_spec`` like ``--help this is my prompt`` could
+    make the `claude` CLI print its help and exit, silently eating the
+    dispatch. We validate by pointing the dispatcher at a /bin/sh script that
+    echoes "$@" — whatever reaches argv after the script args is the
+    "prompt" the downstream parser would see, and we assert the full
+    tricksy string lands there intact.
+    """
+    d = TaskDispatcher()
+    output: list[str] = []
+    done = asyncio.Event()
+
+    async def on_output(text: str, stream: str) -> None:
+        if stream == "stdout":
+            output.append(text)
+
+    async def on_complete(exit_code: int, summary: str) -> None:
+        done.set()
+
+    # Synthetic "CLI": a shell script that mirrors the real dispatcher argv
+    # shape — flags, an end-of-options marker, then the task_spec. The
+    # shell's own positional parsing honors "--", so if the dispatcher
+    # passes argv correctly the script will print the prompt verbatim and
+    # NOT treat "--help ..." as one of its own flags.
+    tricksy_spec = "--help this is my prompt"
+    script = (
+        # Emulate a commander-style CLI: skip known flag pairs, then treat
+        # everything after "--" as the prompt.
+        'while [ "$#" -gt 0 ]; do '
+        '  case "$1" in '
+        '    --print) shift ;; '
+        '    --model) shift 2 ;; '
+        '    --) shift; break ;; '
+        '    *) break ;; '
+        '  esac; '
+        'done; '
+        'echo "PROMPT=[$*]"'
+    )
+    cmd = [
+        "/bin/sh",
+        "-c",
+        script,
+        "sh",  # $0
+        "--print",
+        "--model",
+        "claude-opus-4-7",
+        "--",
+        tricksy_spec,
+    ]
+
+    await d.dispatch(
+        session_id="dashspec",
+        task_spec=tricksy_spec,
+        repo=TMP,
+        on_output=on_output,
+        on_complete=on_complete,
+        command=cmd,
+    )
+    await asyncio.wait_for(done.wait(), timeout=5.0)
+
+    combined = "".join(output).strip()
+    assert combined == f"PROMPT=[{tricksy_spec}]", (
+        f"leading-dash task_spec was not delivered as prompt — got {combined!r}"
+    )
+
+
 def test_task_handle_autoderives_task_id() -> None:
     """TaskHandle.__post_init__ sets task_id from started_at when not passed."""
     # Build a handle with a dummy proc (we won't start it).

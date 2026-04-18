@@ -420,6 +420,24 @@ async def _route_task(
     task_spec: str,
     current_project: str,
 ) -> None:
+    # Defense-in-depth alongside the "--" end-of-options marker in
+    # dispatcher.dispatch(). Even if the downstream CLI argv parser didn't
+    # honor "--", a task_spec whose first non-whitespace char is "-" is
+    # almost never a legitimate Claude Code prompt — it's either a prompt
+    # injection attempt or a classifier misfire. Reject and clarify rather
+    # than spawn. Vera HIGH finding.
+    if task_spec.lstrip().startswith("-"):
+        logger.warning(
+            "route_task: rejecting task_spec with leading dash (session=%s spec=%r)",
+            session_id,
+            task_spec[:120],
+        )
+        await _narrate(
+            ws,
+            "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
+        )
+        return
+
     repo = get_repo_path(current_project)
     if repo is None or not repo.exists():
         # No local repo configured for this scope. Fall back to chat so Chief
