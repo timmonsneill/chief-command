@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
-import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown } from 'lucide-react'
+import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown, ChevronUp } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useVad } from '../hooks/useVad'
 import { useProjectContext } from '../hooks/useProjectContext'
@@ -42,120 +42,6 @@ function float32ToWav(samples: Float32Array, sampleRate = 16000): ArrayBuffer {
   return buffer
 }
 
-// ─── Orb visual component ────────────────────────────────────────────────────
-
-interface VoiceOrbProps {
-  state: VoiceState
-  userSpeaking: boolean
-}
-
-function VoiceOrb({ state, userSpeaking }: VoiceOrbProps) {
-  const isListening = state === 'listening' && !userSpeaking
-  const isSpeaking = userSpeaking || state === 'speaking'
-  const isThinking = state === 'thinking'
-  const isChiefSpeaking = state === 'speaking' && !userSpeaking
-
-  // Outer ripple rings — shown when listening or user speaking
-  const showRipples = isListening || isSpeaking
-
-  // Orb color classes
-  let orbGradient = 'from-chief via-chief-dark to-indigo-900'
-  if (isSpeaking) orbGradient = 'from-amber-500 via-chief to-indigo-800'
-  if (isChiefSpeaking) orbGradient = 'from-chief-light via-chief to-indigo-900'
-  if (isThinking) orbGradient = 'from-surface-raised via-surface-overlay to-surface-raised'
-
-  // Orb animation
-  let orbAnim = 'animate-orb-breathe'
-  if (isSpeaking) orbAnim = 'animate-orb-pulse-strong'
-  if (isChiefSpeaking) orbAnim = 'animate-orb-breathe'
-  if (isThinking) orbAnim = ''
-
-  // Ring colors
-  let rippleColor = 'bg-chief/20'
-  if (isSpeaking) rippleColor = 'bg-amber-500/20'
-
-  return (
-    <div className="relative flex items-center justify-center" style={{ width: 192, height: 192 }}>
-      {/* Slow outer ripple */}
-      {showRipples && (
-        <span
-          className={`absolute rounded-full ${rippleColor} animate-orb-ripple-slow`}
-          style={{ width: 192, height: 192 }}
-        />
-      )}
-      {/* Fast inner ripple */}
-      {showRipples && (
-        <span
-          className={`absolute rounded-full ${rippleColor} animate-orb-ripple`}
-          style={{ width: 192, height: 192 }}
-        />
-      )}
-
-      {/* Main orb */}
-      <div
-        className={`relative w-40 h-40 rounded-full bg-gradient-to-br ${orbGradient} ${orbAnim} flex items-center justify-center shadow-2xl transition-all duration-500`}
-        style={{
-          boxShadow: isSpeaking
-            ? '0 0 60px rgba(245,158,11,0.35), 0 0 120px rgba(99,102,241,0.2)'
-            : isChiefSpeaking
-            ? '0 0 60px rgba(99,102,241,0.45), 0 0 120px rgba(99,102,241,0.15)'
-            : isThinking
-            ? 'none'
-            : '0 0 40px rgba(99,102,241,0.3), 0 0 80px rgba(99,102,241,0.1)',
-        }}
-      >
-        {/* Thinking indicator */}
-        {isThinking && (
-          <div className="flex gap-1.5">
-            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:0ms]" />
-            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:150ms]" />
-            <div className="w-2.5 h-2.5 bg-white/60 rounded-full animate-bounce [animation-delay:300ms]" />
-          </div>
-        )}
-
-        {/* Mic icon — only shown when listening (never MicOff) */}
-        {isListening && (
-          <Mic size={40} className="text-white/90" />
-        )}
-
-        {/* Sound bars — shown when Chief is speaking */}
-        {isChiefSpeaking && (
-          <div className="flex items-end gap-1 h-8">
-            {[0, 150, 75, 225, 50].map((delay, i) => (
-              <div
-                key={i}
-                className="w-1.5 bg-white/80 rounded-full animate-bounce"
-                style={{
-                  height: [20, 32, 24, 28, 16][i],
-                  animationDelay: `${delay}ms`,
-                  animationDuration: '0.7s',
-                }}
-              />
-            ))}
-          </div>
-        )}
-
-        {/* User speaking waveform dots */}
-        {isSpeaking && !isChiefSpeaking && (
-          <div className="flex items-end gap-1.5 h-8">
-            {[0, 100, 50, 200, 125].map((delay, i) => (
-              <div
-                key={i}
-                className="w-1.5 bg-white/90 rounded-full animate-bounce"
-                style={{
-                  height: [16, 28, 20, 32, 24][i],
-                  animationDelay: `${delay}ms`,
-                  animationDuration: '0.5s',
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 // ─── State label ──────────────────────────────────────────────────────────────
 
 const STATE_LABELS: Record<VoiceState, string> = {
@@ -182,6 +68,7 @@ export default function VoicePage() {
   const [speed, setSpeed] = useState(1)
   const [conversationActive, setConversationActive] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
+  const [showVadDebug, setShowVadDebug] = useState(false)
 
   const [activeModel, setActiveModel] = useState<ActiveModel | null>(null)
   const [usage, setUsage] = useState<WsUsageEvent | null>(null)
@@ -194,45 +81,79 @@ export default function VoicePage() {
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
+  // Creating a new Audio() per chunk in a WebSocket callback fails silently on
+  // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
+  // primed on first tap, then every chunk is decoded + played via Web Audio API.
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
+
+  const unlockAudio = useCallback(() => {
+    if (audioContextRef.current) {
+      // Re-resume in case iOS auto-suspended between gestures.
+      if (audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {})
+      }
+      return
+    }
+    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    if (!Ctor) return
+    const ctx = new Ctor()
+    // Play a 1-sample silent buffer to "unlock" audio output on iOS.
+    try {
+      const buf = ctx.createBuffer(1, 1, 22050)
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(ctx.destination)
+      src.start(0)
+    } catch {
+      // Best-effort unlock; proceed regardless.
+    }
+    audioContextRef.current = ctx
+  }, [])
 
   const stopAudioPlayback = useCallback(() => {
     audioQueueRef.current = []
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause()
-      currentAudioRef.current = null
+    if (currentSourceRef.current) {
+      try {
+        currentSourceRef.current.stop()
+      } catch {
+        // Already stopped / not yet started — ignore.
+      }
+      currentSourceRef.current = null
     }
     isPlayingAudioRef.current = false
   }, [])
 
   const playNextChunk = useCallback(async () => {
     if (isPlayingAudioRef.current || audioQueueRef.current.length === 0) return
+    const ctx = audioContextRef.current
+    if (!ctx) {
+      // No primed AudioContext — shouldn't happen after a user gesture, but
+      // drop the chunk rather than silently queueing forever.
+      audioQueueRef.current = []
+      return
+    }
     isPlayingAudioRef.current = true
 
     const chunk = audioQueueRef.current.shift()!
     try {
-      const blob = new Blob([chunk], { type: 'audio/wav' })
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      currentAudioRef.current = audio
-      audio.playbackRate = speed
-      audio.onended = () => {
-        URL.revokeObjectURL(url)
-        currentAudioRef.current = null
+      // decodeAudioData requires a detached ArrayBuffer copy on some browsers.
+      const buffer = await ctx.decodeAudioData(chunk.slice(0))
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.playbackRate.value = speed
+      source.connect(ctx.destination)
+      currentSourceRef.current = source
+      source.onended = () => {
+        currentSourceRef.current = null
         isPlayingAudioRef.current = false
         if (audioQueueRef.current.length > 0) playNextChunk()
         else setVoiceState('listening')
       }
-      audio.onerror = () => {
-        URL.revokeObjectURL(url)
-        currentAudioRef.current = null
-        isPlayingAudioRef.current = false
-        if (audioQueueRef.current.length > 0) playNextChunk()
-        else setVoiceState('listening')
-      }
-      await audio.play()
+      source.start(0)
     } catch {
-      currentAudioRef.current = null
+      currentSourceRef.current = null
       isPlayingAudioRef.current = false
       if (audioQueueRef.current.length > 0) playNextChunk()
       else setVoiceState('listening')
@@ -314,6 +235,14 @@ export default function VoicePage() {
           }
         }
 
+        if (parsed.type === 'turn_cancelled') {
+          // Backend aborted the turn (barge-in or superseded). Binary TTS frames
+          // in flight at cancel-time can still arrive and land in audioQueueRef;
+          // flush so they don't replay on the next turn.
+          stopAudioPlayback()
+          setVoiceState(conversationActive ? 'listening' : 'idle')
+        }
+
         if (parsed.type === 'usage') {
           setUsage(parsed)
           setTurnCount((n) => n + 1)
@@ -350,11 +279,10 @@ export default function VoicePage() {
       } catch {
         // ignore non-JSON
       }
-    }, [conversationActive, playNextChunk]),
+    }, [conversationActive, playNextChunk, stopAudioPlayback]),
   })
 
   const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError, status: vadStatus, frameCount: vadFrames, speechStartCount: vadStarts, speechEndCount: vadEnds, lastAudioSamples: vadLastSamples } = useVad({
-    enabled: conversationActive,
     onSpeechStart: useCallback(() => {
       // Barge-in: if Chief is speaking, cut local audio AND tell backend to stop
       // generating tokens / synthesizing TTS so we don't bill for output we'll never hear.
@@ -393,6 +321,7 @@ export default function VoicePage() {
   }, [conversationActive, vadSpeaking, voiceState])
 
   async function handleStartConversation() {
+    unlockAudio()
     setConversationActive(true)
     setVoiceState('listening')
     await startVad()
@@ -405,10 +334,17 @@ export default function VoicePage() {
     setVoiceState('idle')
   }
 
+  async function handleToggleVoice() {
+    if (conversationActive) handleEndConversation()
+    else await handleStartConversation()
+  }
+
   function handleTextSend(e: FormEvent) {
     e.preventDefault()
     if (!textInput.trim() || voiceState === 'thinking') return
 
+    // Prime audio on any user gesture so Chief's spoken reply plays on iPhone.
+    unlockAudio()
     send(JSON.stringify({ type: 'text', content: textInput.trim() }))
 
     setMessages((prev) => [
@@ -545,16 +481,14 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Main content area */}
-      {conversationActive ? (
-        /* ── Active voice session layout ── */
-        <div className="flex-1 flex flex-col min-h-0">
-          {/* Orb area — fixed height so messages still scroll below */}
-          <div className="flex flex-col items-center justify-center py-6 gap-3 shrink-0">
-            <VoiceOrb state={voiceState} userSpeaking={vadSpeaking} />
-
-            {/* State label under orb */}
-            <p className={`text-sm font-medium transition-all duration-300 ${
+      {/* Main content area — single chat-first layout. The old centerpiece
+          orb is gone: the mic lives inline in the composer row, voice state
+          shows as a thin strip above the chat, and messages take the full
+          viewport on mobile. */}
+      <div className="flex-1 flex flex-col min-h-0">
+        {conversationActive && (
+          <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-surface-border bg-surface-raised/30 shrink-0">
+            <span className={`text-xs font-medium transition-colors ${
               vadSpeaking
                 ? 'text-amber-400'
                 : voiceState === 'thinking'
@@ -564,104 +498,63 @@ export default function VoicePage() {
                 : 'text-emerald-400'
             }`}>
               {getActiveLabel()}
-            </p>
-
-            {/* End call button — PhoneOff, clearly separate from orb */}
+            </span>
             <button
               onClick={handleEndConversation}
-              className="mt-1 flex items-center gap-2 px-4 py-2 rounded-full bg-red-600/20 border border-red-600/40 text-red-400 hover:bg-red-600/30 active:scale-95 transition-all text-sm font-medium"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600/25 border border-red-600/50 text-red-300 hover:bg-red-600/35 active:scale-95 transition-all text-xs font-semibold"
             >
-              <PhoneOff size={15} />
+              <PhoneOff size={12} />
               End call
             </button>
           </div>
+        )}
 
-          {/* Message history — scrollable below the orb */}
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
-            {messages.length === 0 && (
-              <div className="flex items-center justify-center h-full">
-                <p className="text-white/20 text-sm">Speak to start a conversation</p>
-              </div>
-            )}
-
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
-                    msg.role === 'user'
-                      ? 'bg-chief text-white rounded-br-md'
-                      : 'bg-surface-raised text-white/90 rounded-bl-md'
-                  }`}
-                >
-                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                  <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
-                    {formatTime(msg.timestamp)}
-                  </p>
-                </div>
-              </div>
-            ))}
-
-            {voiceState === 'thinking' && (
-              <div className="flex justify-start">
-                <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
-                  <div className="flex gap-1">
-                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
-                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
-                    <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        /* ── Idle / inactive layout ── */
-        <div className="flex-1 flex flex-col min-h-0">
-          {/* Start voice affordance — center of screen */}
-          <div className="flex flex-col items-center justify-center flex-1 gap-5">
-            <button
-              onClick={handleStartConversation}
-              disabled={!isConnected}
-              className="relative w-28 h-28 rounded-full flex items-center justify-center transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed bg-chief hover:bg-chief-dark shadow-lg"
-              style={{ boxShadow: '0 0 40px rgba(99,102,241,0.25)' }}
-            >
-              <Mic size={36} className="text-white" />
-            </button>
-            <div className="text-center space-y-1">
-              <p className="text-white/70 text-sm font-medium">Tap to start voice</p>
-              <p className="text-white/30 text-xs">Always-listening conversation</p>
+        {/* Message history — full-height scroll area */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
+              <p className="text-white/40 text-sm font-medium">
+                {conversationActive ? 'Speak to start a conversation' : 'Tap the mic to talk, or type a message'}
+              </p>
+              {!isConnected && (
+                <p className="text-white/30 text-xs">Connecting to server…</p>
+              )}
             </div>
-            {!isConnected && (
-              <p className="text-white/30 text-xs">Connecting to server...</p>
-            )}
+          )}
 
-            {/* Past messages if any */}
-            {messages.length > 0 && (
-              <div ref={scrollRef} className="w-full max-h-40 overflow-y-auto px-4 space-y-2 mt-2">
-                {messages.map((msg) => (
-                  <div
-                    key={msg.id}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-2xl px-3 py-2 ${
-                        msg.role === 'user'
-                          ? 'bg-chief text-white rounded-br-md'
-                          : 'bg-surface-raised text-white/90 rounded-bl-md'
-                      }`}
-                    >
-                      <p className="text-xs whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                    </div>
-                  </div>
-                ))}
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            >
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                  msg.role === 'user'
+                    ? 'bg-chief text-white rounded-br-md'
+                    : 'bg-surface-raised text-white/90 rounded-bl-md'
+                }`}
+              >
+                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
+                  {formatTime(msg.timestamp)}
+                </p>
               </div>
-            )}
-          </div>
+            </div>
+          ))}
+
+          {voiceState === 'thinking' && (
+            <div className="flex justify-start">
+              <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
+                <div className="flex gap-1">
+                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
+                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
+                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Agent status strip */}
       {workingAgents.length > 0 && (
@@ -680,31 +573,32 @@ export default function VoicePage() {
       )}
 
       {/* Bottom controls */}
-      <div className="px-4 pb-2 pt-3 bg-surface space-y-3">
-        {/* Camera + Screenshot row — always visible */}
-        <div className="flex items-center justify-center gap-4">
+      <div className="px-4 pb-2 pt-2 bg-surface space-y-2">
+        {/* Camera + Screenshot + Speed on a single row — saves ~60px on mobile */}
+        <div className="flex items-center justify-center gap-3">
           <button
             onClick={handleCamera}
-            className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
+            aria-label="Attach photo"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
           >
-            <Camera size={18} />
+            <Camera size={16} />
           </button>
 
           <button
             onClick={handleScreenshot}
-            className="w-11 h-11 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
+            aria-label="Capture screen"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
           >
-            <Monitor size={18} />
+            <Monitor size={16} />
           </button>
-        </div>
 
-        {/* Speed control */}
-        <div className="flex items-center justify-center gap-1">
+          <div className="w-px h-6 bg-surface-border" />
+
           {speeds.map((s) => (
             <button
               key={s}
               onClick={() => setSpeed(s)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
                 speed === s
                   ? 'bg-chief text-white'
                   : 'bg-surface-raised text-white/40 active:text-white/60'
@@ -715,31 +609,80 @@ export default function VoicePage() {
           ))}
         </div>
 
-        {/* Text input */}
-        <form onSubmit={handleTextSend} className="flex gap-2">
+        {/* Composer: inline mic toggle + text input + send. The mic is the
+            voice-mode entry point (replaces the old centerpiece orb) so the
+            chat gets the full viewport. Visual state reflects the pipeline. */}
+        <form onSubmit={handleTextSend} className="flex gap-2 items-center">
+          <button
+            type="button"
+            onClick={handleToggleVoice}
+            disabled={!isConnected}
+            aria-label={conversationActive ? 'End voice conversation' : 'Start voice conversation'}
+            className={`w-11 h-11 shrink-0 flex items-center justify-center rounded-xl border transition-all active:scale-95 disabled:opacity-30 ${
+              !conversationActive
+                ? 'bg-surface-raised border-surface-border text-white/60 hover:text-white'
+                : vadSpeaking
+                ? 'bg-amber-500/30 border-amber-400 text-amber-200 animate-pulse'
+                : voiceState === 'speaking'
+                ? 'bg-chief-light/30 border-chief-light text-chief-light animate-pulse'
+                : voiceState === 'thinking'
+                ? 'bg-amber-600/20 border-amber-500/60 text-amber-300'
+                : 'bg-chief/30 border-chief text-white'
+            }`}
+          >
+            <Mic size={16} />
+          </button>
           <input
             type="text"
             value={textInput}
             onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Type a message..."
+            placeholder={conversationActive ? 'Or type a message…' : 'Type a message…'}
             className="flex-1 h-11 px-4 rounded-xl bg-surface-raised border border-surface-border text-white placeholder-white/30 text-sm focus:outline-none focus:border-chief transition-colors"
           />
           <button
             type="submit"
             disabled={!textInput.trim() || voiceState === 'thinking'}
-            className="w-11 h-11 flex items-center justify-center rounded-xl bg-chief text-white disabled:opacity-30 active:scale-95 transition-all"
+            className="w-11 h-11 shrink-0 flex items-center justify-center rounded-xl bg-chief text-white disabled:opacity-30 active:scale-95 transition-all"
           >
             <Send size={16} />
           </button>
         </form>
 
-        {/* Always-visible VAD debug strip */}
-        <div className="rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
-          <div className="flex justify-between"><span>VAD status</span><span className={vadStatus === 'error' ? 'text-red-400' : vadStatus === 'listening' ? 'text-emerald-400' : 'text-white/40'}>{vadStatus}</span></div>
-          {vadError && <div className="flex justify-between"><span>VAD error</span><span className="text-red-400 truncate max-w-[16rem]">{vadError}</span></div>}
-          <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
-          <div className="flex justify-between"><span>Speech events</span><span>{vadStarts} start / {vadEnds} end</span></div>
-          <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
+        {/* Collapsible VAD debug strip — hidden by default so it doesn't eat
+            ~90px of iPhone viewport. Tiny one-line status header always shows
+            a colored dot + 'VAD' so you can tell if it's broken at a glance;
+            tap to expand full debug details. */}
+        <div className="rounded-xl bg-surface-raised border border-surface-border text-[11px] font-mono text-white/50">
+          <button
+            type="button"
+            onClick={() => setShowVadDebug((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-1.5"
+          >
+            <span className="flex items-center gap-2">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  vadStatus === 'error'
+                    ? 'bg-red-400'
+                    : vadStatus === 'listening'
+                    ? 'bg-emerald-400'
+                    : 'bg-white/30'
+                }`}
+              />
+              <span>VAD</span>
+              <span className={vadStatus === 'error' ? 'text-red-400' : 'text-white/50'}>
+                {vadStatus}
+              </span>
+            </span>
+            {showVadDebug ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+          {showVadDebug && (
+            <div className="px-3 pb-2 space-y-0.5 border-t border-surface-border pt-1.5">
+              {vadError && <div className="flex justify-between"><span>Error</span><span className="text-red-400 truncate max-w-[16rem]">{vadError}</span></div>}
+              <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
+              <div className="flex justify-between"><span>Speech events</span><span>{vadStarts} start / {vadEnds} end</span></div>
+              <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
+            </div>
+          )}
         </div>
       </div>
     </div>

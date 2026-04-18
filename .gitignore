@@ -30,6 +30,11 @@ Thumbs.db
 # Cloudflare
 *.pem
 
+# Local state (SQLite usage DB, etc.)
+*.sqlite
+*.sqlite3
+chief.db
+
 # Logs
 *.log
 .claude/worktrees/

@@ -4,7 +4,6 @@ import { MicVAD } from '@ricky0123/vad-web'
 interface UseVadOptions {
   onSpeechEnd: (audio: Float32Array) => void
   onSpeechStart?: () => void
-  enabled: boolean
 }
 
 type VadStatus = 'idle' | 'starting' | 'listening' | 'error'
@@ -21,7 +20,7 @@ interface UseVadReturn {
   lastAudioSamples: number
 }
 
-export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): UseVadReturn {
+export function useVad({ onSpeechEnd, onSpeechStart }: UseVadOptions): UseVadReturn {
   const vadRef = useRef<MicVAD | null>(null)
   const [speaking, setSpeaking] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -37,7 +36,9 @@ export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): 
   onSpeechStartRef.current = onSpeechStart
 
   const start = useCallback(async () => {
-    if (!enabled) return
+    // NB: don't early-return on `enabled` — the caller decides when to start,
+    // and closing over `enabled` causes a stale-closure race where the first
+    // tap runs with the pre-setConversationActive value and silently no-ops.
     if (vadRef.current) return
 
     setError(null)
@@ -82,7 +83,7 @@ export function useVad({ onSpeechEnd, onSpeechStart, enabled }: UseVadOptions): 
       setError(msg)
       setStatus('error')
     }
-  }, [enabled])
+  }, [])
 
   const stop = useCallback(() => {
     if (vadRef.current) {
