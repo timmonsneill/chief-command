@@ -51,7 +51,7 @@ export function useVad({ onSpeechEnd, onSpeechStart }: UseVadOptions): UseVadRet
         positiveSpeechThreshold: 0.5,
         negativeSpeechThreshold: 0.35,
         minSpeechFrames: 3,
-        redemptionFrames: 8,
+        redemptionFrames: 6,
         additionalAudioConstraints: {
           sampleRate: { ideal: 16000 },
           sampleSize: { ideal: 16 },

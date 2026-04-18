@@ -2,15 +2,98 @@
 
 State is module-level (in-process memory), keyed by JWT subject.
 Resets on server restart — acceptable for v3.
+
+Scope is ALWAYS a concrete single project (per owner design). "All" is not a
+valid scope — the project switcher is the only way to change focus.
 """
 
 import logging
-from typing import Final
+import re
+from typing import Final, Optional
 
 logger = logging.getLogger(__name__)
 
-AVAILABLE_PROJECTS: Final[list[str]] = ["All", "Arch", "Chief Command", "Butler", "Archie"]
-DEFAULT_PROJECT: Final[str] = "All"
+# Canonical project names. The order here drives the default switcher UI order;
+# default scope is the first entry.
+AVAILABLE_PROJECTS: Final[list[str]] = ["Chief Command", "Arch", "Butler", "Archie"]
+DEFAULT_PROJECT: Final[str] = "Chief Command"
+
+
+# ---------------------------------------------------------------------------
+# Switch-intent detection
+# ---------------------------------------------------------------------------
+# Matches user utterances like:
+#   "switch to Arch"                -> "Arch"
+#   "let's talk about Butler"       -> "Butler"
+#   "show me Archie"                -> "Archie"
+# Requires the project name to be followed by end-of-utterance, punctuation,
+# or a whitespace + common terminator word. This rejects false positives like:
+#   "show me all the files"                 (no "all" in the project list now)
+#   "switch to all hands on deck"           ("all" is not a project)
+#   "show me arch of the design"            ("arch of" — not a terminator)
+#   "switch the arch to bcrypt"             (no "to" between switch/arch)
+# ---------------------------------------------------------------------------
+_PROJECT_PATTERN = r"(arch|chief[\s-]?command|chiefcommand|butler|archie)"
+_TERMINATOR = (
+    r"(?=\b(?:\s*[.,!?;:]|\s*$|\s+(?:please|now|today|tomorrow|instead|then|and|but|okay|ok)\b))"
+)
+
+SWITCH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?:switch|change|move)\s+(?:to|over\s+to)\s+{_PROJECT_PATTERN}{_TERMINATOR}",
+        re.I,
+    ),
+    re.compile(
+        rf"\b(?:let'?s\s+)?(?:talk|focus|work)\s+(?:on|about)\s+{_PROJECT_PATTERN}{_TERMINATOR}",
+        re.I,
+    ),
+    re.compile(
+        rf"\b(?:show|give)\s+me\s+{_PROJECT_PATTERN}{_TERMINATOR}",
+        re.I,
+    ),
+]
+
+
+def _canonicalize(raw: str) -> Optional[str]:
+    """Map a raw match like 'chief-command' → 'Chief Command'. Case-insensitive."""
+    if not raw:
+        return None
+    normalized = re.sub(r"[\s-]+", "", raw).lower()  # collapse whitespace + hyphens
+    mapping = {
+        "arch": "Arch",
+        "chiefcommand": "Chief Command",
+        "butler": "Butler",
+        "archie": "Archie",
+    }
+    return mapping.get(normalized)
+
+
+def detect_project_switch(text: str) -> Optional[str]:
+    """If the user text contains a switch intent, return the canonical project name.
+
+    Returns None if no clear switch intent is detected. Examples that MATCH:
+      "switch to arch"          -> "Arch"
+      "let's talk about butler" -> "Butler"
+      "show me archie"          -> "Archie"
+      "switch to arch, please"  -> "Arch"
+
+    Examples that do NOT match (false-positive guards):
+      "show me all the files"         -> None  ("all" not a project, "files" not a terminator)
+      "switch to all hands on deck"   -> None  ("all" not a project)
+      "show me arch of the design"    -> None  ("of" is not a terminator word)
+      "switch the arch to bcrypt"     -> None  (no "to" between switch+arch)
+    """
+    if not text or not text.strip():
+        return None
+    for pattern in SWITCH_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            raw = m.group(1)
+            canonical = _canonicalize(raw)
+            if canonical and canonical in AVAILABLE_PROJECTS:
+                return canonical
+    return None
+
 
 # Module-level dict: subject -> current project name
 _context_store: dict[str, str] = {}

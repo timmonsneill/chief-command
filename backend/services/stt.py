@@ -36,6 +36,14 @@ class STTService:
         """Check if the whisper model is loaded."""
         return self._model is not None
 
+    async def warm(self) -> None:
+        """Public warm-up entry point — loads the whisper model if not already loaded.
+
+        Called by FastAPI startup to avoid cold-start latency on the first turn.
+        Thin wrapper over ``_ensure_model`` so callers don't reach into private API.
+        """
+        await self._ensure_model()
+
     async def _ensure_model(self) -> None:
         """Lazy-load the faster-whisper model on first use. Thread-safe."""
         if self._model is not None:

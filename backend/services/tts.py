@@ -13,8 +13,11 @@ import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
-# Default Kokoro voice — natural American English female
-DEFAULT_VOICE = "af_heart"
+# Default Kokoro voice — Classic British male "George".
+# Fallback voice used if the primary model file can't be loaded (e.g. missing
+# voices/bm_george.pt on first download).
+DEFAULT_VOICE = "bm_george"
+FALLBACK_VOICE = "am_adam"
 DEFAULT_SAMPLE_RATE = 24000  # Kokoro outputs 24kHz audio
 
 # Sentence splitting pattern — split on . ! ? followed by space or end
@@ -45,6 +48,14 @@ class TTSService:
     def sample_rate(self) -> int:
         """Output sample rate."""
         return self._sample_rate
+
+    async def warm(self) -> None:
+        """Public warm-up entry point — loads the Kokoro pipeline if not already loaded.
+
+        Called by FastAPI startup to avoid cold-start latency on the first turn.
+        Thin wrapper over ``_ensure_pipeline`` so callers don't reach into private API.
+        """
+        await self._ensure_pipeline()
 
     async def _ensure_pipeline(self) -> None:
         """Lazy-load the Kokoro TTS pipeline on first use. Thread-safe."""
@@ -118,16 +129,36 @@ class TTSService:
         return wav_bytes
 
     def _synthesize_sync(self, text: str, speed: float) -> bytes:
-        """Run Kokoro synthesis synchronously (called via to_thread)."""
-        # Kokoro's generate method yields (graphemes, phonemes, audio) tuples
-        # Collect all audio segments and concatenate
-        audio_segments = []
+        """Run Kokoro synthesis synchronously (called via to_thread).
 
-        for _gs, _ps, audio in self._pipeline(
-            text, voice=self._voice, speed=speed
-        ):
-            if audio is not None:
-                audio_segments.append(audio)
+        If the configured voice fails (e.g. voice pt file missing), fall back
+        to FALLBACK_VOICE once and record the switch so subsequent calls use it.
+        """
+        audio_segments: list = []
+
+        try:
+            for _gs, _ps, audio in self._pipeline(
+                text, voice=self._voice, speed=speed
+            ):
+                if audio is not None:
+                    audio_segments.append(audio)
+        except Exception as exc:
+            # Common failure mode: voice .pt file missing on disk for new voices
+            # that haven't been downloaded. Log loudly and fall back once.
+            if self._voice != FALLBACK_VOICE:
+                logger.warning(
+                    "TTS voice %r failed (%s); falling back to %r for this and future calls",
+                    self._voice, exc, FALLBACK_VOICE,
+                )
+                self._voice = FALLBACK_VOICE
+                audio_segments = []
+                for _gs, _ps, audio in self._pipeline(
+                    text, voice=self._voice, speed=speed
+                ):
+                    if audio is not None:
+                        audio_segments.append(audio)
+            else:
+                raise
 
         if not audio_segments:
             raise RuntimeError("Kokoro produced no audio output")

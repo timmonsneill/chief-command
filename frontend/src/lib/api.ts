@@ -213,6 +213,11 @@ export interface WsTurnCancelledEvent {
   reason: string
 }
 
+export interface WsContextSwitchedEvent {
+  type: 'context_switched'
+  project: string
+}
+
 export interface WsUsageEvent {
   type: 'usage'
   session_id: string
@@ -237,6 +242,7 @@ export type WsEvent =
   | WsTtsStartEvent
   | WsTtsEndEvent
   | WsTurnCancelledEvent
+  | WsContextSwitchedEvent
   | WsUsageEvent
   | WsAgentStatusEvent
 
@@ -440,7 +446,7 @@ export interface UsageDayPoint {
 
 export const sessionsApi = {
   list: (project?: string) => {
-    const qs = project && project !== 'All' ? `?project=${encodeURIComponent(project)}` : ''
+    const qs = project ? `?project=${encodeURIComponent(project)}` : ''
     return request<Session[]>(`/sessions${qs}`)
   },
   get: (id: string) => request<SessionDetail>(`/sessions/${id}`),

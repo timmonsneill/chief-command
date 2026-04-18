@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from services.memory_paths import AGENT_MEMORY_DIR as _AGENT_MEMORY_DIR
 
-_AGENT_MEMORY_DIR = Path.home() / ".claude" / "agents" / "memory"
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical roster — mirrors project_agent_roster.md
@@ -132,9 +132,12 @@ def _memory_path(name: str) -> Path:
 
 
 def _read_memory_file(name: str) -> tuple[str, str | None]:
-    """Return (content, updated_at_iso).  Content is '' when file is missing."""
+    """Return (content, updated_at_iso).  Content is '' when file is missing.
+
+    Refuses to follow symlinks — rejects silently and returns empty.
+    """
     path = _memory_path(name)
-    if not path.exists():
+    if not path.exists() or path.is_symlink():
         return "", None
     try:
         mtime = path.stat().st_mtime
@@ -147,8 +150,14 @@ def _read_memory_file(name: str) -> tuple[str, str | None]:
 
 
 def _write_memory_file(name: str, content: str) -> str:
-    """Write content to the agent's memory file.  Returns updated_at ISO timestamp."""
+    """Write content to the agent's memory file.  Returns updated_at ISO timestamp.
+
+    Rejects writes through symlinks — callers shouldn't be able to redirect
+    writes to an arbitrary path via a planted symlink.
+    """
     path = _memory_path(name)
+    if path.exists() and path.is_symlink():
+        raise OSError(f"Refusing to overwrite symlinked memory file for {name}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -174,6 +183,7 @@ def get_team() -> list[dict[str, Any]]:
     for agent in ROSTER:
         name = agent["name"]
         mem_path = _memory_path(name)
+        has_memory = mem_path.exists() and not mem_path.is_symlink()
         result.append(
             {
                 "name": name,
@@ -181,7 +191,7 @@ def get_team() -> list[dict[str, Any]]:
                 "lean": agent["lean"],
                 "model": agent["model"],
                 "tier": agent["tier"],
-                "has_memory": mem_path.exists(),
+                "has_memory": has_memory,
                 "last_active": None,
                 "invocations_total": 0,
                 "description": agent["description"],

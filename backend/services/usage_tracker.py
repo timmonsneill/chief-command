@@ -162,7 +162,7 @@ async def get_rolling_totals() -> dict:
 
 async def list_sessions(limit: int = 50, project: str | None = None) -> list[dict]:
     async with get_db() as db:
-        if project and project != "All":
+        if project:
             cursor = await db.execute(
                 "SELECT * FROM sessions WHERE project = ? ORDER BY started_at DESC LIMIT ?",
                 (project, limit),

@@ -1,5 +1,6 @@
 """Chief Command Center — FastAPI application entry point."""
 
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ from slowapi.util import get_remote_address
 from app.websockets import router as ws_router
 from config.settings import settings
 from db import init_db
+from services import stt_service, tts_service
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
 from services.project_context import get_context, set_context
@@ -406,7 +408,7 @@ if FRONTEND_DIR.exists():
     _SPA_INDEX = _FRONTEND_ROOT / "index.html"
 
     @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str):
+    async def serve_spa(full_path: str):
         if full_path.startswith(("api/", "ws/", "docs", "openapi.json")):
             raise HTTPException(status_code=404)
         # Path traversal guard: resolve the requested path and confirm it stays
@@ -430,6 +432,28 @@ if FRONTEND_DIR.exists():
 async def on_startup() -> None:
     await init_db()
     logger.info("Chief Command Center v2 starting on %s:%s", settings.HOST, settings.PORT)
+
+    # Warm Whisper + Kokoro so the first user turn doesn't eat the ~4s cold-start
+    # hit. Fire-and-forget so server readiness isn't blocked on model load.
+    async def _warm_stt() -> None:
+        try:
+            logger.info("Warming faster-whisper model in background...")
+            await stt_service.warm()
+            logger.info("Whisper warmed")
+        except Exception as exc:
+            logger.warning("Whisper warm-up failed (first turn will pay cold-start): %s", exc)
+
+    async def _warm_tts() -> None:
+        try:
+            logger.info("Warming Kokoro TTS pipeline in background...")
+            await tts_service.warm()
+            logger.info("Kokoro warmed")
+        except Exception as exc:
+            logger.warning("Kokoro warm-up failed (first turn will pay cold-start): %s", exc)
+
+    # Both run concurrently in the background.
+    asyncio.create_task(_warm_stt())
+    asyncio.create_task(_warm_tts())
 
 
 @app.on_event("shutdown")
