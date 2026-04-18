@@ -416,37 +416,55 @@ export default function UsagePage() {
   const [error, setError] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
+  const [fetchDiag, setFetchDiag] = useState<Record<string, string>>({})
+
   const fetchData = useCallback(async () => {
     setError('')
-    try {
-      const [sessionList, usageSummary, current] = await Promise.allSettled([
-        sessionsApi.list(),
-        sessionsApi.usageSummary(),
-        sessionsApi.getCurrent(),
-      ])
-      if (sessionList.status === 'fulfilled') setSessions(sessionList.value)
-      if (usageSummary.status === 'fulfilled') setSummary(usageSummary.value)
-      if (current.status === 'fulfilled') setCurrentSession(current.value)
-    } catch {
-      setError('Failed to load usage data')
-    } finally {
-      setLoading(false)
+    const diag: Record<string, string> = {}
+    const [sessionList, usageSummary, current] = await Promise.allSettled([
+      sessionsApi.list(),
+      sessionsApi.usageSummary(),
+      sessionsApi.getCurrent(),
+    ])
+    if (sessionList.status === 'fulfilled') {
+      setSessions(sessionList.value)
+      diag.sessions = `ok (${sessionList.value.length})`
+    } else {
+      diag.sessions = `err: ${String((sessionList.reason as Error)?.message ?? sessionList.reason).slice(0, 40)}`
     }
+    if (usageSummary.status === 'fulfilled') {
+      setSummary(usageSummary.value)
+      diag.summary = `ok`
+    } else {
+      diag.summary = `err: ${String((usageSummary.reason as Error)?.message ?? usageSummary.reason).slice(0, 40)}`
+    }
+    if (current.status === 'fulfilled') {
+      setCurrentSession(current.value)
+      diag.current = `ok`
+    } else {
+      diag.current = `err: ${String((current.reason as Error)?.message ?? current.reason).slice(0, 40)}`
+    }
+    setLoading(false)
 
-    // Optional endpoints — degrade gracefully on 404
     try {
       const bm = await sessionsApi.byModel()
       setByModel(bm)
-    } catch {
+      diag.byModel = 'ok'
+    } catch (e) {
       setByModelUnavailable(true)
+      diag.byModel = `err: ${String((e as Error)?.message ?? e).slice(0, 40)}`
     }
 
     try {
       const dl = await sessionsApi.daily(30)
       setDailyPoints(dl.days)
-    } catch {
+      diag.daily = `ok (${dl.days.length} days)`
+    } catch (e) {
       setDailyUnavailable(true)
+      diag.daily = `err: ${String((e as Error)?.message ?? e).slice(0, 40)}`
     }
+
+    setFetchDiag(diag)
   }, [])
 
   useEffect(() => {
@@ -500,14 +518,25 @@ export default function UsagePage() {
           </div>
         )}
 
-        {/* Hero cost numbers */}
-        {summary && (
-          <div className="flex gap-3">
-            <HeroCostCard label="Today" cents={summary.today_cents} />
-            <HeroCostCard label="Week" cents={summary.week_cents} />
-            <HeroCostCard label="Month" cents={summary.month_cents} alertLevel={alertLevel} />
-          </div>
-        )}
+        {/* Hero cost numbers — always shown, defaults to $0.00 while data loads */}
+        <div className="flex gap-3">
+          <HeroCostCard label="Today" cents={summary?.today_cents ?? 0} />
+          <HeroCostCard label="Week" cents={summary?.week_cents ?? 0} />
+          <HeroCostCard label="Month" cents={summary?.month_cents ?? 0} alertLevel={alertLevel} />
+        </div>
+
+        {/* Tiny diagnostic strip — remove once verified */}
+        <div className="rounded-xl bg-surface-raised border border-surface-border px-3 py-2 text-[11px] font-mono text-white/50 space-y-0.5">
+          {Object.entries(fetchDiag).map(([key, val]) => (
+            <div key={key} className="flex justify-between">
+              <span>{key}</span>
+              <span className={val.startsWith('ok') ? 'text-emerald-400' : 'text-red-400'}>{val}</span>
+            </div>
+          ))}
+          {Object.keys(fetchDiag).length === 0 && (
+            <div className="text-white/30">Fetching…</div>
+          )}
+        </div>
 
         {/* Current session strip */}
         {currentSession && (
