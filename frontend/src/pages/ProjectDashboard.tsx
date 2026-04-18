@@ -27,6 +27,7 @@ interface IframeViewProps {
 
 function IframeView({ project, onBack }: IframeViewProps) {
   const [iframeError, setIframeError] = useState(false)
+  const [loadTimedOut, setLoadTimedOut] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const dashboardUrl = project.dashboard_url!
   const statusCfg = STATUS_CONFIG[project.status] ?? STATUS_CONFIG.active
@@ -34,6 +35,29 @@ function IframeView({ project, onBack }: IframeViewProps) {
   function handleIframeError() {
     setIframeError(true)
   }
+
+  function handleIframeLoad() {
+    // Detect silent X-Frame-Options / CSP block — browser fires `load` even when
+    // the page is blocked, but access to contentDocument throws cross-origin errors.
+    // If the iframe appears completely empty after load, assume it was blocked.
+    try {
+      const doc = iframeRef.current?.contentDocument
+      // Same-origin doc with empty body = blocked. Cross-origin access throws, which
+      // means the frame IS loaded with content and we can't introspect it — that's fine.
+      if (doc && doc.body && doc.body.children.length === 0) {
+        setIframeError(true)
+      }
+    } catch {
+      // Cross-origin access denied = frame loaded successfully with remote content.
+    }
+    setLoadTimedOut(false)
+  }
+
+  // Timeout-based fallback: if onLoad hasn't fired within 8s, assume block.
+  useEffect(() => {
+    const t = setTimeout(() => setLoadTimedOut(true), 8000)
+    return () => clearTimeout(t)
+  }, [dashboardUrl])
 
   return (
     <div className="flex flex-col h-full">
@@ -64,8 +88,8 @@ function IframeView({ project, onBack }: IframeViewProps) {
         </a>
       </div>
 
-      {/* CSP error banner */}
-      {iframeError && (
+      {/* CSP error banner — fires on onError, empty-body detect, or 8s timeout */}
+      {(iframeError || loadTimedOut) && (
         <div className="px-4 py-2.5 bg-status-working/10 border-b border-status-working/20 flex items-center gap-2.5 shrink-0">
           <AlertTriangle size={14} className="text-status-working shrink-0" />
           <p className="text-xs text-white/70 flex-1">
@@ -83,14 +107,15 @@ function IframeView({ project, onBack }: IframeViewProps) {
         </div>
       )}
 
-      {/* Iframe */}
+      {/* Iframe — sandbox drops allow-same-origin (cross-origin by intent) */}
       <iframe
         ref={iframeRef}
         src={dashboardUrl}
         title={`${project.name} dashboard`}
         className="flex-1 w-full border-0"
         onError={handleIframeError}
-        sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+        onLoad={handleIframeLoad}
+        sandbox="allow-scripts allow-popups allow-forms"
       />
     </div>
   )
@@ -141,7 +166,6 @@ function NativeDashboard({ project, onBack }: NativeDashboardProps) {
       <div className="flex-1 overflow-y-auto">
         <div
           key={fadeKey}
-          className="animate-tab-fade"
           style={{ animation: 'tabFade 200ms ease-out' }}
         >
           {activeTab === 'plan' && <PlanTab project={project} />}
@@ -209,9 +233,14 @@ export default function ProjectDashboard() {
     )
   }
 
-  // Branch: iframe for external dashboard, native for everything else
-  if (project.dashboard_url) {
-    return <IframeView project={project} onBack={handleBack} />
+  // Branch: iframe for external dashboard, native for everything else.
+  // Only http(s) URLs allowed — blocks javascript:/data:/file: scheme injection.
+  const safeDashboardUrl =
+    project.dashboard_url && /^https?:\/\//i.test(project.dashboard_url)
+      ? project.dashboard_url
+      : ''
+  if (safeDashboardUrl) {
+    return <IframeView project={{ ...project, dashboard_url: safeDashboardUrl }} onBack={handleBack} />
   }
 
   return <NativeDashboard project={project} onBack={handleBack} />

@@ -30,8 +30,13 @@ def _read_text(path: Path) -> str:
 
 def _parse_checkboxes(text: str) -> list[dict[str, Any]]:
     return [
-        {"text": m.group(2).strip(), "done": m.group(1).lower() == "x"}
-        for m in _CHECKBOX_RE.finditer(text)
+        {
+            "id": f"todo-{i}",
+            "category": "General",
+            "text": m.group(2).strip(),
+            "done": m.group(1).lower() == "x",
+        }
+        for i, m in enumerate(_CHECKBOX_RE.finditer(text))
     ]
 
 
@@ -214,9 +219,11 @@ def get_project(project_id: str) -> dict[str, Any] | None:
 
     return {
         "id": entry["id"],
+        "slug": entry["id"],
         "name": entry["name"],
         "status": entry.get("status", "active"),
         "description": description,
+        "dashboard_url": entry.get("dashboard_url", ""),
         "phases": phases,
         "todos": todos,
         "todo_progress": {
