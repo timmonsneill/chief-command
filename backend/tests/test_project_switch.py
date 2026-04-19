@@ -24,16 +24,16 @@ POSITIVE_CASES: list[tuple[str, str]] = [
     # Bare switch intents terminated at end-of-string.
     ("switch to Arch", "Arch"),
     ("switch to arch", "Arch"),
-    ("change to Butler", "Butler"),
+    ("change to Archie", "Archie"),
     ("move to Archie", "Archie"),
     ("switch over to chief command", "Chief Command"),
     ("switch to chief-command", "Chief Command"),
     # Trailing punctuation terminators.
     ("Switch to Arch.", "Arch"),
     ("Switch to Archie!", "Archie"),
-    ("Switch to butler, please.", "Butler"),
+    ("Switch to archie, please.", "Archie"),
     # "Let's talk about X" forms.
-    ("let's talk about butler", "Butler"),
+    ("let's talk about archie", "Archie"),
     ("let's talk about Arch now", "Arch"),
     ("let's focus on archie today", "Archie"),
     # "Show me X" — short form.
@@ -41,7 +41,7 @@ POSITIVE_CASES: list[tuple[str, str]] = [
     ("show me Arch.", "Arch"),
     # Common-terminator trailing word allowed.
     ("switch to Arch instead", "Arch"),
-    ("switch to Butler then", "Butler"),
+    ("switch to Archie then", "Archie"),
     ("switch to Arch and let's go", "Arch"),
 ]
 

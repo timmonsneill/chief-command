@@ -13,6 +13,7 @@ venv/
 # Build output
 dist/
 build/
+*.tsbuildinfo
 
 # Models (large files)
 models/

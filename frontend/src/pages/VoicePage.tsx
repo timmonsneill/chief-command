@@ -765,7 +765,7 @@ export default function VoicePage() {
             aria-label={conversationActive ? 'End voice conversation' : 'Start voice conversation'}
             className={`w-11 h-11 shrink-0 flex items-center justify-center rounded-xl border transition-all active:scale-95 disabled:opacity-30 ${
               !conversationActive
-                ? 'bg-surface-raised border-surface-border text-white/60 hover:text-white'
+                ? 'bg-surface-raised border-white/30 text-white hover:text-white'
                 : vadSpeaking
                 ? 'bg-amber-500/30 border-amber-400 text-amber-200 animate-pulse'
                 : voiceState === 'speaking'
@@ -775,7 +775,7 @@ export default function VoicePage() {
                 : 'bg-chief/30 border-chief text-white'
             }`}
           >
-            <Mic size={16} />
+            <Mic size={20} />
           </button>
           <input
             type="text"

@@ -13,10 +13,9 @@ import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
-# Default Kokoro voice — Classic British male "George".
-# Fallback voice used if the primary model file can't be loaded (e.g. missing
-# voices/bm_george.pt on first download).
-DEFAULT_VOICE = "bm_george"
+# Default: American female, warm/conversational (Kokoro "af_heart").
+# Fallback: American male if the primary voice .pt file fails to load.
+DEFAULT_VOICE = "af_heart"
 FALLBACK_VOICE = "am_adam"
 DEFAULT_SAMPLE_RATE = 24000  # Kokoro outputs 24kHz audio
 

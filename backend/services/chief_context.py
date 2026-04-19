@@ -52,7 +52,6 @@ _SLUG_TO_CANONICAL: Final[dict[str, str]] = {
     "chief-command": "Chief Command",
     "chief-command-backend": "Chief Command",
     "arch-to-freedom-emr": "Arch",
-    "butler": "Butler",
     "archie": "Archie",
 }
 
@@ -212,8 +211,8 @@ def _build_feedback_memories() -> str:
 def _build_user_project_notes() -> str:
     """Concatenate project_*.md files from the USER memory dir.
 
-    These are top-level notes (archie, butler, infrastructure, agent roster,
-    plans, etc.) — roughly 50KB of owner-authored project context that lives
+    These are top-level notes (archie, infrastructure, agent roster, plans,
+    etc.) — roughly 50KB of owner-authored project context that lives
     outside per-project dirs. Loaded into every scope as always-on context.
     """
     files = safe_md_files(USER_MEMORY_DIR)

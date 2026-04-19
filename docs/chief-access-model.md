@@ -88,8 +88,8 @@ layer 3.
 
 ### Scope
 
-- Only 4 canonical projects recognized: `Chief Command` (default), `Arch`,
-  `Butler`, `Archie`
+- Only 3 canonical projects recognized: `Chief Command` (default), `Arch`,
+  `Archie`
 - "All" was removed as a scope — Chief is always focused on exactly one
   project
 - Explicit switch phrases only: "switch to X", "let's talk about X", "show
@@ -132,7 +132,6 @@ asyncio.create_subprocess_exec(
 |---|---|
 | Arch | `~/Desktop/arch-to-freedom-emr` |
 | Chief Command | `~/Desktop/chief-command` |
-| Butler | (not configured — dispatch refused with clarifying message) |
 | Archie | (not configured — dispatch refused with clarifying message) |
 
 The subprocess starts in that directory. `claude` won't wander unless the

@@ -50,8 +50,11 @@ _PROJECT_KEYWORDS: dict[str, str] = {
     "agent_roster": "Chief Command",
     "infrastructure": "Chief Command",
     "api_transition": "Chief Command",
-    "butler_orchestration": "Butler",
-    "butler": "Butler",
+    # Legacy aliases — "Butler" dissolved into Chief Command Phase 9 on
+    # 2026-04-18. Keep these so existing project_butler_*.md archive files
+    # still classify under Chief Command instead of going unclassified.
+    "butler_orchestration": "Chief Command",
+    "butler": "Chief Command",
 }
 
 

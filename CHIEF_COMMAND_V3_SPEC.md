@@ -6,7 +6,7 @@
 
 1. **Team tab** — the named roster (Chief, Atlas, Forge, Riggs, Finn, Nova, Vera, Hawke, Sable, Pax, Quill, Hip). Cards with role, lean, last-active, link into per-agent memory.
 2. **Memory tab** — global memory, per-project memory, per-agent memory, and audit log. Read/search/edit.
-3. **Project-context switching** — top-bar picker that scopes the UI (memory, sessions, voice/chat context) to one project. Default: "All". Options: Arch, Chief Command, Butler, Archie, All.
+3. **Project-context switching** — top-bar picker that scopes the UI (memory, sessions, voice/chat context) to one project. Default: Chief Command. Options: Chief Command, Arch, Archie.
 
 ## File ownership (no overlap, ever)
 
@@ -113,7 +113,7 @@ Audit log file: `~/.claude/projects/-Users-user/memory/audit_log.md`. Create if 
 
 ```
 GET /api/context
-→ { current: string, available: string[] }    // e.g. { current: "All", available: ["All", "Arch", "Chief Command", "Butler", "Archie"] }
+→ { current: string, available: string[] }    // e.g. { current: "Chief Command", available: ["Chief Command", "Arch", "Archie"] }
 
 POST /api/context
 body: { project: string }

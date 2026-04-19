@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 
 // Scope is always a concrete single project — no "All" mode (owner design
 // decision — the project switcher is the only way to change focus).
-const FALLBACK_PROJECTS = ['Chief Command', 'Arch', 'Butler', 'Archie'] as const
+const FALLBACK_PROJECTS = ['Chief Command', 'Arch', 'Archie'] as const
 const DEFAULT_PROJECT = 'Chief Command'
 
 export interface ProjectContextValue {

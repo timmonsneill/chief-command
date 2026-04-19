@@ -99,17 +99,29 @@ async def _route_task(
         await _handle_text_turn(ws, session_id, history, task_spec, current_project)
         return
 
+    # `task_id` must appear on every task_* frame or the frontend silently
+    # drops them (routes by id, not by most-recently-active ref). The id is
+    # `handle.started_at.isoformat()` which is only set after dispatch spawns.
+    # Use a one-element box so callbacks can close over it and see the id
+    # assigned on the line after dispatch returns.
+    tid_box: list[str] = [""]
+
     async def on_output(text: str, stream: str) -> None:
-        await ws.send_json({"type": "task_output", "text": text, "stream": stream})
+        await ws.send_json({
+            "type": "task_output",
+            "task_id": tid_box[0],
+            "text": text,
+            "stream": stream,
+        })
 
     async def on_complete(exit_code: int, summary: str) -> None:
         await ws.send_json({
             "type": "task_complete",
+            "task_id": tid_box[0],
             "exit_code": exit_code,
             "duration_seconds": int((datetime.now(timezone.utc) - handle.started_at).total_seconds()),
             "summary": summary,
         })
-        # Voice narration of completion — single TTS sentence
         await _narrate(ws, f"Task complete. Exit code {exit_code}. {summary[:160]}")
 
     try:
@@ -124,9 +136,12 @@ async def _route_task(
         await _narrate(ws, "Still working on the previous task. Say status for an update, or stop to cancel.")
         return
 
+    tid_box[0] = handle.task_id   # closures above now see the real id
+
     # Initial narration: immediate, deterministic (no LLM call needed)
     await ws.send_json({
         "type": "task_started",
+        "task_id": handle.task_id,
         "task_spec": task_spec,
         "repo": str(repo),
         "started_at": handle.started_at.isoformat(),
@@ -167,9 +182,16 @@ async def _route_status(
 
 
 async def _route_cancel(ws: WebSocket, session_id: str) -> None:
+    # Fetch the handle BEFORE cancel so we still have access to task_id for
+    # the frame (cancel() may evict the handle).
+    handle = _dispatcher.get_handle(session_id)
     killed = await _dispatcher.cancel(session_id)
-    if killed:
-        await ws.send_json({"type": "task_cancelled", "reason": "owner-requested"})
+    if killed and handle is not None:
+        await ws.send_json({
+            "type": "task_cancelled",
+            "task_id": handle.task_id,
+            "reason": "owner-requested",
+        })
         await _narrate(ws, "Cancelled. Task killed.")
     else:
         await _narrate(ws, "Nothing to cancel — no task running.")
@@ -266,7 +288,7 @@ finally:
 ## Scope safety
 
 - `get_repo_path(current_project)` is the gate. If the scope has no mapped
-  repo (Butler/Archie don't today), `_route_task` falls back to chat with
+  repo (Archie doesn't today), `_route_task` falls back to chat with
   a clarifying message. No subprocess spawned → no risk of wrong-repo write.
 - `cwd=str(repo)` on `create_subprocess_exec` means the `claude` CLI starts
   in the correct directory. Any files it writes land in that repo.
@@ -291,7 +313,7 @@ Forge should verify:
    `~/Desktop/chief-command`, stdout streams, voice narrates dispatch.
 3. Mid-dispatch: `"status?"` → Haiku summarizes current stdout, voice reads it.
 4. Mid-dispatch: `"stop"` → subprocess killed via SIGTERM → SIGKILL after 5s.
-5. No local repo for a scope (switch to Butler): `"Build X"` → chat fallback
+5. No local repo for a scope (switch to Archie): `"Build X"` → chat fallback
    with clarifying message, no subprocess.
 6. `ANTHROPIC_API_KEY` verified absent from subprocess env via `ps eww <pid>`.
 7. User types while task runs: chat path works, task unaffected.

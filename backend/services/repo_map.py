@@ -28,8 +28,8 @@ _ALLOWED_ROOT = (Path.home() / "Desktop").resolve()
 
 
 # Canonical project name -> absolute repo root path.
-# Butler and Archie are intentionally omitted when the directory does not
-# exist on this machine (per spec). Add them here once they land on disk.
+# Archie is intentionally omitted when the directory does not
+# exist on this machine (per spec). Add it here once it lands on disk.
 _REPO_PATHS: dict[str, Path] = {
     "Arch": Path.home() / "Desktop" / "arch-to-freedom-emr",
     "Chief Command": Path.home() / "Desktop" / "chief-command",
@@ -38,7 +38,6 @@ _REPO_PATHS: dict[str, Path] = {
 # Optional configured repos — kept separate so we can log a warning for
 # configured-but-missing without polluting the primary map's "missing" check.
 _OPTIONAL_REPO_PATHS: dict[str, Path] = {
-    "Butler": Path.home() / "Desktop" / "butler",
     "Archie": Path.home() / "Desktop" / "archie",
 }
 

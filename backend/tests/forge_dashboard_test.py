@@ -4,7 +4,7 @@
 Tests:
  - Flow 1: Arch iframe dashboard (archdashboard.netlify.app)
  - Flow 2: Chief Command native dashboard (tabs: Plan, Todos, Timeline, Integrations, Builds)
- - Flow 3: Butler native dashboard (edge case)
+ - Flow 3: Archie native dashboard (edge case)
  - Smoke: all existing routes
 """
 
@@ -183,14 +183,14 @@ async def flow2_chief_native(page) -> dict:
     return results
 
 
-async def flow3_butler_native(page) -> dict:
-    """Flow 3: Butler native dashboard — edge case, mostly empty."""
-    print("\n--- Flow 3: Butler native dashboard ---")
+async def flow3_archie_native(page) -> dict:
+    """Flow 3: Archie native dashboard — edge case, mostly empty."""
+    print("\n--- Flow 3: Archie native dashboard ---")
     r = await verify_route(
         page,
-        "/projects/butler",
+        "/projects/archie",
         expected_visible_text=None,
-        screenshot_to=str(SCREENSHOT_DIR / "butler-dashboard.png"),
+        screenshot_to=str(SCREENSHOT_DIR / "archie-dashboard.png"),
     )
     body_text = await page.inner_text("body")
     no_crash = not r["uncaught_errors"] and "Error" not in body_text[:200]
@@ -211,7 +211,7 @@ async def main():
     try:
         f1 = await flow1_arch_iframe(page)
         f2 = await flow2_chief_native(page)
-        f3 = await flow3_butler_native(page)
+        f3 = await flow3_archie_native(page)
     finally:
         await browser.close()
 
@@ -240,7 +240,7 @@ async def main():
 
     # Flow 3
     f3_pass = f3["no_crash"]
-    print(f"\nFlow 3 (Butler native): {'PASS' if f3_pass else 'FAIL'}")
+    print(f"\nFlow 3 (Archie native): {'PASS' if f3_pass else 'FAIL'}")
     if f3["console_errors"]:
         print(f"  Console errors: {f3['console_errors']}")
 
