@@ -10,6 +10,10 @@ venv/
 .env.local
 .env.production
 
+# Secrets (GCP service account JSONs, etc.) — NEVER commit these
+backend/.secrets/
+.secrets/
+
 # Build output
 dist/
 build/
