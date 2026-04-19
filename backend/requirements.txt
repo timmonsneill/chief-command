@@ -16,3 +16,7 @@ slowapi>=0.1.9
 anthropic>=0.39.0
 aiosqlite>=0.19.0
 playwright>=1.58.0
+# Phase 1.1 — Google Cloud voice provider (optional; only needed when
+# VOICE_PROVIDER=google). Local mode works without these installed.
+google-cloud-speech>=2.27
+google-cloud-texttospeech>=2.16

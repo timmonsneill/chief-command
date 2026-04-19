@@ -15,13 +15,15 @@ from services.audio_utils import (
 )
 from services.stt import STTService
 from services.tts import TTSService
+from services.voice_provider import build_voice_services
 
 # ---------------------------------------------------------------------------
 # Singleton service instances — imported by WebSocket handlers and routes.
-# Models are lazy-loaded on first use, so creating these is instant.
+# The factory picks local (faster-whisper + Kokoro) or google (Cloud Speech
+# v2 + Chirp3 HD TTS) based on settings.VOICE_PROVIDER. Models/clients are
+# lazy-loaded on first use, so creating these is instant either way.
 # ---------------------------------------------------------------------------
-stt_service = STTService()
-tts_service = TTSService()
+stt_service, tts_service = build_voice_services()
 
 __all__ = [
     # Service instances

@@ -1,10 +1,14 @@
 """Application settings loaded from environment variables."""
 
+import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -32,6 +36,17 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "/tmp/chief-uploads"
 
+    # ------------------------------------------------------------------ #
+    # Voice provider selection (Phase 1.1)
+    # ------------------------------------------------------------------ #
+    # "local" (default) uses faster-whisper + Kokoro, no cloud creds needed.
+    # "google" swaps in Cloud Speech v2 streaming + Chirp3 HD TTS — requires
+    # GOOGLE_APPLICATION_CREDENTIALS pointing at a service account JSON.
+    VOICE_PROVIDER: str = "local"
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
+    GOOGLE_TTS_VOICE: str = "en-US-Chirp3-HD-Aoede"
+    GOOGLE_STT_LANGUAGE: str = "en-US"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -51,3 +66,17 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Expose GOOGLE_APPLICATION_CREDENTIALS into os.environ so the Google client
+# libraries (which read that env var directly, not our settings object) can
+# find the service account JSON regardless of whether the owner sets the var
+# in the shell, .env, or both. No-op in local mode.
+if settings.GOOGLE_APPLICATION_CREDENTIALS and not os.environ.get(
+    "GOOGLE_APPLICATION_CREDENTIALS"
+):
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.GOOGLE_APPLICATION_CREDENTIALS
+    logger.info(
+        "GOOGLE_APPLICATION_CREDENTIALS exported from settings: %s",
+        settings.GOOGLE_APPLICATION_CREDENTIALS,
+    )

@@ -27,9 +27,10 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
 
 # Replace `services` package with an empty namespace so individual modules
-# under it (repo_map, classifier, dispatcher) can be imported without pulling
-# in STT/TTS/auth. Submodule imports still work because Python will resolve
-# them relative to the stub's __path__.
+# under it (repo_map, classifier, dispatcher, voice_provider, stt_google,
+# tts_google) can be imported without pulling in STT/TTS/auth/Kokoro/faster-
+# whisper. Submodule imports still work because Python will resolve them
+# relative to the stub's __path__.
 _services_pkg = types.ModuleType("services")
 _services_pkg.__path__ = [str(_BACKEND_ROOT / "services")]  # type: ignore[attr-defined]
 sys.modules["services"] = _services_pkg
