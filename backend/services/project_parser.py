@@ -1,4 +1,9 @@
-"""Parse real project definitions from PROJECTS.json + memory files."""
+"""Parse real project definitions from PROJECTS.json + per-project md files.
+
+Reads from ``settings.projects_data_dir`` (the CC dashboard data directory,
+at ``backend/data/projects/`` inside this repo), NOT from Claude Code's
+memory directory. PROJECTS.json + referenced md files live in-repo so
+they're versioned alongside the code that reads them."""
 
 import json
 import logging
@@ -100,15 +105,15 @@ def _git_log(repo_path: str, n: int = 10) -> list[dict[str, str]]:
 
 
 def _load_projects_json() -> list[dict[str, Any]]:
-    projects_file = settings.memory_dir / "PROJECTS.json"
+    projects_file = settings.projects_data_dir / "PROJECTS.json"
     if not projects_file.exists():
         default: list[dict[str, Any]] = [
             {
                 "id": "arch",
                 "name": "Arch to Freedom EMR",
-                "path": str(Path.home() / "Desktop" / "arch-to-freedom-emr"),
-                "repo_url": str(Path.home() / "Desktop" / "arch-to-freedom-emr"),
-                "memory_files": ["project_archie_voice_app.md", "project_archie_cost_model.md"],
+                "path": str(Path.home() / "Documents" / "GitHub" / "arch-to-freedom-emr"),
+                "repo_url": str(Path.home() / "Documents" / "GitHub" / "arch-to-freedom-emr"),
+                "memory_files": [],
                 "status": "active",
                 "description": "Recovery house EMR — clinical notes, medications, billing, tasks, AI assistant for staff.",
             },
@@ -117,9 +122,18 @@ def _load_projects_json() -> list[dict[str, Any]]:
                 "name": "Chief Command Center",
                 "path": str(Path.home() / "Desktop" / "chief-command"),
                 "repo_url": str(Path.home() / "Desktop" / "chief-command"),
-                "memory_files": ["project_voice_claude_bridge.md"],
+                "memory_files": [],
                 "status": "active",
                 "description": "Owner-only AI command center — voice interface to Claude, agent orchestration, usage tracking.",
+            },
+            {
+                "id": "personal-assist",
+                "name": "Personal Assist",
+                "path": str(Path.home() / "Desktop" / "personal-assist"),
+                "repo_url": str(Path.home() / "Desktop" / "personal-assist"),
+                "memory_files": [],
+                "status": "active",
+                "description": "Personal AI assistant (voice alias 'Jess') — Google-native brain, dashboard + action layer.",
             },
         ]
         try:
@@ -137,7 +151,7 @@ def _load_projects_json() -> list[dict[str, Any]]:
 
 
 def _build_summary(entry: dict[str, Any]) -> dict[str, Any]:
-    mem_dir = settings.memory_dir
+    mem_dir = settings.projects_data_dir
     memory_files: list[str] = entry.get("memory_files", [])
 
     combined_text = ""
@@ -185,7 +199,7 @@ def get_project(project_id: str) -> dict[str, Any] | None:
     if entry is None:
         return None
 
-    mem_dir = settings.memory_dir
+    mem_dir = settings.projects_data_dir
     memory_files: list[str] = entry.get("memory_files", [])
 
     combined_text = ""

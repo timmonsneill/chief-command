@@ -1,0 +1,30 @@
+[
+  {
+    "id": "arch",
+    "name": "Arch App",
+    "path": "/Users/user/Documents/GitHub/arch-to-freedom-emr",
+    "repo_url": "/Users/user/Documents/GitHub/arch-to-freedom-emr",
+    "memory_files": ["project_archie_voice_app.md", "project_archie_cost_model.md"],
+    "status": "active",
+    "description": "Recovery house EMR — clinical notes, medications, billing, tasks, AI assistant (Archie) for staff.",
+    "dashboard_url": "https://archdashboard.netlify.app"
+  },
+  {
+    "id": "chief-command",
+    "name": "Chief Command Center",
+    "path": "/Users/user/Desktop/chief-command",
+    "repo_url": "/Users/user/Desktop/chief-command",
+    "memory_files": ["project_voice_claude_bridge.md", "project_chief_command_plan.md", "project_chief_command_phase9_archive.md"],
+    "status": "active",
+    "description": "Owner-only AI command center — voice interface to Claude, agent orchestration, project dashboards, usage tracking. Phase 9 = Mac Mini convergence (formerly 'Butler')."
+  },
+  {
+    "id": "personal-assist",
+    "name": "Personal Assist",
+    "path": "/Users/user/Desktop/personal-assist",
+    "repo_url": "/Users/user/Desktop/personal-assist",
+    "memory_files": ["project_pa_plan.md", "project_pa_decisions.md"],
+    "status": "active",
+    "description": "Owner's personal life-admin system + voice-first AI assistant (Jess). Tasks, expenses, Whoop, news, travel, golf. Google-only brain (Gemini 2.5 Flash Live + Pro). $150/mo cap. Kicked off 2026-04-19, Phase 0."
+  }
+]

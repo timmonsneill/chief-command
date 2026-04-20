@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     PROJECTS_DIR: str = str(Path.home() / ".claude" / "projects")
     MEMORY_SUBDIR: str = "-Users-user/memory"
 
+    # CC dashboard data directory — PROJECTS.json + the project-level md files
+    # the dashboard reads. Lives INSIDE this repo (not under ~/.claude/projects)
+    # so app data ships with the code that reads it. See
+    # backend/data/projects/. Previously parked in MEMORY_SUBDIR which was a
+    # category error (Claude Code memory dir used as app-data).
+    PROJECTS_DATA_DIR: str = str(
+        (Path(__file__).resolve().parent.parent / "data" / "projects")
+    )
+
     ANTHROPIC_API_KEY: Optional[str] = None
 
     TUNNEL_URL: Optional[str] = None
@@ -57,6 +66,15 @@ class Settings(BaseSettings):
     @property
     def memory_dir(self) -> Path:
         return Path(self.PROJECTS_DIR) / self.MEMORY_SUBDIR
+
+    @property
+    def projects_data_dir(self) -> Path:
+        """Directory containing PROJECTS.json + per-project dashboard md files.
+
+        Lives inside the repo at ``backend/data/projects/`` so it's versioned
+        alongside the code that reads it.
+        """
+        return Path(self.PROJECTS_DATA_DIR)
 
     @property
     def upload_path(self) -> Path:
