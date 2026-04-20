@@ -44,3 +44,7 @@ backend/data/voice_history.db
 # Logs
 *.log
 .claude/worktrees/
+
+# Local Netlify folder
+.netlify
+logs/
