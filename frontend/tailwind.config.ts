@@ -1,21 +1,62 @@
 import type { Config } from 'tailwindcss'
 
+// Chief Command design system — steel-blue + amber, light.
+// Approved 2026-04-20. See:
+//   .claude/projects/.../memory/project_chief_ui_design_system.md
+//
+// Naming strategy: semantic tokens (`surface`, `surface-raised`, `ink`, `muted`,
+// `primary`, `accent`, `rail`). Legacy `chief.*` kept as an alias of `primary`
+// so existing `bg-chief`/`text-chief` classes keep working without a rename
+// sweep across 28 files.
 export default {
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
+        // Backwards-compat alias — steel-blue. Keep `bg-chief` / `text-chief` /
+        // `text-chief-light` / `bg-chief-dark` working while surfaces and
+        // content migrate to new tokens.
         chief: {
-          DEFAULT: '#6366f1',
-          dark: '#4f46e5',
-          light: '#818cf8',
+          DEFAULT: '#3b5577',
+          dark: '#2c4261',
+          light: '#6a83a4',
         },
+        // Light canvas. `surface` = app background, `raised` = card/modal,
+        // `overlay` = hover/pressed, `border` = 1px divider.
         surface: {
-          DEFAULT: '#0f0f0f',
-          raised: '#1a1a1a',
-          overlay: '#242424',
-          border: '#2e2e2e',
+          DEFAULT: '#f6f7f9',
+          raised: '#ffffff',
+          overlay: '#eef1f5',
+          border: '#e3e7ec',
+        },
+        // Ink = body text. Muted = secondary copy/labels. Used as semantic
+        // replacements for the old `text-white/X` opacity ladder.
+        ink: {
+          DEFAULT: '#15171c',
+          muted: '#5c6270',
+          subtle: '#8a909d',
+        },
+        muted: '#5c6270',
+        // Primary action color (same as chief).
+        primary: {
+          DEFAULT: '#3b5577',
+          dark: '#2c4261',
+          light: '#6a83a4',
+        },
+        // Amber accent — active states only, NOT backgrounds.
+        accent: {
+          DEFAULT: '#e8a140',
+          dark: '#c98726',
+          soft: 'rgba(232,161,64,0.10)',
+        },
+        // Navy rail chrome — signature inverse-contrast surface.
+        rail: {
+          DEFAULT: '#1a2230',
+          raised: '#232d3f',
+          border: '#2a3446',
+          ink: '#e6e9ef',
+          muted: '#9aa3b4',
         },
         status: {
           online: '#22c55e',
@@ -24,8 +65,41 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        display: ['Space Grotesk', 'Inter', 'system-ui', 'sans-serif'],
+        // Body — variable Inter loaded via @fontsource-variable.
+        sans: [
+          '"Inter Variable"',
+          'Inter',
+          'system-ui',
+          'sans-serif',
+        ],
+        // Display — Fraunces. Used for brand, page titles, hero numbers.
+        display: [
+          '"Fraunces Variable"',
+          'Fraunces',
+          'Georgia',
+          'serif',
+        ],
+        // Mono — JetBrains Mono for terminal / memory / code surfaces.
+        mono: [
+          '"JetBrains Mono Variable"',
+          '"JetBrains Mono"',
+          'ui-monospace',
+          'SFMono-Regular',
+          'Menlo',
+          'monospace',
+        ],
+      },
+      borderRadius: {
+        // Design-spec radius scale.
+        sm: '6px',
+        md: '10px',
+        lg: '14px',
+        xl: '18px',
+        '2xl': '22px',
+      },
+      boxShadow: {
+        card: '0 1px 3px rgba(21,23,28,.05), 0 4px 14px rgba(21,23,28,.04)',
+        'card-hover': '0 2px 5px rgba(21,23,28,.07), 0 10px 24px rgba(21,23,28,.07)',
       },
       keyframes: {
         'orb-breathe': {

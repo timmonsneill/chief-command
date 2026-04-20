@@ -38,11 +38,13 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-chief/10 mb-4">
-            <Lock className="text-chief" size={28} />
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 mb-4 shadow-card">
+            <Lock className="text-primary" size={28} />
           </div>
-          <h1 className="text-2xl font-bold text-white">Chief</h1>
-          <p className="text-sm text-white/40 mt-1">Command Center</p>
+          <h1 className="font-display text-3xl font-semibold text-ink tracking-tight">
+            Chief<span className="text-accent">.</span>
+          </h1>
+          <p className="text-sm text-ink/50 mt-1">Command Center</p>
         </div>
 
         {/* Form */}
@@ -55,7 +57,7 @@ export default function LoginPage() {
               placeholder="Password"
               autoFocus
               autoComplete="current-password"
-              className="w-full h-12 px-4 rounded-xl bg-surface-raised border border-surface-border text-white placeholder-white/30 text-sm focus:outline-none focus:border-chief transition-colors"
+              className="w-full h-12 px-4 rounded-xl bg-surface-raised border border-surface-border text-ink placeholder-ink/30 text-sm focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all"
             />
           </div>
 

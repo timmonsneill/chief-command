@@ -25,13 +25,13 @@ export function SessionBadge({ sessionId, costCents, turnCount, model }: Session
   return (
     <button
       onClick={() => navigate(`/sessions/${sessionId}`)}
-      className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-raised border border-surface-border text-xs text-white/60 hover:text-white/90 hover:border-white/20 transition-colors"
+      className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-raised border border-surface-border text-xs text-ink/60 hover:text-ink/90 hover:border-ink/20 transition-colors"
     >
       {model && (
         <span className={`w-1.5 h-1.5 rounded-full ${MODEL_DOT[model]}`} />
       )}
-      <span className="tabular-nums font-medium text-white/80">{costLabel}</span>
-      <span className="text-white/30">·</span>
+      <span className="tabular-nums font-medium text-ink/80">{costLabel}</span>
+      <span className="text-ink/30">·</span>
       <span>{turnCount} {turnCount === 1 ? 'turn' : 'turns'}</span>
     </button>
   )

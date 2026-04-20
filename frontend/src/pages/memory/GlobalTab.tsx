@@ -80,7 +80,7 @@ export default function GlobalTab({ entries, query, onOpen }: GlobalTabProps) {
 
   if (filtered.length === 0) {
     return (
-      <div className="text-center py-10 text-white/30 text-sm">
+      <div className="text-center py-10 text-ink/30 text-sm">
         {query ? 'No results' : 'No global memory entries'}
       </div>
     )
@@ -95,15 +95,15 @@ export default function GlobalTab({ entries, query, onOpen }: GlobalTabProps) {
         return (
           <section key={section.key}>
             <div className="flex items-center gap-2 mb-2 px-1">
-              <Icon size={13} className="text-chief-light" />
-              <h2 className="text-[11px] font-semibold uppercase tracking-widest text-white/60">
+              <Icon size={13} className="text-primary" />
+              <h2 className="text-[11px] font-semibold uppercase tracking-widest text-ink/60">
                 {section.label}
               </h2>
-              <span className="text-[10px] text-white/25 ml-auto">
+              <span className="text-[10px] text-ink/25 ml-auto">
                 {items.length}
               </span>
             </div>
-            <p className="text-[11px] text-white/30 px-1 mb-2 leading-snug">
+            <p className="text-[11px] text-ink/30 px-1 mb-2 leading-snug">
               {section.tagline}
             </p>
             <div className="space-y-1.5">
@@ -118,10 +118,10 @@ export default function GlobalTab({ entries, query, onOpen }: GlobalTabProps) {
       {other.length > 0 && (
         <section>
           <div className="flex items-center gap-2 mb-2 px-1">
-            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-white/60">
+            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-ink/60">
               Other
             </h2>
-            <span className="text-[10px] text-white/25 ml-auto">{other.length}</span>
+            <span className="text-[10px] text-ink/25 ml-auto">{other.length}</span>
           </div>
           <div className="space-y-1.5">
             {other.map((entry) => (
@@ -147,14 +147,14 @@ function EntryRow({
       className="w-full flex items-start gap-3 p-3 rounded-xl bg-surface-raised border border-surface-border text-left active:bg-surface-overlay transition-colors"
     >
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-white truncate">{entry.title}</p>
+        <p className="text-sm font-medium text-ink truncate">{entry.title}</p>
         {entry.description && (
-          <p className="text-xs text-white/40 mt-0.5 leading-snug line-clamp-2">
+          <p className="text-xs text-ink/40 mt-0.5 leading-snug line-clamp-2">
             {entry.description}
           </p>
         )}
       </div>
-      <ChevronRight size={15} className="text-white/25 shrink-0 mt-0.5" />
+      <ChevronRight size={15} className="text-ink/25 shrink-0 mt-0.5" />
     </button>
   )
 }

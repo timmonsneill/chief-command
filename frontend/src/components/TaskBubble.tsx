@@ -75,16 +75,16 @@ export function TaskBubble({
         {/* Header row */}
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="text-xs uppercase tracking-wide text-white/40 font-medium">
+            <p className="text-xs uppercase tracking-wide text-ink/40 font-medium">
               Dispatched to Claude Code{repo ? ` (${repo})` : ''}
             </p>
-            <p className="text-sm text-white/90 mt-0.5 break-words">{taskSpec}</p>
+            <p className="text-sm text-ink/90 mt-0.5 break-words">{taskSpec}</p>
           </div>
 
           {status === 'running' && onCancel && (
             <button
               onClick={onCancel}
-              className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-xs bg-red-600/20 border border-red-600/40 text-red-300 hover:bg-red-600/30 active:scale-95 transition-all"
+              className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-xs bg-red-600/20 border border-red-600/40 text-red-700 hover:bg-red-600/30 active:scale-95 transition-all"
               aria-label="Cancel task"
             >
               <X size={12} />
@@ -97,10 +97,10 @@ export function TaskBubble({
         <div className="flex items-center gap-2 text-xs">
           {status === 'running' && (
             <>
-              <Loader2 size={12} className="text-amber-400 animate-spin" />
-              <span className="text-amber-300 font-medium">Running</span>
-              <span className="text-white/30">·</span>
-              <span className="text-white/60 tabular-nums">{shownDuration}</span>
+              <Loader2 size={12} className="text-accent-dark animate-spin" />
+              <span className="text-accent-dark font-medium">Running</span>
+              <span className="text-ink/30">·</span>
+              <span className="text-ink/60 tabular-nums">{shownDuration}</span>
             </>
           )}
 
@@ -108,34 +108,34 @@ export function TaskBubble({
             <>
               {exitCode === 0 ? (
                 <>
-                  <CheckCircle2 size={12} className="text-emerald-400" />
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium">
+                  <CheckCircle2 size={12} className="text-emerald-600" />
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 font-medium">
                     exit 0
                   </span>
                 </>
               ) : (
                 <>
-                  <AlertCircle size={12} className="text-red-400" />
-                  <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 font-medium">
+                  <AlertCircle size={12} className="text-red-600" />
+                  <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-700 font-medium">
                     exit {exitCode}
                   </span>
                 </>
               )}
-              <span className="text-white/30">·</span>
-              <span className="text-white/60 tabular-nums">{shownDuration}</span>
+              <span className="text-ink/30">·</span>
+              <span className="text-ink/60 tabular-nums">{shownDuration}</span>
             </>
           )}
 
           {status === 'cancelled' && (
             <>
-              <Ban size={12} className="text-white/50" />
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-white/60 font-medium">
+              <Ban size={12} className="text-ink/50" />
+              <span className="px-1.5 py-0.5 rounded bg-ink/10 text-ink/60 font-medium">
                 Cancelled
               </span>
               {cancelReason && (
                 <>
-                  <span className="text-white/30">·</span>
-                  <span className="text-white/50 truncate">{cancelReason}</span>
+                  <span className="text-ink/30">·</span>
+                  <span className="text-ink/50 truncate">{cancelReason}</span>
                 </>
               )}
             </>
@@ -144,7 +144,7 @@ export function TaskBubble({
 
         {/* Summary (complete only) */}
         {status === 'complete' && summary && (
-          <p className="text-sm text-white/80 leading-relaxed">{summary}</p>
+          <p className="text-sm text-ink/80 leading-relaxed">{summary}</p>
         )}
 
         {/* Output toggle */}
@@ -152,14 +152,14 @@ export function TaskBubble({
           <div>
             <button
               onClick={() => setShowOutput((v) => !v)}
-              className="flex items-center gap-1 text-[11px] text-white/40 hover:text-white/70 transition-colors"
+              className="flex items-center gap-1 text-[11px] text-ink/40 hover:text-ink/70 transition-colors"
             >
               {showOutput ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               {showOutput ? 'Hide output' : 'Show output'}
-              <span className="text-white/30">({stdoutLines.length} lines)</span>
+              <span className="text-ink/30">({stdoutLines.length} lines)</span>
             </button>
             {showOutput && (
-              <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-black/40 border border-white/5 px-3 py-2 text-[11px] font-mono text-white/70 whitespace-pre-wrap break-words">
+              <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-black/40 border border-ink/5 px-3 py-2 text-[11px] font-mono text-ink/70 whitespace-pre-wrap break-words">
                 {stdoutLines.join('\n')}
               </pre>
             )}

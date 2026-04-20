@@ -25,16 +25,16 @@ export default function AgentsTab({ agents, query, onOpen }: AgentsTabProps) {
   )
 
   if (agents.length === 0) {
-    return <div className="text-center py-10 text-white/30 text-sm">No per-agent memory</div>
+    return <div className="text-center py-10 text-ink/30 text-sm">No per-agent memory</div>
   }
 
   if (filtered.length === 0) {
-    return <div className="text-center py-10 text-white/30 text-sm">No results</div>
+    return <div className="text-center py-10 text-ink/30 text-sm">No results</div>
   }
 
   return (
     <div className="space-y-1.5">
-      <p className="text-[11px] text-white/35 px-1 mb-1 leading-snug">
+      <p className="text-[11px] text-ink/35 px-1 mb-1 leading-snug">
         Each builder's personal memory file. Tap to read or edit.
       </p>
       {filtered.map((agent) => (
@@ -43,26 +43,26 @@ export default function AgentsTab({ agents, query, onOpen }: AgentsTabProps) {
           onClick={() => onOpen(agent)}
           className="w-full flex items-center gap-3 p-3 rounded-xl bg-surface-raised border border-surface-border active:bg-surface-overlay transition-colors text-left"
         >
-          <div className="w-8 h-8 rounded-lg bg-chief/15 text-chief-light flex items-center justify-center shrink-0">
+          <div className="w-8 h-8 rounded-lg bg-chief/15 text-primary flex items-center justify-center shrink-0">
             <Bot size={14} />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-white truncate">{agent.name}</p>
+            <p className="text-sm font-medium text-ink truncate">{agent.name}</p>
             {agent.content ? (
-              <p className="text-[11px] text-white/35 truncate">
+              <p className="text-[11px] text-ink/35 truncate">
                 {agent.content.replace(/\n+/g, ' ').slice(0, 80)}
                 {agent.content.length > 80 ? '…' : ''}
               </p>
             ) : (
-              <p className="text-[11px] text-white/25 italic">Empty</p>
+              <p className="text-[11px] text-ink/25 italic">Empty</p>
             )}
           </div>
           {agent.updated_at && (
-            <span className="text-[10px] text-white/25 shrink-0">
+            <span className="text-[10px] text-ink/25 shrink-0">
               {formatRelativeTime(agent.updated_at)}
             </span>
           )}
-          <ChevronRight size={15} className="text-white/25 shrink-0" />
+          <ChevronRight size={15} className="text-ink/25 shrink-0" />
         </button>
       ))}
     </div>

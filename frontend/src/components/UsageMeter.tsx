@@ -17,9 +17,9 @@ const MODEL_LABELS: Record<ActiveModel, string> = {
 }
 
 const MODEL_COLORS: Record<ActiveModel, string> = {
-  'claude-haiku-4-5': 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  'claude-sonnet-4-6': 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  'claude-opus-4-7': 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+  'claude-haiku-4-5': 'bg-emerald-500/20 text-emerald-600 border-emerald-500/30',
+  'claude-sonnet-4-6': 'bg-blue-500/20 text-blue-600 border-blue-500/30',
+  'claude-opus-4-7': 'bg-purple-500/20 text-purple-600 border-purple-500/30',
 }
 
 function AnimatedCost({ cents }: { cents: number }) {
@@ -66,7 +66,7 @@ export function UsageMeter({ sessionId, inputTokens, outputTokens, cachedTokens,
   return (
     <div className="rounded-xl bg-surface-raised border border-surface-border p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-white/40 text-xs uppercase tracking-wider">Session Cost</span>
+        <span className="text-ink/40 text-xs uppercase tracking-wider">Session Cost</span>
         {model && (
           <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${MODEL_COLORS[model]}`}>
             {MODEL_LABELS[model]}
@@ -74,27 +74,27 @@ export function UsageMeter({ sessionId, inputTokens, outputTokens, cachedTokens,
         )}
       </div>
 
-      <div className="text-3xl font-semibold text-white tabular-nums">
+      <div className="text-3xl font-semibold text-ink tabular-nums">
         <AnimatedCost cents={costCents} />
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-center">
         <div className="bg-surface-overlay rounded-lg px-2 py-1.5">
-          <div className="text-white/80 text-sm font-medium tabular-nums">{inputTokens.toLocaleString()}</div>
-          <div className="text-white/30 text-[10px]">Input</div>
+          <div className="text-ink/80 text-sm font-medium tabular-nums">{inputTokens.toLocaleString()}</div>
+          <div className="text-ink/30 text-[10px]">Input</div>
         </div>
         <div className="bg-surface-overlay rounded-lg px-2 py-1.5">
-          <div className="text-white/80 text-sm font-medium tabular-nums">{outputTokens.toLocaleString()}</div>
-          <div className="text-white/30 text-[10px]">Output</div>
+          <div className="text-ink/80 text-sm font-medium tabular-nums">{outputTokens.toLocaleString()}</div>
+          <div className="text-ink/30 text-[10px]">Output</div>
         </div>
         <div className="bg-surface-overlay rounded-lg px-2 py-1.5">
-          <div className="text-white/80 text-sm font-medium tabular-nums">{cachedTokens.toLocaleString()}</div>
-          <div className="text-white/30 text-[10px]">Cached</div>
+          <div className="text-ink/80 text-sm font-medium tabular-nums">{cachedTokens.toLocaleString()}</div>
+          <div className="text-ink/30 text-[10px]">Cached</div>
         </div>
       </div>
 
       {totalTokens > 0 && (
-        <div className="text-white/30 text-[10px] text-right">
+        <div className="text-ink/30 text-[10px] text-right">
           {totalTokens.toLocaleString()} tokens total
         </div>
       )}

@@ -1,21 +1,48 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+/* Variable fonts shipped offline via @fontsource-variable. */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/fraunces';
+@import '@fontsource-variable/jetbrains-mono';
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Semantic tokens (CSS var mirror of Tailwind theme for ad-hoc styles). */
+  --surface: #f6f7f9;
+  --surface-raised: #ffffff;
+  --surface-overlay: #eef1f5;
+  --surface-border: #e3e7ec;
+  --ink: #15171c;
+  --ink-muted: #5c6270;
+  --ink-subtle: #8a909d;
+  --primary: #3b5577;
+  --accent: #e8a140;
+  --rail: #1a2230;
+
+  color-scheme: light;
+}
+
 * {
   -webkit-tap-highlight-color: transparent;
 }
 
+html,
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  background-color: var(--surface);
+  color: var(--ink);
+}
+
+body {
+  font-family: 'Inter Variable', Inter, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
 }
 
+/* Scrollbars — thin, muted against light surfaces. */
 ::-webkit-scrollbar {
-  width: 4px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -23,8 +50,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2e2e2e;
-  border-radius: 2px;
+  background: rgba(21, 23, 28, 0.12);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(21, 23, 28, 0.2);
 }
 
 @keyframes fadeIn {

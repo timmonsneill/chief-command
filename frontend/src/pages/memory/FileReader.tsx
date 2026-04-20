@@ -38,15 +38,15 @@ function RenderedMarkdown({ text }: { text: string }) {
   const blocks = useMemo(() => parseBlocks(text), [text])
 
   return (
-    <div className="prose-chief text-sm text-white/75 leading-relaxed space-y-3 font-sans">
+    <div className="prose-chief text-sm text-ink/75 leading-relaxed space-y-3 font-sans">
       {blocks.map((block, i) => {
         if (block.kind === 'heading') {
           const sizeClass =
             block.level === 1
-              ? 'text-lg font-semibold text-white'
+              ? 'text-lg font-semibold text-ink'
               : block.level === 2
-              ? 'text-base font-semibold text-white'
-              : 'text-sm font-semibold text-white/90'
+              ? 'text-base font-semibold text-ink'
+              : 'text-sm font-semibold text-ink/90'
           return (
             <h3 key={i} className={`${sizeClass} mt-4 first:mt-0`}>
               {renderInline(block.text)}
@@ -57,7 +57,7 @@ function RenderedMarkdown({ text }: { text: string }) {
           return (
             <pre
               key={i}
-              className="bg-surface border border-surface-border rounded-lg p-3 text-xs text-white/70 font-mono leading-relaxed overflow-x-auto"
+              className="bg-surface border border-surface-border rounded-lg p-3 text-xs text-ink/70 font-mono leading-relaxed overflow-x-auto"
             >
               <code>{block.text}</code>
             </pre>
@@ -67,8 +67,8 @@ function RenderedMarkdown({ text }: { text: string }) {
           return (
             <ul key={i} className="space-y-1.5 pl-1">
               {block.items.map((item, j) => (
-                <li key={j} className="flex gap-2 text-sm text-white/75 leading-relaxed">
-                  <span className="text-chief-light shrink-0 select-none">•</span>
+                <li key={j} className="flex gap-2 text-sm text-ink/75 leading-relaxed">
+                  <span className="text-primary shrink-0 select-none">•</span>
                   <span className="flex-1">{renderInline(item)}</span>
                 </li>
               ))}
@@ -82,7 +82,7 @@ function RenderedMarkdown({ text }: { text: string }) {
           return (
             <div
               key={i}
-              className="text-[11px] text-white/40 font-mono bg-surface-overlay/50 border border-surface-border rounded-lg px-3 py-2 whitespace-pre-wrap"
+              className="text-[11px] text-ink/40 font-mono bg-surface-overlay/50 border border-surface-border rounded-lg px-3 py-2 whitespace-pre-wrap"
             >
               {block.text}
             </div>
@@ -90,7 +90,7 @@ function RenderedMarkdown({ text }: { text: string }) {
         }
         // paragraph
         return (
-          <p key={i} className="text-sm text-white/75 leading-relaxed whitespace-pre-wrap">
+          <p key={i} className="text-sm text-ink/75 leading-relaxed whitespace-pre-wrap">
             {renderInline(block.text)}
           </p>
         )
@@ -202,7 +202,7 @@ function renderInline(text: string) {
     const token = match[0]
     if (token.startsWith('**')) {
       parts.push(
-        <strong key={key++} className="font-semibold text-white">
+        <strong key={key++} className="font-semibold text-ink">
           {token.slice(2, -2)}
         </strong>
       )
@@ -210,7 +210,7 @@ function renderInline(text: string) {
       parts.push(
         <code
           key={key++}
-          className="font-mono text-[0.85em] bg-surface-overlay text-chief-light px-1 py-0.5 rounded"
+          className="font-mono text-[0.85em] bg-surface-overlay text-primary px-1 py-0.5 rounded"
         >
           {token.slice(1, -1)}
         </code>
@@ -219,7 +219,7 @@ function renderInline(text: string) {
       const linkMatch = /\[([^\]]+)\]\(([^)]+)\)/.exec(token)
       if (linkMatch) {
         parts.push(
-          <span key={key++} className="text-chief-light underline decoration-dotted">
+          <span key={key++} className="text-primary underline decoration-dotted">
             {linkMatch[1]}
           </span>
         )
@@ -287,15 +287,15 @@ export default function FileReader({
       <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-border bg-surface/80 backdrop-blur-sm shrink-0">
         <button
           onClick={onBack}
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-white/50 active:text-white active:bg-surface-overlay transition-colors"
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/50 active:text-ink active:bg-surface-overlay transition-colors"
           aria-label="Back"
         >
           <ArrowLeft size={16} />
         </button>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-white truncate">{title}</p>
+          <p className="text-sm font-semibold text-ink truncate">{title}</p>
           {subtitle && (
-            <p className="text-[11px] text-white/40 truncate">{subtitle}</p>
+            <p className="text-[11px] text-ink/40 truncate">{subtitle}</p>
           )}
         </div>
         <div className="flex items-center gap-1 bg-surface-raised border border-surface-border rounded-lg p-0.5 shrink-0">
@@ -304,7 +304,7 @@ export default function FileReader({
             className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors ${
               mode === 'read'
                 ? 'bg-chief text-white'
-                : 'text-white/50 active:text-white'
+                : 'text-ink/50 active:text-ink'
             }`}
           >
             <Eye size={12} />
@@ -315,7 +315,7 @@ export default function FileReader({
             className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors ${
               mode === 'edit'
                 ? 'bg-chief text-white'
-                : 'text-white/50 active:text-white'
+                : 'text-ink/50 active:text-ink'
             }`}
           >
             <Pencil size={12} />
@@ -329,12 +329,12 @@ export default function FileReader({
         {mode === 'read' ? (
           <div className="px-4 py-4 pb-24">
             {content.trim() === '' ? (
-              <p className="text-white/30 text-sm italic">Empty file.</p>
+              <p className="text-ink/30 text-sm italic">Empty file.</p>
             ) : (
               <RenderedMarkdown text={content} />
             )}
             {updatedAt && (
-              <p className="text-[11px] text-white/25 mt-6 pt-3 border-t border-surface-border">
+              <p className="text-[11px] text-ink/25 mt-6 pt-3 border-t border-surface-border">
                 Last updated {formatTimestamp(updatedAt)}
               </p>
             )}
@@ -344,7 +344,7 @@ export default function FileReader({
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              className="flex-1 min-h-[320px] w-full bg-surface border border-surface-border rounded-lg p-3 text-sm text-white/80 font-mono leading-relaxed resize-none focus:outline-none focus:border-chief/50 placeholder-white/20"
+              className="flex-1 min-h-[320px] w-full bg-surface border border-surface-border rounded-lg p-3 text-sm text-ink/80 font-mono leading-relaxed resize-none focus:outline-none focus:border-chief/50 placeholder-ink/20"
               spellCheck={false}
               placeholder="Empty"
             />
@@ -356,7 +356,7 @@ export default function FileReader({
       {/* Sticky save bar (edit mode only) */}
       {mode === 'edit' && (
         <div className="shrink-0 border-t border-surface-border bg-surface/90 backdrop-blur-sm px-4 py-3 flex items-center gap-3">
-          <p className="text-[11px] text-white/40 flex-1 truncate">
+          <p className="text-[11px] text-ink/40 flex-1 truncate">
             {dirty ? 'Unsaved changes' : 'Up to date'}
           </p>
           <button

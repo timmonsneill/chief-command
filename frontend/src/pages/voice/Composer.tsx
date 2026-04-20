@@ -86,7 +86,7 @@ export default function Composer({
             className={`absolute left-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full transition-all ${
               menuOpen
                 ? 'bg-chief text-white rotate-45'
-                : 'bg-surface-overlay text-white/70 active:text-white'
+                : 'bg-surface-overlay text-ink/70 active:text-ink'
             }`}
           >
             <Plus size={16} strokeWidth={2.5} />
@@ -102,35 +102,35 @@ export default function Composer({
           // Don't lose focus immediately when tapping the + button — handled by popover's own outside-click handler
           onBlur={() => setTimeout(() => setFocused(false), 150)}
           placeholder="Type a message..."
-          className={`w-full h-12 ${showPlus ? 'pl-11' : 'pl-4'} pr-4 rounded-2xl bg-surface-raised border border-surface-border text-white placeholder-white/40 text-sm focus:outline-none focus:border-chief/70 transition-all`}
+          className={`w-full h-12 ${showPlus ? 'pl-11' : 'pl-4'} pr-4 rounded-2xl bg-surface-raised border border-surface-border text-ink placeholder-ink/40 text-sm focus:outline-none focus:border-chief/70 transition-all`}
         />
 
         {/* Popover — anchored to the + button */}
         {menuOpen && (
           <div
             ref={menuRef}
-            className="absolute left-0 bottom-full mb-2 z-30 min-w-[220px] bg-surface-overlay border border-surface-border rounded-2xl shadow-2xl overflow-hidden animate-[popUp_0.15s_ease-out]"
+            className="absolute left-0 bottom-full mb-2 z-30 min-w-[220px] bg-surface-raised border border-surface-border rounded-2xl shadow-card-hover overflow-hidden animate-[popUp_0.15s_ease-out]"
           >
             <button
               type="button"
               onClick={pickPhoto}
-              className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/85 active:bg-surface-raised transition-colors"
+              className="w-full flex items-center gap-3 px-4 py-3 text-sm text-ink/85 active:bg-surface-raised transition-colors"
             >
-              <Camera size={17} className="text-chief-light" />
+              <Camera size={17} className="text-primary" />
               Attach photo
             </button>
             <button
               type="button"
               onClick={pickScreen}
-              className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/85 active:bg-surface-raised transition-colors border-t border-surface-border"
+              className="w-full flex items-center gap-3 px-4 py-3 text-sm text-ink/85 active:bg-surface-raised transition-colors border-t border-surface-border"
             >
-              <Monitor size={17} className="text-chief-light" />
+              <Monitor size={17} className="text-primary" />
               Capture screen
             </button>
 
             {/* Playback speed — moved out of the always-on strip */}
             <div className="border-t border-surface-border px-3 py-2.5">
-              <div className="flex items-center gap-2 mb-1.5 text-[11px] uppercase tracking-wider text-white/45">
+              <div className="flex items-center gap-2 mb-1.5 text-[11px] uppercase tracking-wider text-ink/45">
                 <Gauge size={12} />
                 <span>Playback speed</span>
               </div>
@@ -143,7 +143,7 @@ export default function Composer({
                     className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                       speed === s
                         ? 'bg-chief text-white'
-                        : 'bg-surface-raised text-white/60 active:text-white'
+                        : 'bg-surface-raised text-ink/60 active:text-ink'
                     }`}
                   >
                     {s}x

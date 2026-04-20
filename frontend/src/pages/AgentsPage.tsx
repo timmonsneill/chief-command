@@ -76,17 +76,17 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-white/40 active:text-white/80 transition-colors shrink-0"
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/40 active:text-ink/80 transition-colors shrink-0"
             aria-label="Back to agent list"
           >
             <ArrowLeft size={18} />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-xl font-semibold text-white leading-tight truncate">
+            <h1 className="font-display text-xl font-semibold text-ink leading-tight truncate">
               {displayName}
             </h1>
             {agent.subagent_type && agent.subagent_type !== displayName && (
-              <p className="text-xs text-white/40 truncate">{agent.subagent_type}</p>
+              <p className="text-xs text-ink/40 truncate">{agent.subagent_type}</p>
             )}
           </div>
           <span className={`shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.pill}`}>
@@ -100,7 +100,7 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         <div className="p-3 rounded-xl bg-surface-raised border border-surface-border space-y-2.5">
           {agent.model && (
             <MetaRow label="Model">
-              <span className="px-2 py-0.5 rounded bg-surface-overlay text-white/70 text-xs font-mono">
+              <span className="px-2 py-0.5 rounded bg-surface-overlay text-ink/70 text-xs font-mono">
                 {agent.model}
               </span>
             </MetaRow>
@@ -110,7 +110,7 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
             <MetaRow label="Started">
               <button
                 onClick={() => setShowStartedAbsolute((v) => !v)}
-                className="text-xs text-white/60 hover:text-white/80 transition-colors"
+                className="text-xs text-ink/60 hover:text-ink/80 transition-colors"
               >
                 {showStartedAbsolute
                   ? formatAbsoluteTime(agent.started_at)
@@ -123,7 +123,7 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
             <MetaRow label="Completed">
               <button
                 onClick={() => setShowCompletedAbsolute((v) => !v)}
-                className="text-xs text-white/60 hover:text-white/80 transition-colors"
+                className="text-xs text-ink/60 hover:text-ink/80 transition-colors"
               >
                 {showCompletedAbsolute
                   ? formatAbsoluteTime(agent.completed_at)
@@ -134,13 +134,13 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
 
           {elapsed && (
             <MetaRow label="Elapsed">
-              <span className="text-xs text-white/60">{elapsed}</span>
+              <span className="text-xs text-ink/60">{elapsed}</span>
             </MetaRow>
           )}
 
           {agent.worktree_path && (
             <MetaRow label="Worktree">
-              <span className="text-[11px] font-mono text-white/50 break-all">
+              <span className="text-[11px] font-mono text-ink/50 break-all">
                 {agent.worktree_path}
               </span>
             </MetaRow>
@@ -150,11 +150,11 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         {/* Task section */}
         {agent.task && (
           <section>
-            <h2 className="text-[11px] font-medium text-white/30 uppercase tracking-wider mb-2 px-1">
+            <h2 className="text-[11px] font-medium text-ink/30 uppercase tracking-wider mb-2 px-1">
               Task
             </h2>
             <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
-              <p className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+              <p className="text-sm text-ink/80 leading-relaxed whitespace-pre-wrap">
                 {agent.task}
               </p>
             </div>
@@ -164,11 +164,11 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         {/* Summary section */}
         {agent.summary && (
           <section>
-            <h2 className="text-[11px] font-medium text-white/30 uppercase tracking-wider mb-2 px-1">
+            <h2 className="text-[11px] font-medium text-ink/30 uppercase tracking-wider mb-2 px-1">
               Summary
             </h2>
             <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
-              <p className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+              <p className="text-sm text-ink/80 leading-relaxed whitespace-pre-wrap">
                 {agent.summary}
               </p>
             </div>
@@ -176,12 +176,12 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         )}
 
         {!hasContent && (
-          <p className="text-center text-white/20 text-sm py-4">No task or summary recorded</p>
+          <p className="text-center text-ink/20 text-sm py-4">No task or summary recorded</p>
         )}
 
         {/* Raw JSON expander */}
         <details className="group">
-          <summary className="flex items-center gap-2 cursor-pointer list-none px-3 py-2.5 rounded-xl bg-surface-raised border border-surface-border text-xs text-white/30 hover:text-white/50 transition-colors select-none">
+          <summary className="flex items-center gap-2 cursor-pointer list-none px-3 py-2.5 rounded-xl bg-surface-raised border border-surface-border text-xs text-ink/30 hover:text-ink/50 transition-colors select-none">
             <ChevronRight
               size={13}
               className="transition-transform duration-200 group-open:rotate-90"
@@ -189,7 +189,7 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
             View raw
           </summary>
           <div className="mt-2 p-4 rounded-xl bg-surface-raised border border-surface-border overflow-x-auto">
-            <pre className="text-[11px] font-mono text-white/40 leading-relaxed whitespace-pre">
+            <pre className="text-[11px] font-mono text-ink/40 leading-relaxed whitespace-pre">
               {JSON.stringify(agent, null, 2)}
             </pre>
           </div>
@@ -202,7 +202,7 @@ function AgentDetail({ agent, onBack }: { agent: Agent; onBack: () => void }) {
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="text-[11px] text-white/30 w-20 shrink-0 pt-0.5">{label}</span>
+      <span className="text-[11px] text-ink/30 w-20 shrink-0 pt-0.5">{label}</span>
       <div className="flex-1 min-w-0">{children}</div>
     </div>
   )
@@ -245,7 +245,7 @@ export default function AgentsPage() {
   if (loading && agents.length === 0) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading agents...</div>
+        <div className="text-ink/30 text-sm">Loading agents...</div>
       </div>
     )
   }
@@ -253,10 +253,10 @@ export default function AgentsPage() {
   if (error && agents.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-white/40 text-sm">{error}</p>
+        <p className="text-ink/40 text-sm">{error}</p>
         <button
           onClick={fetchAgents}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm active:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm active:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -282,7 +282,7 @@ export default function AgentsPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Bot size={18} className="text-chief" />
-            <h1 className="text-lg font-semibold text-white">Agents</h1>
+            <h1 className="font-display text-lg font-semibold text-ink">Agents</h1>
           </div>
           <div className="flex items-center gap-2">
             {runningCount > 0 && (
@@ -293,7 +293,7 @@ export default function AgentsPage() {
             )}
             <button
               onClick={fetchAgents}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/30 active:text-ink/60 transition-colors"
             >
               <RefreshCw size={14} />
             </button>
@@ -318,27 +318,27 @@ export default function AgentsPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <div className={`w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} />
-                    <span className="text-sm font-medium text-white truncate">
+                    <span className="text-sm font-medium text-ink truncate">
                       {displayName}
                     </span>
                     {agent.subagent_type && agent.subagent_type !== displayName && (
-                      <span className="text-[10px] text-white/30 shrink-0">
+                      <span className="text-[10px] text-ink/30 shrink-0">
                         {agent.subagent_type}
                       </span>
                     )}
                   </div>
                   {agent.task && (
-                    <p className="text-xs text-white/40 mt-1 ml-4 leading-relaxed line-clamp-2">
+                    <p className="text-xs text-ink/40 mt-1 ml-4 leading-relaxed line-clamp-2">
                       {agent.task}
                     </p>
                   )}
                   {!agent.task && agent.summary && (
-                    <p className="text-xs text-white/40 mt-1 ml-4 leading-relaxed line-clamp-2">
+                    <p className="text-xs text-ink/40 mt-1 ml-4 leading-relaxed line-clamp-2">
                       {agent.summary}
                     </p>
                   )}
                   {agent.worktree_path && (
-                    <p className="text-[10px] text-white/20 mt-0.5 ml-4 truncate">
+                    <p className="text-[10px] text-ink/20 mt-0.5 ml-4 truncate">
                       {agent.worktree_path.replace(/.*\//, '')}
                     </p>
                   )}
@@ -348,14 +348,14 @@ export default function AgentsPage() {
                     {cfg.label}
                   </span>
                   {elapsed && (
-                    <span className="text-[10px] text-white/30">{elapsed}</span>
+                    <span className="text-[10px] text-ink/30">{elapsed}</span>
                   )}
                   {lastActive && (
-                    <span className="text-[10px] text-white/20">{lastActive}</span>
+                    <span className="text-[10px] text-ink/20">{lastActive}</span>
                   )}
                   <ChevronRight
                     size={13}
-                    className="text-white/20 group-hover:text-white/40 transition-colors mt-0.5"
+                    className="text-ink/20 group-hover:text-ink/40 transition-colors mt-0.5"
                   />
                 </div>
               </div>
@@ -364,7 +364,7 @@ export default function AgentsPage() {
         })}
 
         {agents.length === 0 && !loading && (
-          <div className="text-center py-12 text-white/30 text-sm">
+          <div className="text-center py-12 text-ink/30 text-sm">
             No agent activity found
           </div>
         )}

@@ -68,9 +68,9 @@ const STATE_LABELS: Record<VoiceState, string> = {
 }
 
 const STATE_COLORS: Record<VoiceState, string> = {
-  idle: 'text-white/30',
-  listening: 'text-emerald-400',
-  speaking: 'text-chief',
+  idle: 'text-ink/40',
+  listening: 'text-emerald-600',
+  speaking: 'text-primary',
   thinking: 'text-status-working',
 }
 
@@ -571,7 +571,7 @@ export default function VoicePage() {
             {voiceState === 'idle' ? 'Ready' : STATE_LABELS[voiceState]}
           </span>
           {!isConnected && (
-            <span className="text-xs text-white/30">Connecting...</span>
+            <span className="text-xs text-ink/30">Connecting...</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -586,7 +586,7 @@ export default function VoicePage() {
           {usage && (
             <button
               onClick={() => setShowUsage((v) => !v)}
-              className="p-1 rounded-md text-white/30 hover:text-white/60 transition-colors"
+              className="p-1 rounded-md text-ink/30 hover:text-ink/60 transition-colors"
             >
               <ChevronDown
                 size={14}
@@ -617,21 +617,21 @@ export default function VoicePage() {
           viewport on mobile. */}
       <div className="flex-1 flex flex-col min-h-0">
         {conversationActive && (
-          <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-surface-border bg-surface-raised/30 shrink-0">
+          <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-surface-border bg-surface-overlay shrink-0">
             <span className={`text-xs font-medium transition-colors ${
               vadSpeaking
-                ? 'text-amber-400'
+                ? 'text-accent-dark'
                 : voiceState === 'thinking'
                 ? 'text-status-working'
                 : voiceState === 'speaking'
-                ? 'text-chief-light'
-                : 'text-emerald-400'
+                ? 'text-primary'
+                : 'text-emerald-600'
             }`}>
               {getActiveLabel()}
             </span>
             <button
               onClick={handleEndConversation}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600/25 border border-red-600/50 text-red-300 hover:bg-red-600/35 active:scale-95 transition-all text-xs font-semibold"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 border border-red-200 text-red-700 hover:bg-red-100 active:scale-95 transition-all text-xs font-semibold"
             >
               <PhoneOff size={12} />
               End call
@@ -645,11 +645,11 @@ export default function VoicePage() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {timeline.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
-              <p className="text-white/40 text-sm font-medium">
+              <p className="text-ink/40 text-sm font-medium">
                 {conversationActive ? 'Speak to start a conversation' : 'Tap the mic to talk, or type a message'}
               </p>
               {!isConnected && (
-                <p className="text-white/30 text-xs">Connecting to server…</p>
+                <p className="text-ink/30 text-xs">Connecting to server…</p>
               )}
             </div>
           )}
@@ -682,12 +682,12 @@ export default function VoicePage() {
                 <div
                   className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
                     msg.role === 'user'
-                      ? 'bg-chief text-white rounded-br-md'
-                      : 'bg-surface-raised text-white/90 rounded-bl-md'
+                      ? 'bg-primary text-white rounded-br-md'
+                      : 'bg-surface-raised border border-surface-border text-ink/90 rounded-bl-md'
                   }`}
                 >
                   <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                  <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/50' : 'text-white/30'}`}>
+                  <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-white/70' : 'text-ink/30'}`}>
                     {formatTime(msg.timestamp)}
                   </p>
                 </div>
@@ -699,9 +699,9 @@ export default function VoicePage() {
             <div className="flex justify-start">
               <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
                 <div className="flex gap-1">
-                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:0ms]" />
-                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:150ms]" />
-                  <div className="w-2 h-2 bg-white/30 rounded-full animate-bounce [animation-delay:300ms]" />
+                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:0ms]" />
+                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:150ms]" />
+                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:300ms]" />
                 </div>
               </div>
             </div>
@@ -715,10 +715,10 @@ export default function VoicePage() {
           {workingAgents.map((agent) => (
             <div
               key={agent.id}
-              className="flex items-center gap-2 text-xs text-white/60 animate-[fadeIn_0.3s_ease-out]"
+              className="flex items-center gap-2 text-xs text-ink/60 animate-[fadeIn_0.3s_ease-out]"
             >
               <div className="w-1.5 h-1.5 rounded-full bg-status-working animate-pulse" />
-              <span className="font-medium text-white/80">{agent.name}:</span>
+              <span className="font-medium text-ink/80">{agent.name}:</span>
               <span className="truncate">{agent.task}</span>
             </div>
           ))}
@@ -736,14 +736,14 @@ export default function VoicePage() {
             aria-label={conversationActive ? 'End voice conversation' : 'Start voice conversation'}
             className={`w-12 h-12 shrink-0 flex items-center justify-center rounded-2xl border transition-all active:scale-95 disabled:opacity-30 ${
               !conversationActive
-                ? 'bg-surface-raised border-white/30 text-white'
+                ? 'bg-surface-raised border-ink/15 text-ink/70 hover:text-ink hover:border-primary/40'
                 : vadSpeaking
-                ? 'bg-amber-500/30 border-amber-400 text-amber-200 animate-pulse'
+                ? 'bg-accent/15 border-accent text-accent-dark animate-pulse'
                 : voiceState === 'speaking'
-                ? 'bg-chief-light/30 border-chief-light text-chief-light animate-pulse'
+                ? 'bg-primary/15 border-primary text-primary animate-pulse'
                 : voiceState === 'thinking'
-                ? 'bg-amber-600/20 border-amber-500/60 text-amber-300'
-                : 'bg-chief/30 border-chief text-white'
+                ? 'bg-status-working/15 border-status-working text-status-working'
+                : 'bg-primary text-white border-primary-dark shadow-card'
             }`}
           >
             <Mic size={20} />

@@ -36,28 +36,28 @@ export default function ProjectPicker() {
       <button
         onClick={() => setOpen((v) => !v)}
         disabled={loading || isLoading}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-surface-overlay border border-surface-border text-xs text-white/60 active:text-white/80 transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-overlay border border-surface-border text-xs text-ink/70 hover:text-ink hover:border-ink/15 active:bg-surface active:text-ink transition-colors disabled:opacity-50"
       >
-        <span className="font-medium text-white/80">{current}</span>
+        <span className="font-medium text-ink">{current}</span>
         <ChevronDown
           size={12}
-          className={`text-white/30 transition-transform ${open ? 'rotate-180' : ''}`}
+          className={`text-ink/40 transition-transform ${open ? 'rotate-180' : ''}`}
         />
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] bg-surface-raised border border-surface-border rounded-xl shadow-xl overflow-hidden">
+        <div className="absolute right-0 top-full mt-1.5 z-50 min-w-[160px] bg-surface-raised border border-surface-border rounded-xl shadow-card-hover overflow-hidden">
           {available.map((project) => (
             <button
               key={project}
               onClick={() => select(project)}
-              className="w-full flex items-center justify-between px-3 py-2.5 text-left text-xs transition-colors active:bg-surface-overlay hover:bg-surface-overlay"
+              className="w-full flex items-center justify-between px-3 py-2.5 text-left text-xs transition-colors hover:bg-surface-overlay active:bg-surface-overlay"
             >
-              <span className={project === current ? 'text-white font-medium' : 'text-white/60'}>
+              <span className={project === current ? 'text-ink font-medium' : 'text-ink/65'}>
                 {project}
               </span>
               {project === current && (
-                <Check size={12} className="text-chief shrink-0 ml-2" />
+                <Check size={12} className="text-primary shrink-0 ml-2" />
               )}
             </button>
           ))}

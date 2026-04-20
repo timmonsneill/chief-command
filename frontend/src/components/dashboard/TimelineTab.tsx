@@ -71,9 +71,9 @@ export function TimelineTab({ project }: TimelineTabProps): ReactNode {
     return (
       <div className="px-4 py-8 text-center">
         <div className="rounded-xl border border-dashed border-surface-border p-8">
-          <Calendar size={24} className="text-white/20 mx-auto mb-3" />
-          <p className="text-sm text-white/30">No timeline data yet</p>
-          <p className="text-xs text-white/20 mt-1">
+          <Calendar size={24} className="text-ink/20 mx-auto mb-3" />
+          <p className="text-sm text-ink/30">No timeline data yet</p>
+          <p className="text-xs text-ink/20 mt-1">
             Add date entries like <code className="bg-surface-border rounded px-1">2026-04-17 — Milestone name</code> to the memory file
           </p>
         </div>
@@ -84,8 +84,8 @@ export function TimelineTab({ project }: TimelineTabProps): ReactNode {
   return (
     <div className="px-4 py-5">
       <div className="flex items-center justify-between mb-4 px-1">
-        <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider">Timeline</h2>
-        <span className="text-xs text-white/30">
+        <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider">Timeline</h2>
+        <span className="text-xs text-ink/30">
           {milestones.length} milestones · {commits.length} commits
         </span>
       </div>
@@ -118,14 +118,14 @@ export function TimelineTab({ project }: TimelineTabProps): ReactNode {
                   >
                     <p
                       className={`text-[10px] leading-tight font-medium ${
-                        isMilestone ? 'text-chief-light' : 'text-white/40'
+                        isMilestone ? 'text-primary' : 'text-ink/40'
                       }`}
                       style={{ maxHeight: '2.5rem', overflow: 'hidden' }}
                     >
                       {item.label.length > 30 ? item.label.slice(0, 28) + '…' : item.label}
                     </p>
                     {item.hash && (
-                      <p className="text-[9px] font-mono text-white/20 mt-0.5">{item.hash}</p>
+                      <p className="text-[9px] font-mono text-ink/20 mt-0.5">{item.hash}</p>
                     )}
                   </div>
 
@@ -134,13 +134,13 @@ export function TimelineTab({ project }: TimelineTabProps): ReactNode {
                     className={`w-3 h-3 rounded-full border-2 z-10 shrink-0 ${
                       isMilestone
                         ? 'bg-chief border-chief shadow-sm shadow-chief/50'
-                        : 'bg-surface-border border-white/20'
+                        : 'bg-surface-border border-ink/20'
                     }`}
                     style={{ marginTop: `${topOffset}px` }}
                   />
 
                   {/* Date below the spine */}
-                  <p className="text-[9px] text-white/25 mt-2 text-center">
+                  <p className="text-[9px] text-ink/25 mt-2 text-center">
                     {formatShortDate(item.date)}
                   </p>
                 </div>
@@ -152,17 +152,17 @@ export function TimelineTab({ project }: TimelineTabProps): ReactNode {
 
       {/* Vertical list fallback for readability */}
       <div className="mt-5 space-y-2">
-        <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Details</h3>
+        <h3 className="text-xs font-semibold text-ink/40 uppercase tracking-wider mb-3">Details</h3>
         {allItems.map((item, idx) => (
           <div key={idx} className="flex items-start gap-3 py-1.5">
             {item.type === 'milestone' ? (
               <Calendar size={12} className="text-chief/60 mt-0.5 shrink-0" />
             ) : (
-              <GitCommit size={12} className="text-white/20 mt-0.5 shrink-0" />
+              <GitCommit size={12} className="text-ink/20 mt-0.5 shrink-0" />
             )}
             <div className="flex-1 min-w-0">
-              <p className="text-xs text-white/70 leading-snug">{item.label}</p>
-              <p className="text-[10px] text-white/30 mt-0.5">
+              <p className="text-xs text-ink/70 leading-snug">{item.label}</p>
+              <p className="text-[10px] text-ink/30 mt-0.5">
                 {item.hash && <span className="font-mono mr-1.5">{item.hash}</span>}
                 {formatDate(item.date)}
               </p>
