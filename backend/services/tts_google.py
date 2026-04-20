@@ -91,7 +91,9 @@ class GoogleTTSService:
 
             logger.info("Initializing Google Cloud Text-to-Speech client...")
             try:
-                self._client = await asyncio.to_thread(self._build_client)
+                # gRPC async client must be constructed on the event loop,
+                # not a worker thread — otherwise cygrpc can't find the loop.
+                self._client = self._build_client()
                 logger.info("Google Cloud Text-to-Speech client ready")
             except Exception:
                 logger.exception(

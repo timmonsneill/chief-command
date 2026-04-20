@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react'
-import { Mic, PhoneOff, Send, Camera, Monitor, ChevronDown, ChevronUp } from 'lucide-react'
+import { Mic, PhoneOff, ChevronDown } from 'lucide-react'
+import Composer from './voice/Composer'
 import { toast } from 'sonner'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useVad } from '../hooks/useVad'
@@ -84,7 +85,6 @@ export default function VoicePage() {
   const [speed, setSpeed] = useState(1)
   const [conversationActive, setConversationActive] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
-  const [showVadDebug, setShowVadDebug] = useState(false)
 
   const [activeModel, setActiveModel] = useState<ActiveModel | null>(null)
   const [usage, setUsage] = useState<WsUsageEvent | null>(null)
@@ -103,6 +103,9 @@ export default function VoicePage() {
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
+  // Tracks when Chief last started speaking — kept for future half-duplex
+  // refinements (currently we block voice-barge-in entirely while audio plays).
+  const ttsStartAtRef = useRef<number>(0)
   // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
   // Creating a new Audio() per chunk in a WebSocket callback fails silently on
   // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
@@ -253,6 +256,7 @@ export default function VoicePage() {
             )
           )
           responseBuffer.current = ''
+          ttsStartAtRef.current = Date.now()
           setVoiceState('speaking')
         }
 
@@ -390,11 +394,16 @@ export default function VoicePage() {
     }, [conversationActive, playNextChunk, stopAudioPlayback, setProjectContext]),
   })
 
-  const { start: startVad, stop: stopVad, speaking: vadSpeaking, error: vadError, status: vadStatus, frameCount: vadFrames, speechStartCount: vadStarts, speechEndCount: vadEnds, lastAudioSamples: vadLastSamples } = useVad({
+  const { start: startVad, stop: stopVad, speaking: vadSpeaking } = useVad({
     onSpeechStart: useCallback(() => {
-      // Barge-in: if Chief is speaking, cut local audio AND tell backend to stop
-      // generating tokens / synthesizing TTS so we don't bill for output we'll never hear.
+      // Real voice barge-in: if Chief is speaking, cut local audio AND tell
+      // backend to stop generating. iOS/Chrome AEC on the mic (see useVad
+      // constraints) filters Chief's own speaker audio so this fires on
+      // real user speech, not echo. A 600ms grace period after TTS start
+      // covers the initial speaker→mic priming before AEC converges.
       if (isPlayingAudioRef.current) {
+        const sinceTtsMs = Date.now() - ttsStartAtRef.current
+        if (sinceTtsMs < 600) return
         stopAudioPlayback()
         send(JSON.stringify({ type: 'interrupt' }))
       }
@@ -524,7 +533,6 @@ export default function VoicePage() {
     }
   }
 
-  const speeds = [0.75, 1, 1.25, 1.5]
 
   function formatTime(iso: string) {
     return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -717,55 +725,18 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Bottom controls */}
-      <div className="px-4 pb-2 pt-2 bg-surface space-y-2">
-        {/* Camera + Screenshot + Speed on a single row — saves ~60px on mobile */}
-        <div className="flex items-center justify-center gap-3">
-          <button
-            onClick={handleCamera}
-            aria-label="Attach photo"
-            className="w-9 h-9 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
-          >
-            <Camera size={16} />
-          </button>
-
-          <button
-            onClick={handleScreenshot}
-            aria-label="Capture screen"
-            className="w-9 h-9 flex items-center justify-center rounded-full bg-surface-raised border border-surface-border text-white/50 active:text-white transition-colors"
-          >
-            <Monitor size={16} />
-          </button>
-
-          <div className="w-px h-6 bg-surface-border" />
-
-          {speeds.map((s) => (
-            <button
-              key={s}
-              onClick={() => setSpeed(s)}
-              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                speed === s
-                  ? 'bg-chief text-white'
-                  : 'bg-surface-raised text-white/40 active:text-white/60'
-              }`}
-            >
-              {s}x
-            </button>
-          ))}
-        </div>
-
-        {/* Composer: inline mic toggle + text input + send. The mic is the
-            voice-mode entry point (replaces the old centerpiece orb) so the
-            chat gets the full viewport. Visual state reflects the pipeline. */}
-        <form onSubmit={handleTextSend} className="flex gap-2 items-center">
+      {/* Bottom controls — mic button outside Composer, camera/screenshot/speed
+          live inside Composer's + menu so they're only visible when needed. */}
+      <div className="px-4 pb-2 pt-2 bg-surface">
+        <div className="flex gap-2 items-center">
           <button
             type="button"
             onClick={handleToggleVoice}
             disabled={!isConnected}
             aria-label={conversationActive ? 'End voice conversation' : 'Start voice conversation'}
-            className={`w-11 h-11 shrink-0 flex items-center justify-center rounded-xl border transition-all active:scale-95 disabled:opacity-30 ${
+            className={`w-12 h-12 shrink-0 flex items-center justify-center rounded-2xl border transition-all active:scale-95 disabled:opacity-30 ${
               !conversationActive
-                ? 'bg-surface-raised border-white/30 text-white hover:text-white'
+                ? 'bg-surface-raised border-white/30 text-white'
                 : vadSpeaking
                 ? 'bg-amber-500/30 border-amber-400 text-amber-200 animate-pulse'
                 : voiceState === 'speaking'
@@ -777,58 +748,20 @@ export default function VoicePage() {
           >
             <Mic size={20} />
           </button>
-          <input
-            type="text"
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            placeholder={conversationActive ? 'Or type a message…' : 'Type a message…'}
-            className="flex-1 h-11 px-4 rounded-xl bg-surface-raised border border-surface-border text-white placeholder-white/30 text-sm focus:outline-none focus:border-chief transition-colors"
-          />
-          <button
-            type="submit"
-            disabled={!textInput.trim() || voiceState === 'thinking'}
-            className="w-11 h-11 shrink-0 flex items-center justify-center rounded-xl bg-chief text-white disabled:opacity-30 active:scale-95 transition-all"
-          >
-            <Send size={16} />
-          </button>
-        </form>
-
-        {/* Collapsible VAD debug strip — hidden by default so it doesn't eat
-            ~90px of iPhone viewport. Tiny one-line status header always shows
-            a colored dot + 'VAD' so you can tell if it's broken at a glance;
-            tap to expand full debug details. */}
-        <div className="rounded-xl bg-surface-raised border border-surface-border text-[11px] font-mono text-white/50">
-          <button
-            type="button"
-            onClick={() => setShowVadDebug((v) => !v)}
-            className="w-full flex items-center justify-between px-3 py-1.5"
-          >
-            <span className="flex items-center gap-2">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  vadStatus === 'error'
-                    ? 'bg-red-400'
-                    : vadStatus === 'listening'
-                    ? 'bg-emerald-400'
-                    : 'bg-white/30'
-                }`}
-              />
-              <span>VAD</span>
-              <span className={vadStatus === 'error' ? 'text-red-400' : 'text-white/50'}>
-                {vadStatus}
-              </span>
-            </span>
-            {showVadDebug ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          </button>
-          {showVadDebug && (
-            <div className="px-3 pb-2 space-y-0.5 border-t border-surface-border pt-1.5">
-              {vadError && <div className="flex justify-between"><span>Error</span><span className="text-red-400 truncate max-w-[16rem]">{vadError}</span></div>}
-              <div className="flex justify-between"><span>Frames processed</span><span>{vadFrames}</span></div>
-              <div className="flex justify-between"><span>Speech events</span><span>{vadStarts} start / {vadEnds} end</span></div>
-              <div className="flex justify-between"><span>Last audio samples</span><span>{vadLastSamples}</span></div>
-            </div>
-          )}
+          <div className="flex-1 min-w-0">
+            <Composer
+              value={textInput}
+              onChange={setTextInput}
+              onSubmit={handleTextSend}
+              onCamera={handleCamera}
+              onScreenshot={handleScreenshot}
+              disabled={voiceState === 'thinking'}
+              speed={speed}
+              onSpeedChange={setSpeed}
+            />
+          </div>
         </div>
+
       </div>
     </div>
   )

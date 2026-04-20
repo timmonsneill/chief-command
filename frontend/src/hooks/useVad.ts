@@ -52,10 +52,22 @@ export function useVad({ onSpeechEnd, onSpeechStart }: UseVadOptions): UseVadRet
         negativeSpeechThreshold: 0.35,
         minSpeechFrames: 3,
         redemptionFrames: 6,
+        // The library's TS types for additionalAudioConstraints are narrower
+        // than the MediaTrackConstraints the underlying getUserMedia call
+        // actually accepts. Cast so we can pass echoCancellation +
+        // noiseSuppression, which iOS Safari and modern Chrome honor —
+        // without AEC, Chief's own speaker audio loops back through the
+        // phone mic and triggers false user-speech-start events.
         additionalAudioConstraints: {
           sampleRate: { ideal: 16000 },
           sampleSize: { ideal: 16 },
-        },
+          echoCancellation: true,
+          noiseSuppression: true,
+          // Auto-gain can confuse VAD by amplifying quiet background noise
+          // into speech-like levels. Keep it off.
+          autoGainControl: false,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
         onSpeechStart: () => {
           setSpeaking(true)
           setSpeechStartCount((n) => n + 1)

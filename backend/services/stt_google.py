@@ -92,7 +92,9 @@ class GoogleSTTService:
 
             logger.info("Initializing Google Cloud Speech client...")
             try:
-                self._client = await asyncio.to_thread(self._build_client)
+                # gRPC async client must be constructed on the event loop,
+                # not a worker thread — otherwise cygrpc can't find the loop.
+                self._client = self._build_client()
                 logger.info("Google Cloud Speech client ready")
             except Exception:
                 logger.exception(
@@ -116,17 +118,39 @@ class GoogleSTTService:
         return speech_v2.SpeechAsyncClient()
 
     def _project_id(self) -> str:
-        """Pull the GCP project id from the env.
+        """Resolve the GCP project id.
 
-        The client library resolves this from ADC, but v2 recognizer paths
-        require it explicitly. We read GOOGLE_CLOUD_PROJECT or fall back to a
-        placeholder — the actual call will still fail cleanly with a helpful
-        error if nothing is set.
+        Cloud Speech v2 recognizer paths require an explicit project. We
+        resolve in this order:
+          1. GOOGLE_CLOUD_PROJECT / GCP_PROJECT env vars (explicit override)
+          2. project_id field from the service-account JSON at
+             GOOGLE_APPLICATION_CREDENTIALS (the authoritative source)
+          3. RuntimeError — no silent hardcoded fallback, since a wrong
+             project id produces a confusing 403 PermissionDenied instead
+             of a clear configuration error.
         """
-        return (
-            os.environ.get("GOOGLE_CLOUD_PROJECT")
-            or os.environ.get("GCP_PROJECT")
-            or "chief-command"
+        if cached := getattr(self, "_cached_project_id", None):
+            return cached
+        explicit = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+        if explicit:
+            self._cached_project_id = explicit
+            return explicit
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_path and os.path.isfile(cred_path):
+            try:
+                import json
+                with open(cred_path) as f:
+                    data = json.load(f)
+                project_id = data.get("project_id")
+                if project_id:
+                    self._cached_project_id = project_id
+                    return project_id
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read project_id from credentials JSON: %s", exc)
+        raise RuntimeError(
+            "Cloud Speech v2 requires a GCP project id. Set GOOGLE_CLOUD_PROJECT "
+            "or ensure GOOGLE_APPLICATION_CREDENTIALS points at a service-account "
+            "JSON with a valid project_id field."
         )
 
     def _recognizer_path(self) -> str:
