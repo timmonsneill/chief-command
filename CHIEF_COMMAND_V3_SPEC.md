@@ -6,7 +6,7 @@
 
 1. **Team tab** — the named roster (Chief, Atlas, Forge, Riggs, Finn, Nova, Vera, Hawke, Sable, Pax, Quill, Hip). Cards with role, lean, last-active, link into per-agent memory.
 2. **Memory tab** — global memory, per-project memory, per-agent memory, and audit log. Read/search/edit.
-3. **Project-context switching** — top-bar picker that scopes the UI (memory, sessions, voice/chat context) to one project. Default: Chief Command. Options: Chief Command, Arch, Archie.
+3. **Project-context switching** — top-bar picker that scopes the UI (memory, sessions, voice/chat context) to one project. Default: Chief Command. Options: Chief Command, Arch, Personal Assist.
 
 ## File ownership (no overlap, ever)
 
@@ -113,7 +113,7 @@ Audit log file: `~/.claude/projects/-Users-user/memory/audit_log.md`. Create if 
 
 ```
 GET /api/context
-→ { current: string, available: string[] }    // e.g. { current: "Chief Command", available: ["Chief Command", "Arch", "Archie"] }
+→ { current: string, available: string[] }    // e.g. { current: "Chief Command", available: ["Chief Command", "Arch", "Personal Assist"] }
 
 POST /api/context
 body: { project: string }
@@ -125,7 +125,7 @@ State is **per-session**, stored server-side in memory (module-level dict keyed 
 Frontend: `useProjectContext()` hook reads `/api/context` on mount, exposes `current` and `setContext(name)`. Other pages that care (Memory, Sessions, Voice) read from this hook.
 
 **Scoping behavior:**
-- "All" → no filter
+- Scope is ALWAYS a concrete single project (no "All" mode — owner design decision)
 - "Arch" → Memory tab shows only Arch project memory + user/feedback; Sessions shows only Arch sessions; Voice prepends "(Project: Arch)" to the system prompt
 - Same pattern for other projects
 
@@ -139,7 +139,7 @@ Scope filter on Memory is a frontend-side filter using the `ProjectMemory.projec
 
 If 7 icons feels cramped on mobile, collapse Terminal + Sessions into a "more" menu — Finn's call. Voice stays default route.
 
-**Project picker:** top status bar. Replaces or augments the "Chief" label. Small dropdown showing current project; tap to switch. Include "All" option.
+**Project picker:** top status bar. Replaces or augments the "Chief" label. Small dropdown showing current project; tap to switch. No "All" option — scope is always exactly one project.
 
 **Team tab layout:**
 - Card grid, 1 column mobile, 2 columns wider screens

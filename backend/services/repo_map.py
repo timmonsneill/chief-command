@@ -48,13 +48,14 @@ def _is_under_allowed_root(resolved: Path) -> bool:
 
 
 # Canonical project name -> absolute repo root path.
-# Archie is intentionally omitted when the directory does not
-# exist on this machine (per spec). Add it here once it lands on disk.
 #
 # Arch canonical path is ``~/Documents/GitHub/arch-to-freedom-emr`` — matches
 # the ``arch`` shell alias in ~/.zshrc. Do NOT re-introduce a second Arch
 # checkout under ~/Desktop without first aligning the alias + removing the
 # stale copy.
+#
+# NOTE (2026-04-20): "Archie" is the AI brain layer inside Arch — same
+# project, not a separate scope. No separate repo entry.
 _REPO_PATHS: dict[str, Path] = {
     "Arch": Path.home() / "Documents" / "GitHub" / "arch-to-freedom-emr",
     "Chief Command": Path.home() / "Desktop" / "chief-command",
@@ -63,9 +64,7 @@ _REPO_PATHS: dict[str, Path] = {
 
 # Optional configured repos — kept separate so we can log a warning for
 # configured-but-missing without polluting the primary map's "missing" check.
-_OPTIONAL_REPO_PATHS: dict[str, Path] = {
-    "Archie": Path.home() / "Desktop" / "archie",
-}
+_OPTIONAL_REPO_PATHS: dict[str, Path] = {}
 
 
 def _audit_paths() -> None:

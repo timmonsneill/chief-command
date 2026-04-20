@@ -24,25 +24,34 @@ POSITIVE_CASES: list[tuple[str, str]] = [
     # Bare switch intents terminated at end-of-string.
     ("switch to Arch", "Arch"),
     ("switch to arch", "Arch"),
-    ("change to Archie", "Archie"),
-    ("move to Archie", "Archie"),
+    # "archie" is now an alias that canonicalizes to Arch (same project,
+    # Archie is the AI brain layer inside Arch).
+    ("change to Archie", "Arch"),
+    ("move to Archie", "Arch"),
     ("switch over to chief command", "Chief Command"),
     ("switch to chief-command", "Chief Command"),
     # Trailing punctuation terminators.
     ("Switch to Arch.", "Arch"),
-    ("Switch to Archie!", "Archie"),
-    ("Switch to archie, please.", "Archie"),
+    ("Switch to Archie!", "Arch"),
+    ("Switch to archie, please.", "Arch"),
     # "Let's talk about X" forms.
-    ("let's talk about archie", "Archie"),
+    ("let's talk about archie", "Arch"),
     ("let's talk about Arch now", "Arch"),
-    ("let's focus on archie today", "Archie"),
+    ("let's focus on archie today", "Arch"),
     # "Show me X" — short form.
-    ("show me archie", "Archie"),
+    ("show me archie", "Arch"),
     ("show me Arch.", "Arch"),
     # Common-terminator trailing word allowed.
     ("switch to Arch instead", "Arch"),
-    ("switch to Archie then", "Archie"),
+    ("switch to Archie then", "Arch"),
     ("switch to Arch and let's go", "Arch"),
+    # "Chief" short alias — no "command" needed.
+    ("switch to Chief", "Chief Command"),
+    ("switch to chief", "Chief Command"),
+    ("switch to Chief, please.", "Chief Command"),
+    ("switch to Chief now", "Chief Command"),
+    ("show me Chief", "Chief Command"),
+    ("let's talk about chief", "Chief Command"),
     # Personal Assist — canonical, hyphenated, and voice-alias "Jess".
     ("switch to Personal Assist", "Personal Assist"),
     ("switch to personal-assist", "Personal Assist"),
@@ -52,6 +61,29 @@ POSITIVE_CASES: list[tuple[str, str]] = [
     ("let's talk about Jess", "Personal Assist"),
     ("switch to Jess, please.", "Personal Assist"),
     ("switch to Jess now", "Personal Assist"),
+    # --- Bare-name rule (2026-04-20) ---------------------------------------
+    # Entire utterance is EXACTLY a recognized name (after trim + trailing
+    # punctuation strip). Case-insensitive. Extra words disqualify.
+    ("Jess", "Personal Assist"),
+    ("jess", "Personal Assist"),
+    ("Jess.", "Personal Assist"),
+    ("jess!", "Personal Assist"),
+    ("jess,", "Personal Assist"),
+    ("  jess  ", "Personal Assist"),
+    ("Arch", "Arch"),
+    ("arch", "Arch"),
+    ("Arch.", "Arch"),
+    ("archie", "Arch"),
+    ("Archie!", "Arch"),
+    ("Chief", "Chief Command"),
+    ("chief", "Chief Command"),
+    ("chief!", "Chief Command"),
+    ("Chief Command", "Chief Command"),
+    ("chief command", "Chief Command"),
+    ("chiefcommand", "Chief Command"),
+    ("Personal Assist", "Personal Assist"),
+    ("personal assist", "Personal Assist"),
+    ("personalassist", "Personal Assist"),
 ]
 
 NEGATIVE_CASES: list[str] = [
@@ -76,6 +108,15 @@ NEGATIVE_CASES: list[str] = [
     "jessica called",                # "jess" inside other word, no switch verb
     "the personal assistant wrote",  # "personal assistant" not "personal assist"
     "tell me about personal finance",  # "personal" alone isn't a match
+    # Bare-name rule negatives — one extra word must disqualify.
+    "Jess is great",
+    "jess is great",
+    "arch is cool",
+    "chief of staff",
+    "let's go jess",
+    "hey chief",
+    "archie is on fire",
+    "personal assist rocks",
 ]
 
 

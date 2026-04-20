@@ -89,11 +89,15 @@ layer 3.
 ### Scope
 
 - Only 3 canonical projects recognized: `Chief Command` (default), `Arch`,
-  `Archie`
+  `Personal Assist` (voice alias: `Jess`)
+- Archie is the AI brain layer inside Arch (same scope, not a separate one)
 - "All" was removed as a scope — Chief is always focused on exactly one
   project
-- Explicit switch phrases only: "switch to X", "let's talk about X", "show
-  me X" — with terminator guard so *"show me all the files"* doesn't fire
+- Explicit switch phrases *and* bare-name utterances: "switch to X", "let's
+  talk about X", "show me X", or just `"arch"` / `"chief"` / `"jess"`
+  alone. Bare-name requires an exact single-token match (trailing
+  punctuation stripped); anything with other words falls through to the
+  verb-phrase patterns, so *"show me all the files"* doesn't fire
 
 ### Not yet (v1.1)
 
@@ -130,9 +134,9 @@ asyncio.create_subprocess_exec(
 
 | Scope | Repo path |
 |---|---|
-| Arch | `~/Desktop/arch-to-freedom-emr` |
+| Arch | `~/Documents/GitHub/arch-to-freedom-emr` |
 | Chief Command | `~/Desktop/chief-command` |
-| Archie | (not configured — dispatch refused with clarifying message) |
+| Personal Assist | `~/Desktop/personal-assist` |
 
 The subprocess starts in that directory. `claude` won't wander unless the
 task explicitly tells it to `cd` somewhere else, and it can't `cd` outside

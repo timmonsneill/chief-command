@@ -4,8 +4,11 @@
 Tests:
  - Flow 1: Arch iframe dashboard (archdashboard.netlify.app)
  - Flow 2: Chief Command native dashboard (tabs: Plan, Todos, Timeline, Integrations, Builds)
- - Flow 3: Archie native dashboard (edge case)
  - Smoke: all existing routes
+
+NOTE (2026-04-20): the former Flow 3 (Archie native) was removed when Archie
+was dissolved into Arch as its AI-brain layer (same project, not a separate
+scope). /projects/archie is no longer a routable dashboard.
 """
 
 import asyncio
@@ -183,24 +186,6 @@ async def flow2_chief_native(page) -> dict:
     return results
 
 
-async def flow3_archie_native(page) -> dict:
-    """Flow 3: Archie native dashboard — edge case, mostly empty."""
-    print("\n--- Flow 3: Archie native dashboard ---")
-    r = await verify_route(
-        page,
-        "/projects/archie",
-        expected_visible_text=None,
-        screenshot_to=str(SCREENSHOT_DIR / "archie-dashboard.png"),
-    )
-    body_text = await page.inner_text("body")
-    no_crash = not r["uncaught_errors"] and "Error" not in body_text[:200]
-    tab_bar = any(t in body_text for t in ["Plan", "Todo"])
-    print(f"  No crash: {no_crash}, Tab bar: {tab_bar}")
-    print(f"  Uncaught: {r['uncaught_errors']}")
-    print(f"  Console errors: {r['console_errors']}")
-    return {"no_crash": no_crash, "tab_bar": tab_bar, "console_errors": r["console_errors"]}
-
-
 async def main():
     print(f"Forge Dashboard Integration Test — {APP_URL}")
     print(f"Screenshots → {SCREENSHOT_DIR}")
@@ -211,7 +196,6 @@ async def main():
     try:
         f1 = await flow1_arch_iframe(page)
         f2 = await flow2_chief_native(page)
-        f3 = await flow3_archie_native(page)
     finally:
         await browser.close()
 
@@ -238,13 +222,7 @@ async def main():
         errs = r.get("errors", [])
         print(f"  {tab}: {status}" + (f" — {errs}" if errs else ""))
 
-    # Flow 3
-    f3_pass = f3["no_crash"]
-    print(f"\nFlow 3 (Archie native): {'PASS' if f3_pass else 'FAIL'}")
-    if f3["console_errors"]:
-        print(f"  Console errors: {f3['console_errors']}")
-
-    return 0 if (f1_pass or f1_fallback_ok) and f2_pass and f3_pass else 1
+    return 0 if (f1_pass or f1_fallback_ok) and f2_pass else 1
 
 
 if __name__ == "__main__":

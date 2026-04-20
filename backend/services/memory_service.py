@@ -40,9 +40,11 @@ _AGENT_NAMES = [
 # More-specific keywords MUST come before more-general ones because
 # _classify_project returns on the first match (substring search).
 _PROJECT_KEYWORDS: dict[str, str] = {
-    "archie_cost": "Archie",
-    "archie_voice": "Archie",
-    "archie": "Archie",
+    # Archie is the AI brain layer inside Arch (same project, not a separate
+    # scope). archie_*-prefixed memory files classify under Arch.
+    "archie_cost": "Arch",
+    "archie_voice": "Arch",
+    "archie": "Arch",
     "arch": "Arch",
     "voice_claude": "Chief Command",
     "chief_command": "Chief Command",

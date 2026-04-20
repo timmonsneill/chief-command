@@ -17,7 +17,12 @@ from services.chief_context import build_chief_system
 from services.classifier import classify_intent
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
 from services.llm import stream_turn
-from services.project_context import AVAILABLE_PROJECTS, DEFAULT_PROJECT, detect_project_switch
+from services.project_context import (
+    AVAILABLE_PROJECTS,
+    DEFAULT_PROJECT,
+    _context_store,
+    detect_project_switch,
+)
 from services.repo_map import get_repo_path
 from services.router import classify_and_route, random_thinking_phrase
 from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
@@ -29,6 +34,32 @@ router = APIRouter()
 # Module-level singleton — one dispatcher instance shared across WS sessions,
 # state keyed by session_id.
 _dispatcher = TaskDispatcher()
+
+
+# ---------------------------------------------------------------------------
+# Outbound WS message-type tags
+#
+# Keep string tags centralized so emit sites + tests can't drift apart.
+# Mirrors the discriminant literals on `WsEvent` in frontend/src/lib/api.ts.
+# ---------------------------------------------------------------------------
+MSG_CONTEXT_SWITCHED = "context_switched"
+
+
+# ---------------------------------------------------------------------------
+# Dissolved-scope migration: "Archie" -> "Arch"
+#
+# Archie was a separate scope prior to 2026-04-20; it's since been folded into
+# Arch (same project, Archie is just the brain layer). Any persisted client
+# state or in-memory _context_store value that still reads "Archie" must be
+# remapped to "Arch" on read. Helper is idempotent — values already canonical
+# pass through unchanged.
+# ---------------------------------------------------------------------------
+def _migrate_dissolved_scope(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value == "Archie":
+        return "Arch"
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +151,13 @@ async def voice_ws(ws: WebSocket) -> None:
     session_id: Optional[str] = None
     history: list[dict] = []
     # Default scope: Chief Command. Per owner: scope is ALWAYS a concrete single project.
-    current_project: str = DEFAULT_PROJECT
+    # If an earlier session persisted the dissolved "Archie" scope into the
+    # in-memory store, migrate it before we use it as the initial value.
+    initial = _migrate_dissolved_scope(_context_store.get("ws")) or DEFAULT_PROJECT
+    if initial not in AVAILABLE_PROJECTS:
+        initial = DEFAULT_PROJECT
+    current_project: str = initial
+    _context_store["ws"] = current_project  # persist the possibly-migrated value
     current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
@@ -155,20 +192,34 @@ async def voice_ws(ws: WebSocket) -> None:
 
         Scope is ALWAYS a concrete project. If detection returns a value, we
         switch to it; if the new scope matches the current one, we no-op.
+
+        On a successful switch we:
+          1. Run the dissolved-scope migration (Archie -> Arch) so a stale
+             persisted value doesn't leak into the server-side store.
+          2. Persist the canonical value into ``_context_store`` so subsequent
+             reads by any other caller (HTTP /context GET, status summary, etc.)
+             see the same scope the voice path just applied.
+          3. Push a ``context_switched`` frame to the client so the UI
+             ``ProjectContextProvider`` can update the picker in real time —
+             the UI was stale before this was wired up.
         """
         nonlocal current_project
-        detected = detect_project_switch(user_text)
+        detected = _migrate_dissolved_scope(detect_project_switch(user_text))
         if detected is None:
             return
         if detected == current_project:
             return
         current_project = detected
+        _context_store["ws"] = current_project
         logger.info(
             "Voice WS project-switch intent detected text=%r -> project=%s",
             user_text[:80], current_project,
         )
         try:
-            await ws_send_json(ws, {"type": "context_switched", "project": detected})
+            await ws_send_json(ws, {
+                "type": MSG_CONTEXT_SWITCHED,
+                "project": detected,
+            })
         except Exception as exc:  # client gone, swallow
             logger.warning("Failed to send context_switched frame: %s", exc)
 
@@ -193,12 +244,25 @@ async def voice_ws(ws: WebSocket) -> None:
                 if msg_type == "context":
                     # Project context frame — validate against allowlist, no LLM turn.
                     # Scope is always concrete; unknown values fall back to default.
-                    raw_proj = data.get("project") or None
+                    raw_proj = _migrate_dissolved_scope(data.get("project") or None)
                     if raw_proj in AVAILABLE_PROJECTS:
                         current_project = raw_proj
                     else:
                         current_project = DEFAULT_PROJECT
+                    # Persist the remap so any later _context_store reads are
+                    # already canonical. Key is "ws" (no JWT subject here yet —
+                    # in-process state, restart-ephemeral by design).
+                    _context_store["ws"] = current_project
                     logger.info("Voice WS context updated project=%s", current_project)
+                    # Confirm the (possibly migrated) scope to the client so the
+                    # Provider pill reflects the authoritative server value.
+                    try:
+                        await ws_send_json(ws, {
+                            "type": MSG_CONTEXT_SWITCHED,
+                            "project": current_project,
+                        })
+                    except Exception as exc:
+                        logger.warning("Failed to echo context_switched frame: %s", exc)
                     continue
 
                 if msg_type == "interrupt":
