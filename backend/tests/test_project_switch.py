@@ -43,6 +43,15 @@ POSITIVE_CASES: list[tuple[str, str]] = [
     ("switch to Arch instead", "Arch"),
     ("switch to Archie then", "Archie"),
     ("switch to Arch and let's go", "Arch"),
+    # Personal Assist — canonical, hyphenated, and voice-alias "Jess".
+    ("switch to Personal Assist", "Personal Assist"),
+    ("switch to personal-assist", "Personal Assist"),
+    ("switch to personal assist.", "Personal Assist"),
+    ("switch to Jess", "Personal Assist"),
+    ("show me Jess", "Personal Assist"),
+    ("let's talk about Jess", "Personal Assist"),
+    ("switch to Jess, please.", "Personal Assist"),
+    ("switch to Jess now", "Personal Assist"),
 ]
 
 NEGATIVE_CASES: list[str] = [
@@ -63,6 +72,10 @@ NEGATIVE_CASES: list[str] = [
     # Sounds-like-switch but wrong shape.
     "switching arch seems fine",  # no "to"
     "archive me the files",       # not a switch intent
+    # Personal Assist negatives — "jess" / "personal" should not leak.
+    "jessica called",                # "jess" inside other word, no switch verb
+    "the personal assistant wrote",  # "personal assistant" not "personal assist"
+    "tell me about personal finance",  # "personal" alone isn't a match
 ]
 
 

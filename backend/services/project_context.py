@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical project names. The order here drives the default switcher UI order;
 # default scope is the first entry.
-AVAILABLE_PROJECTS: Final[list[str]] = ["Chief Command", "Arch", "Archie"]
+AVAILABLE_PROJECTS: Final[list[str]] = ["Chief Command", "Arch", "Archie", "Personal Assist"]
 DEFAULT_PROJECT: Final[str] = "Chief Command"
 
 
@@ -25,6 +25,7 @@ DEFAULT_PROJECT: Final[str] = "Chief Command"
 # Matches user utterances like:
 #   "switch to Arch"                -> "Arch"
 #   "show me Archie"                -> "Archie"
+#   "switch to Jess"                -> "Personal Assist" (voice alias)
 # Requires the project name to be followed by end-of-utterance, punctuation,
 # or a whitespace + common terminator word. This rejects false positives like:
 #   "show me all the files"                 (no "all" in the project list now)
@@ -32,7 +33,10 @@ DEFAULT_PROJECT: Final[str] = "Chief Command"
 #   "show me arch of the design"            ("arch of" — not a terminator)
 #   "switch the arch to bcrypt"             (no "to" between switch/arch)
 # ---------------------------------------------------------------------------
-_PROJECT_PATTERN = r"(arch|chief[\s-]?command|chiefcommand|archie)"
+_PROJECT_PATTERN = (
+    r"(arch|chief[\s-]?command|chiefcommand|archie|"
+    r"personal[\s-]?assist|personalassist|jess)"
+)
 _TERMINATOR = (
     r"(?=\b(?:\s*[.,!?;:]|\s*$|\s+(?:please|now|today|tomorrow|instead|then|and|but|okay|ok)\b))"
 )
@@ -62,6 +66,8 @@ def _canonicalize(raw: str) -> Optional[str]:
         "arch": "Arch",
         "chiefcommand": "Chief Command",
         "archie": "Archie",
+        "personalassist": "Personal Assist",
+        "jess": "Personal Assist",
     }
     return mapping.get(normalized)
 

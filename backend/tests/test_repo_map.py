@@ -13,8 +13,8 @@ from services import repo_map
 def test_get_repo_path_valid_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A configured project whose directory exists inside the allowlist returns
     that absolute path."""
-    # Put fake repo under the allowlist root so containment check passes.
-    root = repo_map._ALLOWED_ROOT
+    # Put fake repo under the first allowlist root so containment check passes.
+    root = repo_map._ALLOWED_ROOTS[0]
     fake_repo = root / f"__nova_test_{os.getpid()}_valid"
     fake_repo.mkdir(exist_ok=True)
     monkeypatch.setitem(repo_map._REPO_PATHS, "TestProj", fake_repo)
@@ -27,6 +27,31 @@ def test_get_repo_path_valid_project(tmp_path: Path, monkeypatch: pytest.MonkeyP
             fake_repo.rmdir()
         except OSError:
             pass
+
+
+def test_get_repo_path_valid_under_secondary_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repo under a non-first allowlist root (e.g. ~/Documents/GitHub) also
+    resolves — covers the multi-root expansion that landed with the Arch
+    canonical-path move to ~/Documents/GitHub/."""
+    # Walk all roots except the first to find one that exists on this box.
+    for root in repo_map._ALLOWED_ROOTS[1:]:
+        if root.exists():
+            fake_repo = root / f"__nova_test_{os.getpid()}_secondary"
+            fake_repo.mkdir(exist_ok=True)
+            monkeypatch.setitem(repo_map._REPO_PATHS, "SecondaryProj", fake_repo)
+            try:
+                result = repo_map.get_repo_path("SecondaryProj")
+                assert result == fake_repo.resolve()
+                assert result.is_absolute()
+            finally:
+                try:
+                    fake_repo.rmdir()
+                except OSError:
+                    pass
+            return
+    pytest.skip("No secondary allowlist root exists on this box")
 
 
 def test_get_repo_path_unknown_project() -> None:
@@ -64,14 +89,15 @@ def test_list_configured_projects_filters_missing(
 def test_get_repo_path_rejects_symlink_outside_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Symlink that resolves outside ~/Desktop is rejected.
+    """Symlink that resolves outside every allowlist root is rejected.
 
     The attack scenario: a repo entry points at a benign-looking name under
-    ~/Desktop but that name is a symlink to, e.g., /etc. An attacker who can
-    influence the classifier into dispatching there would have `claude` CLI
-    spawning in the wrong cwd with elevated access to system files.
+    an allowed root but that name is a symlink to, e.g., /etc. An attacker
+    who can influence the classifier into dispatching there would have
+    `claude` CLI spawning in the wrong cwd with elevated access to system
+    files.
     """
-    root = repo_map._ALLOWED_ROOT
+    root = repo_map._ALLOWED_ROOTS[0]
     evil_link = root / f"__nova_test_{os.getpid()}_evil"
     # Remove any leftover from a prior failed run.
     try:
@@ -96,9 +122,9 @@ def test_get_repo_path_rejects_symlink_outside_allowlist(
 def test_get_repo_path_accepts_symlink_inside_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Symlink that resolves INSIDE ~/Desktop is allowed — this keeps the
-    allowlist check from breaking legitimate symlinked project dirs."""
-    root = repo_map._ALLOWED_ROOT
+    """Symlink that resolves INSIDE any allowlist root is allowed — this keeps
+    the containment check from breaking legitimate symlinked project dirs."""
+    root = repo_map._ALLOWED_ROOTS[0]
     real_dir = root / f"__nova_test_{os.getpid()}_real"
     link = root / f"__nova_test_{os.getpid()}_link"
     real_dir.mkdir(exist_ok=True)

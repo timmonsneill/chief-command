@@ -8,9 +8,15 @@ how to handle a missing repo — typically by responding "that repo isn't on thi
 box" rather than silently dispatching somewhere wrong).
 
 Symlink containment: every returned path MUST resolve to a descendant of
-~/Desktop. A prompt-injected dispatch like "cd /etc and cat passwd" can't
-escape via a carefully-named symlink because get_repo_path() resolves first
-and then checks .relative_to(_ALLOWED_ROOT).
+one of the allowed roots (``_ALLOWED_ROOTS``). A prompt-injected dispatch
+like "cd /etc and cat passwd" can't escape via a carefully-named symlink
+because get_repo_path() resolves first and checks containment.
+
+The allowlist is a list (not a single root) because Arch lives under
+``~/Documents/GitHub/`` while Chief Command + Personal Assist live under
+``~/Desktop/``. Keeping the list explicit (not widening to ``~``) is the
+defense: adding a new root is an intentional edit to this file, not a
+config-soup expansion.
 """
 
 from __future__ import annotations
@@ -22,17 +28,37 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-# Root under which every repo path MUST resolve. Symlinks are resolved BEFORE
+# Roots under which every repo path MUST resolve. Symlinks are resolved BEFORE
 # this check, so a symlinked escape (e.g. ~/Desktop/arch -> /etc) is rejected.
-_ALLOWED_ROOT = (Path.home() / "Desktop").resolve()
+_ALLOWED_ROOTS: tuple[Path, ...] = (
+    (Path.home() / "Desktop").resolve(),
+    (Path.home() / "Documents" / "GitHub").resolve(),
+)
+
+
+def _is_under_allowed_root(resolved: Path) -> bool:
+    """True iff ``resolved`` is a descendant of any allowlist root."""
+    for root in _ALLOWED_ROOTS:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 # Canonical project name -> absolute repo root path.
 # Archie is intentionally omitted when the directory does not
 # exist on this machine (per spec). Add it here once it lands on disk.
+#
+# Arch canonical path is ``~/Documents/GitHub/arch-to-freedom-emr`` — matches
+# the ``arch`` shell alias in ~/.zshrc. Do NOT re-introduce a second Arch
+# checkout under ~/Desktop without first aligning the alias + removing the
+# stale copy.
 _REPO_PATHS: dict[str, Path] = {
-    "Arch": Path.home() / "Desktop" / "arch-to-freedom-emr",
+    "Arch": Path.home() / "Documents" / "GitHub" / "arch-to-freedom-emr",
     "Chief Command": Path.home() / "Desktop" / "chief-command",
+    "Personal Assist": Path.home() / "Desktop" / "personal-assist",
 }
 
 # Optional configured repos — kept separate so we can log a warning for
@@ -80,8 +106,8 @@ def get_repo_path(project: str) -> Optional[Path]:
 
     The allowlist check defeats symlink-escape attacks: even if a repo entry
     points at a benign path that has since been swapped for a symlink to, say,
-    /etc, the ``.relative_to(_ALLOWED_ROOT)`` check rejects it before any
-    subprocess is spawned there.
+    /etc, the containment check rejects it before any subprocess is spawned
+    there.
     """
     if not project:
         return None
@@ -89,14 +115,12 @@ def get_repo_path(project: str) -> Optional[Path]:
     if path is None or not path.exists():
         return None
     resolved = path.resolve()
-    try:
-        resolved.relative_to(_ALLOWED_ROOT)
-    except ValueError:
+    if not _is_under_allowed_root(resolved):
         logger.error(
-            "repo_map: %r resolved to %s which is outside allowlist root %s",
+            "repo_map: %r resolved to %s which is outside allowlist roots %s",
             project,
             resolved,
-            _ALLOWED_ROOT,
+            _ALLOWED_ROOTS,
         )
         return None
     return resolved
