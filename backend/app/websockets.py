@@ -349,7 +349,7 @@ async def voice_ws(ws: WebSocket) -> None:
                 logger.info("Voice WS handling text turn session=%s len=%d scope=%s",
                             sid, len(text_content), current_project)
                 current_turn_task = asyncio.create_task(
-                    _route_user_turn(ws, sid, history, text_content, current_project)
+                    _route_user_turn(ws, sid, history, text_content, current_project, current_speed)
                 )
 
             elif "bytes" in message:
@@ -374,7 +374,7 @@ async def voice_ws(ws: WebSocket) -> None:
                 await ws_send_json(ws, {"type": "transcript", "content": transcript})
                 await _maybe_switch_project(transcript)
                 current_turn_task = asyncio.create_task(
-                    _route_user_turn(ws, sid, history, transcript, current_project)
+                    _route_user_turn(ws, sid, history, transcript, current_project, current_speed)
                 )
 
             else:
@@ -412,6 +412,7 @@ async def _run_llm_turn(
     history: list[dict],
     user_text: str,
     project_scope: str,
+    current_speed: float = 1.0,
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record."""
     model, is_deep = classify_and_route(user_text)
@@ -529,9 +530,10 @@ async def _handle_text_turn(
     history: list[dict],
     text: str,
     project_scope: str,
+    current_speed: float = 1.0,
 ) -> None:
     try:
-        await _run_llm_turn(ws, session_id, history, text, project_scope)
+        await _run_llm_turn(ws, session_id, history, text, project_scope, current_speed)
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
         # error. The caller already sent turn_cancelled.
@@ -556,6 +558,7 @@ async def _route_user_turn(
     history: list[dict],
     user_text: str,
     current_project: str,
+    current_speed: float = 1.0,
 ) -> None:
     """Single entry point that classifies then routes to chat/task/status/cancel."""
     # Switch intent has already run upstream. Now classify.
@@ -563,7 +566,7 @@ async def _route_user_turn(
     intent = result["intent"]
 
     if intent == "chat":
-        await _handle_text_turn(ws, session_id, history, user_text, current_project)
+        await _handle_text_turn(ws, session_id, history, user_text, current_project, current_speed)
         return
 
     if intent == "task":

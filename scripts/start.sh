@@ -23,7 +23,8 @@ echo ""
 # Start FastAPI backend
 echo "→ Starting Chief backend..."
 cd "$PROJECT_DIR/backend"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+  --reload-dir app --reload-dir services --reload-dir config &
 BACKEND_PID=$!
 echo "  ✓ Backend running on http://localhost:8000 (PID: $BACKEND_PID)"
 echo ""
