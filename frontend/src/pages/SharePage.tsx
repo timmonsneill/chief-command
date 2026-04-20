@@ -4,10 +4,10 @@ import { Check, Clock, AlertTriangle, RefreshCw } from 'lucide-react'
 import type { Project } from '../lib/api'
 
 const SEVERITY_COLORS: Record<string, string> = {
-  CRITICAL: 'text-red-400',
-  HIGH: 'text-orange-400',
-  MEDIUM: 'text-yellow-400',
-  LOW: 'text-white/40',
+  CRITICAL: 'text-red-600',
+  HIGH: 'text-orange-600',
+  MEDIUM: 'text-yellow-600',
+  LOW: 'text-ink/40',
 }
 
 export default function SharePage() {
@@ -39,7 +39,7 @@ export default function SharePage() {
   if (loading) {
     return (
       <div className="h-[100dvh] flex items-center justify-center bg-surface">
-        <div className="text-white/30 text-sm">Loading...</div>
+        <div className="text-ink/30 text-sm">Loading...</div>
       </div>
     )
   }
@@ -47,10 +47,10 @@ export default function SharePage() {
   if (error || !project) {
     return (
       <div className="h-[100dvh] flex flex-col items-center justify-center bg-surface gap-3">
-        <p className="text-white/40 text-sm">{error || 'Not found'}</p>
+        <p className="text-ink/40 text-sm">{error || 'Not found'}</p>
         <button
           onClick={fetchProject}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm active:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm active:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -71,14 +71,14 @@ export default function SharePage() {
       <div className="flex-1 max-w-2xl mx-auto w-full">
         {/* Header */}
         <div className="px-4 py-6 border-b border-surface-border">
-          <h1 className="text-xl font-bold text-white">{project.name}</h1>
-          <p className="text-sm text-white/40 mt-1">{project.description}</p>
+          <h1 className="text-xl font-bold text-ink">{project.name}</h1>
+          <p className="text-sm text-ink/40 mt-1">{project.description}</p>
         </div>
 
         <div className="px-4 py-4 space-y-6">
           {/* Phases */}
           <section>
-            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+            <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider mb-3">
               Phases
             </h2>
             <div className="space-y-3">
@@ -90,10 +90,10 @@ export default function SharePage() {
                 return (
                   <div key={phase.name}>
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm text-white/80">
+                      <span className="text-sm text-ink/80">
                         {phase.name}
                       </span>
-                      <span className="text-xs text-white/40">
+                      <span className="text-xs text-ink/40">
                         {phase.completed}/{phase.total} ({pct}%)
                       </span>
                     </div>
@@ -113,13 +113,13 @@ export default function SharePage() {
 
           {/* Todos */}
           <section>
-            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+            <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider mb-3">
               Todos
             </h2>
             <div className="space-y-4">
               {Object.entries(todosByCategory).map(([category, todos]) => (
                 <div key={category}>
-                  <h3 className="text-xs font-medium text-white/40 mb-2">
+                  <h3 className="text-xs font-medium text-ink/40 mb-2">
                     {category}
                   </h3>
                   <div className="space-y-1">
@@ -136,14 +136,14 @@ export default function SharePage() {
                           }`}
                         >
                           {todo.done && (
-                            <Check size={10} className="text-white" />
+                            <Check size={10} className="text-ink" />
                           )}
                         </div>
                         <span
                           className={`text-sm leading-relaxed ${
                             todo.done
-                              ? 'text-white/30 line-through'
-                              : 'text-white/70'
+                              ? 'text-ink/30 line-through'
+                              : 'text-ink/70'
                           }`}
                         >
                           {todo.text}
@@ -154,27 +154,27 @@ export default function SharePage() {
                 </div>
               ))}
               {project.todos.length === 0 && (
-                <p className="text-xs text-white/30">No todos</p>
+                <p className="text-xs text-ink/30">No todos</p>
               )}
             </div>
           </section>
 
           {/* Timeline */}
           <section>
-            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+            <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider mb-3">
               Timeline
             </h2>
             <div className="space-y-3">
               {project.timeline.slice(0, 10).map((entry) => (
                 <div key={entry.id} className="flex items-start gap-3">
                   <div className="mt-1">
-                    <Clock size={12} className="text-white/20" />
+                    <Clock size={12} className="text-ink/20" />
                   </div>
                   <div>
-                    <p className="text-sm text-white/70">
+                    <p className="text-sm text-ink/70">
                       {entry.description}
                     </p>
-                    <p className="text-[10px] text-white/30 mt-0.5">
+                    <p className="text-[10px] text-ink/30 mt-0.5">
                       {new Date(entry.date).toLocaleDateString(undefined, {
                         month: 'short',
                         day: 'numeric',
@@ -186,14 +186,14 @@ export default function SharePage() {
                 </div>
               ))}
               {project.timeline.length === 0 && (
-                <p className="text-xs text-white/30">No activity yet</p>
+                <p className="text-xs text-ink/30">No activity yet</p>
               )}
             </div>
           </section>
 
           {/* Build History */}
           <section>
-            <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider mb-3">
+            <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider mb-3">
               Build History
             </h2>
             <div className="space-y-2">
@@ -210,7 +210,7 @@ export default function SharePage() {
                     className="p-3 rounded-xl bg-surface-raised border border-surface-border"
                   >
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-white/40">
+                      <span className="text-xs text-ink/40">
                         {new Date(build.timestamp).toLocaleDateString(
                           undefined,
                           {
@@ -227,7 +227,7 @@ export default function SharePage() {
                             size={10}
                             className="text-status-working"
                           />
-                          <span className="text-xs text-white/40">
+                          <span className="text-xs text-ink/40">
                             {total} findings
                           </span>
                         </div>
@@ -258,7 +258,7 @@ export default function SharePage() {
                 )
               })}
               {project.builds.length === 0 && (
-                <p className="text-xs text-white/30">No builds yet</p>
+                <p className="text-xs text-ink/30">No builds yet</p>
               )}
             </div>
           </section>
@@ -267,7 +267,7 @@ export default function SharePage() {
 
       {/* Footer */}
       <footer className="text-center py-6 border-t border-surface-border mt-4">
-        <span className="text-xs text-white/20">
+        <span className="text-xs text-ink/20">
           Powered by Chief Command
         </span>
       </footer>

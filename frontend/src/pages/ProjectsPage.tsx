@@ -6,7 +6,7 @@ import { api, type Project } from '../lib/api'
 const STATUS_CONFIG: Record<string, { dot: string; label: string }> = {
   active: { dot: 'bg-status-online', label: 'Active' },
   paused: { dot: 'bg-status-working', label: 'Paused' },
-  done: { dot: 'bg-white/30', label: 'Done' },
+  done: { dot: 'bg-ink/30', label: 'Done' },
 }
 
 function formatRelativeTime(iso: string | null | undefined): string {
@@ -47,7 +47,7 @@ export default function ProjectsPage() {
   if (loading && projects.length === 0) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading projects...</div>
+        <div className="text-ink/30 text-sm">Loading projects...</div>
       </div>
     )
   }
@@ -55,10 +55,10 @@ export default function ProjectsPage() {
   if (error && projects.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-white/40 text-sm">{error}</p>
+        <p className="text-ink/40 text-sm">{error}</p>
         <button
           onClick={fetchProjects}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm active:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm active:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -72,13 +72,13 @@ export default function ProjectsPage() {
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm px-4 py-3 border-b border-surface-border z-10">
         <div className="flex items-center gap-2">
           <FolderKanban size={18} className="text-chief" />
-          <h1 className="text-lg font-semibold text-white">Projects</h1>
-          <span className="text-xs text-white/30 ml-auto">
+          <h1 className="font-display text-lg font-semibold text-ink">Projects</h1>
+          <span className="text-xs text-ink/30 ml-auto">
             {projects.length} project{projects.length !== 1 ? 's' : ''}
           </span>
           <button
             onClick={fetchProjects}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-ink/30 active:text-ink/60 transition-colors"
           >
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
@@ -101,20 +101,20 @@ export default function ProjectsPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <div className={`w-2 h-2 rounded-full shrink-0 ${cfg.dot}`} />
-                    <h3 className="text-sm font-medium text-white truncate">
+                    <h3 className="text-sm font-medium text-ink truncate">
                       {project.name}
                     </h3>
-                    <span className="text-[10px] text-white/30 shrink-0">
+                    <span className="text-[10px] text-ink/30 shrink-0">
                       {cfg.label}
                     </span>
                   </div>
                   {project.description && (
-                    <p className="text-xs text-white/40 line-clamp-2 ml-4">
+                    <p className="text-xs text-ink/40 line-clamp-2 ml-4">
                       {project.description}
                     </p>
                   )}
                 </div>
-                <ChevronRight size={16} className="text-white/20 shrink-0 mt-0.5 ml-2" />
+                <ChevronRight size={16} className="text-ink/20 shrink-0 mt-0.5 ml-2" />
               </div>
 
               <div className="flex items-center gap-3 mt-3 ml-4">
@@ -124,15 +124,15 @@ export default function ProjectsPage() {
                     style={{ width: `${pct}%` }}
                   />
                 </div>
-                <span className="text-[10px] text-white/30 shrink-0 w-8 text-right">
+                <span className="text-[10px] text-ink/30 shrink-0 w-8 text-right">
                   {pct}%
                 </span>
                 {openTodos > 0 && (
-                  <span className="text-[10px] text-white/30 shrink-0">
+                  <span className="text-[10px] text-ink/30 shrink-0">
                     {openTodos} open
                   </span>
                 )}
-                <span className="text-[10px] text-white/20 shrink-0">
+                <span className="text-[10px] text-ink/20 shrink-0">
                   {formatRelativeTime(project.last_activity)}
                 </span>
               </div>
@@ -141,7 +141,7 @@ export default function ProjectsPage() {
         })}
 
         {projects.length === 0 && !loading && (
-          <div className="text-center py-12 text-white/30 text-sm">
+          <div className="text-center py-12 text-ink/30 text-sm">
             No projects configured
           </div>
         )}

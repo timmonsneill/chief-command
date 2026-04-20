@@ -33,7 +33,7 @@ export function TabBar({ active, onChange }: TabBarProps): ReactNode {
               'flex-shrink-0 px-4 py-4 text-xs font-semibold whitespace-nowrap border-b-2 transition-colors duration-150',
               active === tab.id
                 ? 'text-chief border-chief bg-chief/5'
-                : 'text-white/40 border-transparent hover:text-chief/70 hover:bg-chief/5',
+                : 'text-ink/40 border-transparent hover:text-chief/70 hover:bg-chief/5',
             ].join(' ')}
           >
             <span className="hidden sm:inline">{tab.labelFull}</span>

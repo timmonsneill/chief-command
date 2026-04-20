@@ -26,11 +26,11 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="min-h-[60vh] flex flex-col items-center justify-center p-4 gap-3 text-center">
-          <p className="text-red-400 font-medium">Something broke on this page</p>
-          <p className="text-white/60 text-xs max-w-md">
+          <p className="text-red-600 font-medium">Something broke on this page</p>
+          <p className="text-ink/60 text-xs max-w-md">
             {this.props.label ?? 'Unknown section'}
           </p>
-          <pre className="text-[11px] font-mono text-white/70 bg-surface-raised border border-surface-border rounded-lg p-3 max-w-full overflow-auto max-h-64 whitespace-pre-wrap break-words">
+          <pre className="text-[11px] font-mono text-ink/70 bg-surface-raised border border-surface-border rounded-lg p-3 max-w-full overflow-auto max-h-64 whitespace-pre-wrap break-words">
             {this.state.error.name}: {this.state.error.message}
             {'\n\n'}
             {this.state.error.stack?.split('\n').slice(0, 8).join('\n')}

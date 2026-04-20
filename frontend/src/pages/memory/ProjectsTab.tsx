@@ -31,11 +31,11 @@ export default function ProjectsTab({
     const pm = projects.find((p) => p.project === selectedProject)
     if (!pm) {
       return (
-        <div className="text-center py-10 text-white/30 text-sm">
+        <div className="text-center py-10 text-ink/30 text-sm">
           Project not found.
           <button
             onClick={() => onSelectProject(null)}
-            className="block mx-auto mt-2 text-chief-light underline"
+            className="block mx-auto mt-2 text-primary underline"
           >
             Back to projects
           </button>
@@ -49,7 +49,7 @@ export default function ProjectsTab({
   // owner knows which project to drill into.
   if (projects.length === 0) {
     return (
-      <div className="text-center py-10 text-white/30 text-sm">
+      <div className="text-center py-10 text-ink/30 text-sm">
         No project memory entries
       </div>
     )
@@ -57,7 +57,7 @@ export default function ProjectsTab({
 
   return (
     <div className="space-y-2">
-      <p className="text-[11px] text-white/35 px-1 mb-1 leading-snug">
+      <p className="text-[11px] text-ink/35 px-1 mb-1 leading-snug">
         All projects. Tap to see each project's memory files separately.
       </p>
       {projects.map((pm) => {
@@ -73,23 +73,23 @@ export default function ProjectsTab({
             <div
               className={`w-9 h-9 flex items-center justify-center rounded-lg shrink-0 ${
                 pm.status === 'active'
-                  ? 'bg-chief/15 text-chief-light'
-                  : 'bg-surface-overlay text-white/40'
+                  ? 'bg-chief/15 text-primary'
+                  : 'bg-surface-overlay text-ink/40'
               }`}
             >
               <Folder size={18} />
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold text-white truncate">{pm.project}</p>
+                <p className="text-sm font-semibold text-ink truncate">{pm.project}</p>
                 <div
                   className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    pm.status === 'active' ? 'bg-status-online' : 'bg-white/20'
+                    pm.status === 'active' ? 'bg-status-online' : 'bg-ink/20'
                   }`}
                   aria-label={pm.status}
                 />
               </div>
-              <p className="text-[11px] text-white/40 mt-0.5">
+              <p className="text-[11px] text-ink/40 mt-0.5">
                 {query ? (
                   <>
                     {matching.length} of {pm.entries.length} file
@@ -103,7 +103,7 @@ export default function ProjectsTab({
                 )}
               </p>
             </div>
-            <ChevronRight size={16} className="text-white/30 shrink-0" />
+            <ChevronRight size={16} className="text-ink/30 shrink-0" />
           </button>
         )
       })}
@@ -128,27 +128,27 @@ function ProjectFileList({
     <div className="space-y-3">
       <button
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-white/50 active:text-white transition-colors"
+        className="flex items-center gap-1.5 text-xs text-ink/50 active:text-ink transition-colors"
       >
         <ArrowLeft size={13} />
         All projects
       </button>
 
       <div className="flex items-center gap-2 px-1">
-        <FolderOpen size={15} className="text-chief-light" />
-        <h2 className="text-sm font-semibold text-white">{pm.project}</h2>
+        <FolderOpen size={15} className="text-primary" />
+        <h2 className="text-sm font-semibold text-ink">{pm.project}</h2>
         <div
           className={`w-1.5 h-1.5 rounded-full ${
-            pm.status === 'active' ? 'bg-status-online' : 'bg-white/20'
+            pm.status === 'active' ? 'bg-status-online' : 'bg-ink/20'
           }`}
         />
-        <span className="ml-auto text-[10px] text-white/30">
+        <span className="ml-auto text-[10px] text-ink/30">
           {pm.entries.length} file{pm.entries.length === 1 ? '' : 's'}
         </span>
       </div>
 
       {filtered.length === 0 ? (
-        <div className="text-center py-10 text-white/30 text-sm">
+        <div className="text-center py-10 text-ink/30 text-sm">
           {query ? 'No files match search' : 'No files in this project'}
         </div>
       ) : (
@@ -159,16 +159,16 @@ function ProjectFileList({
               onClick={() => onOpen(entry)}
               className="w-full flex items-start gap-3 p-3 rounded-xl bg-surface-raised border border-surface-border active:bg-surface-overlay transition-colors text-left"
             >
-              <FileText size={14} className="text-white/35 shrink-0 mt-0.5" />
+              <FileText size={14} className="text-ink/35 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-white truncate">{entry.title}</p>
+                <p className="text-sm font-medium text-ink truncate">{entry.title}</p>
                 {entry.description && (
-                  <p className="text-xs text-white/40 mt-0.5 leading-snug line-clamp-2">
+                  <p className="text-xs text-ink/40 mt-0.5 leading-snug line-clamp-2">
                     {entry.description}
                   </p>
                 )}
               </div>
-              <ChevronRight size={15} className="text-white/25 shrink-0 mt-0.5" />
+              <ChevronRight size={15} className="text-ink/25 shrink-0 mt-0.5" />
             </button>
           ))}
         </div>

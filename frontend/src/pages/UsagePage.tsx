@@ -94,7 +94,7 @@ function HeroCostCard({
 
   return (
     <div className="flex-1 p-4 rounded-2xl bg-surface-raised border border-surface-border text-center">
-      <p className="text-[11px] font-semibold uppercase tracking-widest text-white/40 mb-2">{label}</p>
+      <p className="text-[11px] font-semibold uppercase tracking-widest text-ink/40 mb-2">{label}</p>
       <p className={`font-display text-3xl md:text-5xl font-bold tabular-nums ${colorClass}`}>
         {centsToFullDisplay(cents)}
       </p>
@@ -124,15 +124,15 @@ function CurrentSessionStrip({ session }: { session: SessionUsage }) {
       <div className="w-2 h-2 rounded-full bg-chief animate-pulse shrink-0" />
       <div className="flex-1 min-w-0">
         <p className="text-xs font-semibold text-chief mb-0.5">Active session</p>
-        <p className="text-[11px] text-white/50 truncate">
+        <p className="text-[11px] text-ink/50 truncate">
           {session.model.split('-').slice(-2).join('-')} · {session.turn_count} turns · started {formatDuration(age)} ago
         </p>
       </div>
       <div className="shrink-0 text-right">
-        <p className="font-display text-lg font-bold text-white tabular-nums">
+        <p className="font-display text-lg font-bold text-ink tabular-nums">
           {centsToDisplay(session.session_total_cents)}
         </p>
-        <p className="text-[10px] text-white/30">this session</p>
+        <p className="text-[10px] text-ink/30">this session</p>
       </div>
     </div>
   )
@@ -157,7 +157,7 @@ function ModelBreakdown({ data }: { data: UsageByModel }) {
 
   if (allModels.length === 0) {
     return (
-      <p className="text-xs text-white/30 text-center py-4">No model data yet</p>
+      <p className="text-xs text-ink/30 text-center py-4">No model data yet</p>
     )
   }
 
@@ -166,9 +166,9 @@ function ModelBreakdown({ data }: { data: UsageByModel }) {
       <table className="w-full text-xs">
         <thead>
           <tr>
-            <th className="text-left text-white/40 font-medium pb-2 pr-4">Model</th>
+            <th className="text-left text-ink/40 font-medium pb-2 pr-4">Model</th>
             {periods.map((p) => (
-              <th key={p.key} className="text-right text-white/40 font-medium pb-2 pl-3">{p.label}</th>
+              <th key={p.key} className="text-right text-ink/40 font-medium pb-2 pl-3">{p.label}</th>
             ))}
           </tr>
         </thead>
@@ -177,14 +177,14 @@ function ModelBreakdown({ data }: { data: UsageByModel }) {
             <tr key={model}>
               <td className="py-2 pr-4">
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full shrink-0 ${MODEL_COLORS[model] ?? 'bg-white/30'}`} />
-                  <span className="text-white/70">{MODEL_LABELS[model] ?? model}</span>
+                  <div className={`w-2 h-2 rounded-full shrink-0 ${MODEL_COLORS[model] ?? 'bg-ink/30'}`} />
+                  <span className="text-ink/70">{MODEL_LABELS[model] ?? model}</span>
                 </div>
               </td>
               {periods.map((p) => {
                 const stat = data[p.key][model]
                 return (
-                  <td key={p.key} className="py-2 pl-3 text-right text-white/60 tabular-nums">
+                  <td key={p.key} className="py-2 pl-3 text-right text-ink/60 tabular-nums">
                     {stat ? centsToDisplay(stat.cost_cents) : '—'}
                   </td>
                 )
@@ -207,7 +207,7 @@ function DailyChart({ days }: { days: UsageDayPoint[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   if (days.length === 0) {
-    return <p className="text-xs text-white/30 text-center py-4">No daily data yet</p>
+    return <p className="text-xs text-ink/30 text-center py-4">No daily data yet</p>
   }
 
   const maxCents = Math.max(...days.map((d) => d.cost_cents), 1)
@@ -220,10 +220,10 @@ function DailyChart({ days }: { days: UsageDayPoint[] }) {
     <div ref={containerRef} className="select-none">
       {hovered && (
         <div className="mb-2 text-center">
-          <span className="text-xs font-semibold text-white">{centsToDisplay(hovered.cost_cents)}</span>
-          <span className="text-xs text-white/40 ml-2">{formatDate(hovered.date)}</span>
+          <span className="text-xs font-semibold text-ink">{centsToDisplay(hovered.cost_cents)}</span>
+          <span className="text-xs text-ink/40 ml-2">{formatDate(hovered.date)}</span>
           {hovered.turns > 0 && (
-            <span className="text-[10px] text-white/30 ml-2">{hovered.turns} turns</span>
+            <span className="text-[10px] text-ink/30 ml-2">{hovered.turns} turns</span>
           )}
         </div>
       )}
@@ -263,8 +263,8 @@ function DailyChart({ days }: { days: UsageDayPoint[] }) {
         })}
       </svg>
       <div className="flex justify-between mt-1">
-        <span className="text-[9px] text-white/25">{formatDate(days[0].date)}</span>
-        <span className="text-[9px] text-white/25">{formatDate(days[days.length - 1].date)}</span>
+        <span className="text-[9px] text-ink/25">{formatDate(days[0].date)}</span>
+        <span className="text-[9px] text-ink/25">{formatDate(days[days.length - 1].date)}</span>
       </div>
     </div>
   )
@@ -311,25 +311,25 @@ function SessionRow({
       >
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-white/70">
+            <span className="text-xs font-medium text-ink/70">
               {formatDateTime(session.started_at)}
             </span>
             {session.turn_count > 0 && (
-              <span className="text-[10px] text-white/30">{session.turn_count} turns</span>
+              <span className="text-[10px] text-ink/30">{session.turn_count} turns</span>
             )}
             {session.duration_s !== null && (
-              <span className="text-[10px] text-white/30">{formatDuration(session.duration_s)}</span>
+              <span className="text-[10px] text-ink/30">{formatDuration(session.duration_s)}</span>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <span className="text-sm font-semibold text-white">
+          <span className="text-sm font-semibold text-ink">
             {centsToDisplay(session.total_cost_cents)}
           </span>
           {expanded ? (
-            <ChevronDown size={14} className="text-white/30" />
+            <ChevronDown size={14} className="text-ink/30" />
           ) : (
-            <ChevronRight size={14} className="text-white/30" />
+            <ChevronRight size={14} className="text-ink/30" />
           )}
         </div>
       </button>
@@ -337,7 +337,7 @@ function SessionRow({
       {expanded && (
         <div className="px-4 pb-3 border-t border-surface-border">
           {loadingDetail && (
-            <p className="text-xs text-white/30 py-2">Loading turns...</p>
+            <p className="text-xs text-ink/30 py-2">Loading turns...</p>
           )}
           {detail && (
             <div className="mt-2 space-y-2">
@@ -345,8 +345,8 @@ function SessionRow({
                 <div className="flex items-center gap-1.5 mb-3">
                   {Object.entries(modelCounts).map(([model, count]) => (
                     <div key={model} className="flex items-center gap-1">
-                      <div className={`w-2 h-2 rounded-full ${MODEL_COLORS[model] ?? 'bg-white/30'}`} />
-                      <span className="text-[10px] text-white/40">{model.split('-').slice(-2).join('-')} ×{count}</span>
+                      <div className={`w-2 h-2 rounded-full ${MODEL_COLORS[model] ?? 'bg-ink/30'}`} />
+                      <span className="text-[10px] text-ink/40">{model.split('-').slice(-2).join('-')} ×{count}</span>
                     </div>
                   ))}
                 </div>
@@ -358,12 +358,12 @@ function SessionRow({
                 >
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-1.5">
-                      <div className={`w-1.5 h-1.5 rounded-full ${MODEL_COLORS[turn.model] ?? 'bg-white/30'}`} />
-                      <span className="text-[10px] font-medium text-white/50">{turn.model}</span>
+                      <div className={`w-1.5 h-1.5 rounded-full ${MODEL_COLORS[turn.model] ?? 'bg-ink/30'}`} />
+                      <span className="text-[10px] font-medium text-ink/50">{turn.model}</span>
                     </div>
-                    <span className="text-[10px] text-white/40">{centsToDisplay(turn.cost_cents)}</span>
+                    <span className="text-[10px] text-ink/40">{centsToDisplay(turn.cost_cents)}</span>
                   </div>
-                  <div className="flex gap-3 text-[10px] text-white/30">
+                  <div className="flex gap-3 text-[10px] text-ink/30">
                     <span>in {turn.input_tokens.toLocaleString()}</span>
                     <span>out {turn.output_tokens.toLocaleString()}</span>
                     {turn.cache_read_tokens > 0 && (
@@ -371,17 +371,17 @@ function SessionRow({
                     )}
                   </div>
                   {turn.user_text && (
-                    <p className="text-xs text-white/40 mt-1.5 truncate">{turn.user_text}</p>
+                    <p className="text-xs text-ink/40 mt-1.5 truncate">{turn.user_text}</p>
                   )}
                 </div>
               ))}
               {detail.turns.length === 0 && (
-                <p className="text-xs text-white/30">No turns recorded</p>
+                <p className="text-xs text-ink/30">No turns recorded</p>
               )}
             </div>
           )}
           {!loadingDetail && !detail && (
-            <p className="text-xs text-white/30 py-2">Turn details unavailable</p>
+            <p className="text-xs text-ink/30 py-2">Turn details unavailable</p>
           )}
         </div>
       )}
@@ -396,7 +396,7 @@ function Section({ title, icon: Icon, children }: { title: string; icon: React.E
     <div className="rounded-2xl bg-surface-raised border border-surface-border overflow-hidden">
       <div className="px-4 py-3 border-b border-surface-border flex items-center gap-2">
         <Icon size={14} className="text-chief" />
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-white/60">{title}</h2>
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-ink/60">{title}</h2>
       </div>
       <div className="p-4">{children}</div>
     </div>
@@ -456,7 +456,7 @@ export default function UsagePage() {
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading usage...</div>
+        <div className="text-ink/30 text-sm">Loading usage...</div>
       </div>
     )
   }
@@ -470,11 +470,11 @@ export default function UsagePage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <CircleDollarSign size={18} className="text-chief" />
-            <h1 className="text-lg font-semibold text-white">Usage</h1>
+            <h1 className="font-display text-lg font-semibold text-ink">Usage</h1>
           </div>
           <button
             onClick={fetchData}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/30 active:text-ink/60 transition-colors"
           >
             <RefreshCw size={14} />
           </button>
@@ -519,7 +519,7 @@ export default function UsagePage() {
           </Section>
         ) : byModelUnavailable ? (
           <div className="rounded-2xl bg-surface-raised border border-surface-border px-4 py-4 text-center">
-            <p className="text-xs text-white/30">Coming soon — per-model breakdown</p>
+            <p className="text-xs text-ink/30">Coming soon — per-model breakdown</p>
           </div>
         ) : null}
 
@@ -530,14 +530,14 @@ export default function UsagePage() {
           </Section>
         ) : dailyUnavailable ? (
           <div className="rounded-2xl bg-surface-raised border border-surface-border px-4 py-4 text-center">
-            <p className="text-xs text-white/30">Coming soon — daily trend chart</p>
+            <p className="text-xs text-ink/30">Coming soon — daily trend chart</p>
           </div>
         ) : null}
 
         {/* Recent sessions */}
         <Section title="Recent sessions" icon={CircleDollarSign}>
           {error && (
-            <p className="text-xs text-white/40 text-center">{error}</p>
+            <p className="text-xs text-ink/40 text-center">{error}</p>
           )}
           {sessions.length > 0 ? (
             <div className="space-y-2">
@@ -553,7 +553,7 @@ export default function UsagePage() {
               ))}
             </div>
           ) : !error ? (
-            <p className="text-center py-6 text-white/30 text-sm">
+            <p className="text-center py-6 text-ink/30 text-sm">
               No sessions yet — start a voice conversation
             </p>
           ) : null}

@@ -15,7 +15,7 @@ type ProjectWithDashboardUrl = Project & { dashboard_url?: string }
 const STATUS_CONFIG: Record<string, { dot: string; label: string }> = {
   active:  { dot: 'bg-status-online',  label: 'Active' },
   paused:  { dot: 'bg-status-working', label: 'Paused' },
-  done:    { dot: 'bg-white/20',       label: 'Done' },
+  done:    { dot: 'bg-ink/20',       label: 'Done' },
 }
 
 // ─── Iframe view (for projects with dashboard_url) ───────────────────────────
@@ -65,7 +65,7 @@ function IframeView({ project, onBack }: IframeViewProps) {
       <div className="flex items-center gap-3 px-4 py-3 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-10 shrink-0">
         <button
           onClick={onBack}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-white/40 hover:text-white transition-colors"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-ink/40 hover:text-ink transition-colors"
           aria-label="Back to projects"
         >
           <ArrowLeft size={18} />
@@ -73,14 +73,14 @@ function IframeView({ project, onBack }: IframeViewProps) {
 
         <div className="flex-1 min-w-0 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full shrink-0 ${statusCfg.dot}`} />
-          <h1 className="text-sm font-semibold text-white truncate font-display">{project.name}</h1>
+          <h1 className="text-sm font-semibold text-ink truncate font-display">{project.name}</h1>
         </div>
 
         <a
           href={dashboardUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white/50 hover:text-white border border-surface-border hover:border-white/20 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink/50 hover:text-ink border border-surface-border hover:border-ink/20 transition-colors"
         >
           <ExternalLink size={12} />
           <span className="hidden sm:inline">Open in new tab</span>
@@ -92,7 +92,7 @@ function IframeView({ project, onBack }: IframeViewProps) {
       {(iframeError || loadTimedOut) && (
         <div className="px-4 py-2.5 bg-status-working/10 border-b border-status-working/20 flex items-center gap-2.5 shrink-0">
           <AlertTriangle size={14} className="text-status-working shrink-0" />
-          <p className="text-xs text-white/70 flex-1">
+          <p className="text-xs text-ink/70 flex-1">
             Dashboard blocked by browser security policy.{' '}
             <a
               href={dashboardUrl}
@@ -144,7 +144,7 @@ function NativeDashboard({ project, onBack }: NativeDashboardProps) {
       <div className="flex items-center gap-3 px-4 py-3 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-10 shrink-0">
         <button
           onClick={onBack}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-white/40 hover:text-white transition-colors"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-ink/40 hover:text-ink transition-colors"
           aria-label="Back to projects"
         >
           <ArrowLeft size={18} />
@@ -152,8 +152,8 @@ function NativeDashboard({ project, onBack }: NativeDashboardProps) {
 
         <div className="flex-1 min-w-0 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full shrink-0 ${statusCfg.dot}`} />
-          <h1 className="text-sm font-semibold text-white truncate font-display">{project.name}</h1>
-          <span className="hidden sm:inline text-[11px] text-white/30 font-medium px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border">
+          <h1 className="text-sm font-semibold text-ink truncate font-display">{project.name}</h1>
+          <span className="hidden sm:inline text-[11px] text-ink/30 font-medium px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border">
             {statusCfg.label}
           </span>
         </div>
@@ -213,7 +213,7 @@ export default function ProjectDashboard() {
   if (loading && !project) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading project…</div>
+        <div className="text-ink/30 text-sm">Loading project…</div>
       </div>
     )
   }
@@ -221,10 +221,10 @@ export default function ProjectDashboard() {
   if (error || !project) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-white/40 text-sm">{error || 'Project not found'}</p>
+        <p className="text-ink/40 text-sm">{error || 'Project not found'}</p>
         <button
           onClick={fetchProject}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm hover:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm hover:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry

@@ -114,7 +114,7 @@ export default function MemoryPage() {
   if (loading && !data) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading memory...</div>
+        <div className="text-ink/30 text-sm">Loading memory...</div>
       </div>
     )
   }
@@ -122,10 +122,10 @@ export default function MemoryPage() {
   if (error && !data) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-white/40 text-sm">{error}</p>
+        <p className="text-ink/40 text-sm">{error}</p>
         <button
           onClick={fetchMemory}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm active:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm active:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -162,10 +162,10 @@ export default function MemoryPage() {
       <div className="sticky top-0 bg-surface/80 backdrop-blur-sm border-b border-surface-border z-10">
         <div className="flex items-center gap-2 px-4 py-3">
           <BookOpen size={18} className="text-chief" />
-          <h1 className="text-lg font-semibold text-white">Memory</h1>
+          <h1 className="font-display text-lg font-semibold text-ink">Memory</h1>
           <button
             onClick={fetchMemory}
-            className="w-7 h-7 ml-auto flex items-center justify-center rounded-lg text-white/30 active:text-white/60 transition-colors"
+            className="w-7 h-7 ml-auto flex items-center justify-center rounded-lg text-ink/30 active:text-ink/60 transition-colors"
             aria-label="Refresh"
           >
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -177,14 +177,14 @@ export default function MemoryPage() {
           <div className="relative">
             <Search
               size={13}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-white/25 pointer-events-none"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-ink/25 pointer-events-none"
             />
             <input
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search entries..."
-              className="w-full bg-surface border border-surface-border rounded-lg pl-8 pr-3 py-1.5 text-xs text-white/70 placeholder-white/25 focus:outline-none focus:border-chief/50"
+              className="w-full bg-surface border border-surface-border rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink/70 placeholder-ink/25 focus:outline-none focus:border-chief/50"
             />
           </div>
         </div>
@@ -198,7 +198,7 @@ export default function MemoryPage() {
               className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors shrink-0 ${
                 activeTab === tab.id
                   ? 'text-chief border-chief'
-                  : 'text-white/40 border-transparent active:text-white/60'
+                  : 'text-ink/40 border-transparent active:text-ink/60'
               }`}
             >
               {tab.label}

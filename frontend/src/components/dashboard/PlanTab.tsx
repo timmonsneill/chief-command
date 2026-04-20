@@ -13,14 +13,14 @@ const PHASE_ACCENT_COLORS = [
 ]
 
 const PHASE_TEXT_COLORS = [
-  'text-emerald-400',
-  'text-chief-light',
-  'text-indigo-400',
-  'text-amber-400',
-  'text-purple-400',
-  'text-rose-400',
-  'text-sky-400',
-  'text-teal-400',
+  'text-emerald-600',
+  'text-primary',
+  'text-indigo-600',
+  'text-accent-dark',
+  'text-purple-600',
+  'text-rose-600',
+  'text-sky-600',
+  'text-teal-600',
 ]
 
 const PHASE_BAR_COLORS = [
@@ -60,9 +60,9 @@ export function PlanTab({ project }: PlanTabProps): ReactNode {
       <div className="p-4 rounded-xl bg-surface-raised border border-surface-border">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h2 className="text-sm font-semibold text-white font-display">{project.name}</h2>
+            <h2 className="text-sm font-semibold text-ink font-display">{project.name}</h2>
             {project.description && (
-              <p className="text-xs text-white/50 mt-0.5 leading-relaxed max-w-prose">
+              <p className="text-xs text-ink/50 mt-0.5 leading-relaxed max-w-prose">
                 {project.description}
               </p>
             )}
@@ -82,10 +82,10 @@ export function PlanTab({ project }: PlanTabProps): ReactNode {
           />
         </div>
         <div className="flex items-center justify-between mt-2">
-          <span className="text-[11px] text-white/30">
+          <span className="text-[11px] text-ink/30">
             {phases.length} phases · {progress.done}/{progress.total} tasks
           </span>
-          <span className="text-[11px] text-white/40">
+          <span className="text-[11px] text-ink/40">
             {progress.percent === 100 ? 'Complete' : 'In progress'}
           </span>
         </div>
@@ -115,36 +115,36 @@ export function PlanTab({ project }: PlanTabProps): ReactNode {
                     <div className="flex items-start justify-between gap-3 mb-3">
                       <div className="flex items-center gap-2.5">
                         <div
-                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold text-white shrink-0 ${
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold text-ink shrink-0 ${
                             isComplete ? 'bg-emerald-600' : isCurrent ? accentBg : 'bg-surface-border'
                           }`}
                         >
                           {idx + 1}
                         </div>
                         <div>
-                          <span className="text-sm font-semibold text-white/90 font-display leading-tight">
+                          <span className="text-sm font-semibold text-ink/90 font-display leading-tight">
                             {phase.name}
                           </span>
                           <div className="flex items-center gap-1.5 mt-0.5">
                             {isComplete && (
-                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
                                 Done ✓
                               </span>
                             )}
                             {isCurrent && !isComplete && (
-                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-chief/10 text-chief-light border border-chief/20">
+                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-chief/10 text-primary border border-chief/20">
                                 Now
                               </span>
                             )}
                             {!isComplete && !isCurrent && (
-                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-surface-border text-white/30">
+                              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-surface-border text-ink/30">
                                 Todo
                               </span>
                             )}
                           </div>
                         </div>
                       </div>
-                      <span className={`text-xl font-bold tabular-nums shrink-0 ${isComplete ? 'text-emerald-400' : textColor}`}>
+                      <span className={`text-xl font-bold tabular-nums shrink-0 ${isComplete ? 'text-emerald-600' : textColor}`}>
                         {phase.percent}%
                       </span>
                     </div>
@@ -163,7 +163,7 @@ export function PlanTab({ project }: PlanTabProps): ReactNode {
                       />
                     </div>
 
-                    <div className="text-[11px] text-white/30">
+                    <div className="text-[11px] text-ink/30">
                       {phase.completed}/{phase.total} tasks complete
                     </div>
                   </div>
@@ -174,8 +174,8 @@ export function PlanTab({ project }: PlanTabProps): ReactNode {
         </div>
       ) : (
         <div className="rounded-xl border border-dashed border-surface-border p-8 text-center">
-          <p className="text-sm text-white/30">No phases defined yet</p>
-          <p className="text-xs text-white/20 mt-1">Add phase headers to the project memory file</p>
+          <p className="text-sm text-ink/30">No phases defined yet</p>
+          <p className="text-xs text-ink/20 mt-1">Add phase headers to the project memory file</p>
         </div>
       )}
     </div>

@@ -7,8 +7,8 @@ import { api, type AgentProfile } from '../lib/api'
 const REVIEWER_NAMES = new Set(['Vera', 'Hawke', 'Sable', 'Pax', 'Quill', 'Hip'])
 
 const MODEL_BADGE: Record<AgentProfile['model'], { label: string; cls: string }> = {
-  opus: { label: 'Opus', cls: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' },
-  sonnet: { label: 'Sonnet', cls: 'bg-white/5 text-white/35 border border-white/10' },
+  opus: { label: 'Opus', cls: 'bg-indigo-500/20 text-indigo-700 border border-indigo-500/30' },
+  sonnet: { label: 'Sonnet', cls: 'bg-ink/5 text-ink/35 border border-ink/10' },
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -46,28 +46,28 @@ const SECTIONS: SectionMeta[] = [
     label: 'Leadership',
     sublabel: 'Orchestrator',
     tintClass: 'bg-indigo-500/[0.04]',
-    headerClass: 'text-indigo-400',
+    headerClass: 'text-indigo-600',
   },
   {
     key: 'opus',
     label: 'Opus Tier',
     sublabel: 'Senior specialists',
     tintClass: 'bg-indigo-500/[0.03]',
-    headerClass: 'text-indigo-300/70',
+    headerClass: 'text-indigo-700/70',
   },
   {
     key: 'builders',
     label: 'Builders',
     sublabel: 'Frontend & backend',
     tintClass: 'bg-emerald-500/[0.03]',
-    headerClass: 'text-emerald-400/70',
+    headerClass: 'text-emerald-600/70',
   },
   {
     key: 'reviewers',
     label: 'Reviewers',
     sublabel: 'Quality & validation',
     tintClass: 'bg-amber-500/[0.03]',
-    headerClass: 'text-amber-400/70',
+    headerClass: 'text-accent-dark/70',
   },
 ]
 
@@ -243,7 +243,7 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
       <div className="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-surface-border bg-surface-raised">
         <button
           onClick={onBack}
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-white/40 hover:text-white/80 transition-colors"
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/40 hover:text-ink/80 transition-colors"
           aria-label="Back to team"
         >
           <ArrowLeft size={18} />
@@ -259,8 +259,8 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
         </div>
 
         <div className="flex-1 min-w-0">
-          <p className="font-display font-semibold text-white leading-tight truncate">{agent.name}</p>
-          <p className="text-xs text-white/40 truncate">{agent.role}</p>
+          <p className="font-display font-semibold text-ink leading-tight truncate">{agent.name}</p>
+          <p className="text-xs text-ink/40 truncate">{agent.role}</p>
         </div>
 
         <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide ${MODEL_BADGE[agent.model].cls}`}>
@@ -271,15 +271,15 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading ? (
-          <div className="flex items-center justify-center h-48 text-white/30 text-sm">
+          <div className="flex items-center justify-center h-48 text-ink/30 text-sm">
             Loading…
           </div>
         ) : errorMsg ? (
           <div className="flex flex-col items-center justify-center h-48 gap-3">
-            <p className="text-white/40 text-sm">{errorMsg}</p>
+            <p className="text-ink/40 text-sm">{errorMsg}</p>
             <button
               onClick={onEdit}
-              className="text-xs text-white/40 underline underline-offset-2 hover:text-white/70 transition-colors"
+              className="text-xs text-ink/40 underline underline-offset-2 hover:text-ink/70 transition-colors"
             >
               Edit raw instead
             </button>
@@ -287,15 +287,15 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
         ) : !hasStructure ? (
           /* Fallback — raw content block */
           <div className="px-4 py-5 space-y-4">
-            <p className="text-xs text-white/30 text-center">Memory file doesn't have standard sections yet.</p>
+            <p className="text-xs text-ink/30 text-center">Memory file doesn't have standard sections yet.</p>
             {parsed?.raw && (
-              <pre className="bg-surface-raised text-white/80 text-sm font-mono p-4 rounded-xl overflow-x-auto whitespace-pre-wrap">
+              <pre className="bg-surface-raised text-ink/80 text-sm font-mono p-4 rounded-xl overflow-x-auto whitespace-pre-wrap">
                 {parsed.raw}
               </pre>
             )}
             <button
               onClick={onEdit}
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-white/10 text-white/50 text-sm hover:text-white/80 hover:border-white/20 transition-colors"
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-ink/10 text-ink/50 text-sm hover:text-ink/80 hover:border-ink/20 transition-colors"
             >
               <Pencil size={13} />
               Edit raw
@@ -307,10 +307,10 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* Personality */}
             {parsed.personality && (
               <div className="rounded-2xl bg-surface-raised border border-surface-border p-5">
-                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-white/30 mb-3">
+                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-ink/30 mb-3">
                   Personality
                 </h3>
-                <p className="text-sm text-white/75 leading-relaxed">{parsed.personality}</p>
+                <p className="text-sm text-ink/75 leading-relaxed">{parsed.personality}</p>
               </div>
             )}
 
@@ -319,7 +319,7 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
               const { chips, scopeNote } = parseTools(parsed.tools)
               return (
                 <div className="rounded-2xl bg-surface-raised border border-surface-border p-5">
-                  <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-white/30 mb-3">
+                  <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-ink/30 mb-3">
                     Tools
                   </h3>
                   {chips.length > 0 && (
@@ -327,7 +327,7 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
                       {chips.map((chip) => (
                         <span
                           key={chip}
-                          className="inline-block text-xs px-2.5 py-1 rounded-lg bg-white/6 border border-white/10 text-white/65 font-mono"
+                          className="inline-block text-xs px-2.5 py-1 rounded-lg bg-ink/6 border border-ink/10 text-ink/65 font-mono"
                         >
                           {chip}
                         </span>
@@ -335,7 +335,7 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
                     </div>
                   )}
                   {scopeNote && (
-                    <p className="text-[11px] text-white/30 leading-relaxed">
+                    <p className="text-[11px] text-ink/30 leading-relaxed">
                       Bash scoped to: {scopeNote}
                     </p>
                   )}
@@ -346,12 +346,12 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* Lane */}
             {parsed.lane && parsed.lane.length > 0 && (
               <div className="rounded-2xl bg-surface-raised border border-surface-border p-5">
-                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-white/30 mb-3">
+                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-ink/30 mb-3">
                   Lane
                 </h3>
                 <ul className="space-y-2">
                   {parsed.lane.map((item, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-white/70 leading-relaxed">
+                    <li key={i} className="flex gap-2 text-sm text-ink/70 leading-relaxed">
                       <span className="mt-1.5 w-1 h-1 rounded-full bg-emerald-400/50 shrink-0" />
                       {item}
                     </li>
@@ -363,12 +363,12 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* NOT Lane */}
             {parsed.notLane && parsed.notLane.length > 0 && (
               <div className="rounded-2xl bg-red-500/[0.04] border border-red-500/15 p-5">
-                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-red-400/60 mb-3">
+                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-red-600/60 mb-3">
                   NOT Lane
                 </h3>
                 <ul className="space-y-2">
                   {parsed.notLane.map((item, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-white/55 leading-relaxed">
+                    <li key={i} className="flex gap-2 text-sm text-ink/55 leading-relaxed">
                       <span className="mt-1.5 w-1 h-1 rounded-full bg-red-400/40 shrink-0" />
                       {item}
                     </li>
@@ -380,10 +380,10 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* Output Format */}
             {parsed.outputFormat && (
               <div className="rounded-2xl bg-surface-raised border border-surface-border p-5">
-                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-white/30 mb-3">
+                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-ink/30 mb-3">
                   Output Format
                 </h3>
-                <pre className="bg-surface-raised text-white/80 text-sm font-mono p-4 rounded-xl overflow-x-auto whitespace-pre-wrap border border-white/5">
+                <pre className="bg-surface-raised text-ink/80 text-sm font-mono p-4 rounded-xl overflow-x-auto whitespace-pre-wrap border border-ink/5">
                   {parsed.outputFormat}
                 </pre>
               </div>
@@ -392,17 +392,17 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* Lessons — prominent standalone block */}
             <div className="rounded-2xl bg-indigo-500/[0.05] border border-indigo-500/15 p-5">
               <div className="flex items-center gap-2 mb-4">
-                <BookOpen size={14} className="text-indigo-400/70" />
-                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-indigo-400/70">
+                <BookOpen size={14} className="text-indigo-600/70" />
+                <h3 className="font-display font-semibold text-xs uppercase tracking-widest text-indigo-600/70">
                   Lessons Accrued
                 </h3>
-                <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/20 font-medium">
+                <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-700 border border-indigo-500/20 font-medium">
                   {parsed.lessons.length}
                 </span>
               </div>
 
               {parsed.lessons.length === 0 ? (
-                <p className="text-sm text-white/25 italic text-center py-4">
+                <p className="text-sm text-ink/25 italic text-center py-4">
                   No lessons accrued yet.
                 </p>
               ) : (
@@ -410,23 +410,23 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
                   {parsed.lessons.map((lesson, i) => (
                     <div
                       key={i}
-                      className="rounded-xl bg-surface-raised border border-white/5 p-4"
+                      className="rounded-xl bg-surface-raised border border-ink/5 p-4"
                     >
                       {(lesson.date || lesson.tag) && (
                         <div className="flex flex-wrap items-center gap-2 mb-2">
                           {lesson.date && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300/80 border border-indigo-500/20 font-mono">
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-700/80 border border-indigo-500/20 font-mono">
                               {lesson.date}
                             </span>
                           )}
                           {lesson.tag && (
-                            <span className="text-[10px] text-white/35 font-medium">
+                            <span className="text-[10px] text-ink/35 font-medium">
                               {lesson.tag}
                             </span>
                           )}
                         </div>
                       )}
-                      <p className="text-sm text-white/65 leading-relaxed">{lesson.body}</p>
+                      <p className="text-sm text-ink/65 leading-relaxed">{lesson.body}</p>
                     </div>
                   ))}
                 </div>
@@ -436,7 +436,7 @@ function DetailView({ agent, onBack, onEdit }: DetailViewProps) {
             {/* Edit raw button */}
             <button
               onClick={onEdit}
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-white/8 text-white/40 text-sm hover:text-white/70 hover:border-white/15 transition-colors"
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-ink/8 text-ink/40 text-sm hover:text-ink/70 hover:border-ink/15 transition-colors"
             >
               <Pencil size={13} />
               Edit raw
@@ -495,7 +495,7 @@ function EditorView({ agent, onClose }: EditorViewProps) {
       <div className="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-surface-border bg-surface-raised">
         <button
           onClick={onClose}
-          className="w-8 h-8 flex items-center justify-center rounded-lg text-white/40 hover:text-white/80 transition-colors"
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-ink/40 hover:text-ink/80 transition-colors"
           aria-label="Back"
         >
           <ArrowLeft size={18} />
@@ -511,8 +511,8 @@ function EditorView({ agent, onClose }: EditorViewProps) {
         </div>
 
         <div className="flex-1 min-w-0">
-          <p className="font-display font-semibold text-white leading-tight truncate">{agent.name}</p>
-          <p className="text-xs text-white/40 truncate">{agent.role}</p>
+          <p className="font-display font-semibold text-ink leading-tight truncate">{agent.name}</p>
+          <p className="text-xs text-ink/40 truncate">{agent.role}</p>
         </div>
 
         <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide ${MODEL_BADGE[agent.model].cls}`}>
@@ -523,14 +523,14 @@ function EditorView({ agent, onClose }: EditorViewProps) {
       {/* Editor body — fills all remaining space */}
       <div className="flex-1 relative min-h-0">
         {loading ? (
-          <div className="absolute inset-0 flex items-center justify-center text-white/30 text-sm">
+          <div className="absolute inset-0 flex items-center justify-center text-ink/30 text-sm">
             Loading memory…
           </div>
         ) : (
           <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            className="absolute inset-0 w-full h-full bg-transparent text-white/80 font-mono text-sm leading-7 resize-none focus:outline-none p-6 md:px-12 md:py-8 placeholder-white/20"
+            className="absolute inset-0 w-full h-full bg-transparent text-ink/80 font-mono text-sm leading-7 resize-none focus:outline-none p-6 md:px-12 md:py-8 placeholder-ink/20"
             placeholder={`No memory yet for ${agent.name}. Start writing…`}
             spellCheck={false}
             autoFocus
@@ -543,13 +543,13 @@ function EditorView({ agent, onClose }: EditorViewProps) {
         {/* Save state indicator */}
         <div className="flex-1 flex items-center gap-2 min-w-0">
           {saveState === 'saved' && (
-            <span className="flex items-center gap-1.5 text-xs text-emerald-400 animate-[fadeIn_0.15s_ease-out]">
+            <span className="flex items-center gap-1.5 text-xs text-emerald-600 animate-[fadeIn_0.15s_ease-out]">
               <CheckCircle2 size={13} />
               Saved
             </span>
           )}
           {saveState === 'error' && (
-            <span className="flex items-center gap-1.5 text-xs text-red-400 truncate">
+            <span className="flex items-center gap-1.5 text-xs text-red-600 truncate">
               <AlertCircle size={13} className="shrink-0" />
               <span className="truncate">{errorMsg}</span>
             </span>
@@ -558,7 +558,7 @@ function EditorView({ agent, onClose }: EditorViewProps) {
 
         <button
           onClick={onClose}
-          className="px-4 py-2 rounded-xl text-sm text-white/50 hover:text-white/80 transition-colors"
+          className="px-4 py-2 rounded-xl text-sm text-ink/50 hover:text-ink/80 transition-colors"
         >
           Cancel
         </button>
@@ -588,19 +588,19 @@ function ChiefHero({ agent, onView, onEdit }: ChiefHeroProps) {
   return (
     <button
       onClick={onView}
-      className="relative w-full px-5 pt-8 pb-7 flex flex-col items-center text-center bg-indigo-500/[0.04] border-b border-indigo-500/10 text-left"
+      className="relative w-full px-5 pt-8 pb-7 flex flex-col items-center text-center bg-surface-raised border-b border-surface-border text-left"
     >
       {/* Edit button */}
       <button
         onClick={(e) => { e.stopPropagation(); onEdit() }}
-        className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-lg text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
+        className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-lg text-ink/30 hover:text-ink/70 hover:bg-ink/5 transition-colors"
         aria-label={`Edit ${agent.name} memory`}
       >
         <Pencil size={14} />
       </button>
 
       {/* Avatar */}
-      <div className="w-40 h-40 rounded-full overflow-hidden bg-indigo-500/10 border-2 border-indigo-500/20 mb-5 shadow-2xl">
+      <div className="w-40 h-40 rounded-full overflow-hidden bg-primary/5 border-2 border-primary/15 mb-5 shadow-card-hover">
         <img
           src={avatarUrl(agent.name, 160)}
           alt={agent.name}
@@ -611,21 +611,21 @@ function ChiefHero({ agent, onView, onEdit }: ChiefHeroProps) {
 
       {/* Name + badge */}
       <div className="flex items-center gap-2 mb-1">
-        <h1 className="font-display text-3xl font-bold text-white tracking-tight">{agent.name}</h1>
+        <h1 className="font-display text-3xl font-bold text-ink tracking-tight">{agent.name}</h1>
         <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide ${MODEL_BADGE[agent.model].cls}`}>
           {MODEL_BADGE[agent.model].label}
         </span>
       </div>
 
-      <p className="font-display text-base font-medium text-indigo-300 mb-2">{agent.role}</p>
-      <p className="text-sm text-white/45 leading-relaxed max-w-xs">{agent.lean}</p>
+      <p className="font-display text-base font-medium text-indigo-700 mb-2">{agent.role}</p>
+      <p className="text-sm text-ink/45 leading-relaxed max-w-xs">{agent.lean}</p>
 
       {agent.invocations_total > 0 && (
-        <p className="mt-3 text-xs text-indigo-400/60">
+        <p className="mt-3 text-xs text-indigo-600/60">
           {agent.invocations_total.toLocaleString()} invocations
         </p>
       )}
-      <p className="text-[11px] text-white/20 mt-1">{formatRelativeTime(agent.last_active)}</p>
+      <p className="text-[11px] text-ink/20 mt-1">{formatRelativeTime(agent.last_active)}</p>
     </button>
   )
 }
@@ -640,7 +640,7 @@ interface AgentCardProps {
 
 function AgentCard({ agent, onView, onEdit }: AgentCardProps) {
   return (
-    <div className="group relative rounded-2xl bg-surface-raised border border-surface-border hover:border-white/10 transition-colors overflow-hidden">
+    <div className="group relative rounded-2xl bg-surface-raised border border-surface-border hover:border-ink/10 transition-colors overflow-hidden">
       {/* Clickable body — goes to detail */}
       <button
         onClick={() => onView(agent)}
@@ -648,7 +648,7 @@ function AgentCard({ agent, onView, onEdit }: AgentCardProps) {
         aria-label={`View ${agent.name} details`}
       >
         {/* Avatar */}
-        <div className="w-20 h-20 rounded-full overflow-hidden bg-white/5 border border-white/8 mx-auto">
+        <div className="w-20 h-20 rounded-full overflow-hidden bg-ink/5 border border-ink/8 mx-auto">
           <img
             src={avatarUrl(agent.name)}
             alt={agent.name}
@@ -660,25 +660,25 @@ function AgentCard({ agent, onView, onEdit }: AgentCardProps) {
         {/* Info */}
         <div className="text-center">
           <div className="flex items-center justify-center gap-1.5 mb-0.5">
-            <span className="font-display font-semibold text-white text-base leading-tight">{agent.name}</span>
+            <span className="font-display font-semibold text-ink text-base leading-tight">{agent.name}</span>
           </div>
-          <p className="text-xs text-white/50 mb-1">{agent.role}</p>
+          <p className="text-xs text-ink/50 mb-1">{agent.role}</p>
           <span className={`inline-block text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${MODEL_BADGE[agent.model].cls}`}>
             {MODEL_BADGE[agent.model].label}
           </span>
         </div>
 
         {/* Lean / tagline */}
-        <p className="text-[11px] text-white/30 leading-relaxed line-clamp-2 text-center">{agent.lean}</p>
+        <p className="text-[11px] text-ink/30 leading-relaxed line-clamp-2 text-center">{agent.lean}</p>
 
         {/* Last active */}
-        <p className="text-[10px] text-white/20 text-center mt-auto">{formatRelativeTime(agent.last_active)}</p>
+        <p className="text-[10px] text-ink/20 text-center mt-auto">{formatRelativeTime(agent.last_active)}</p>
       </button>
 
       {/* Edit pencil — separate interactive region */}
       <button
         onClick={(e) => { e.stopPropagation(); onEdit(agent) }}
-        className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-lg text-white/40 hover:text-white/80 hover:bg-white/5 active:bg-white/10 transition-all"
+        className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-lg text-ink/40 hover:text-ink/80 hover:bg-ink/5 active:bg-ink/10 transition-all"
         aria-label={`Edit ${agent.name} memory`}
       >
         <Pencil size={13} />
@@ -700,14 +700,14 @@ function TierSection({ meta, agents, onView, onEdit }: TierSectionProps) {
   if (agents.length === 0) return null
 
   return (
-    <div className={`rounded-2xl overflow-hidden border border-white/5 ${meta.tintClass}`}>
+    <div className={`rounded-2xl overflow-hidden border border-ink/5 ${meta.tintClass}`}>
       {/* Section header */}
       <div className="px-5 pt-5 pb-3">
         <div className="flex items-baseline gap-2">
           <h2 className={`font-display font-semibold text-sm uppercase tracking-widest ${meta.headerClass}`}>
             {meta.label}
           </h2>
-          <span className="text-xs text-white/20">{meta.sublabel}</span>
+          <span className="text-xs text-ink/20">{meta.sublabel}</span>
         </div>
       </div>
 
@@ -749,7 +749,7 @@ export default function TeamPage() {
   if (loading && agents.length === 0) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-white/30 text-sm">Loading team…</div>
+        <div className="text-ink/30 text-sm">Loading team…</div>
       </div>
     )
   }
@@ -757,10 +757,10 @@ export default function TeamPage() {
   if (error && agents.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-white/40 text-sm">{error}</p>
+        <p className="text-ink/40 text-sm">{error}</p>
         <button
           onClick={fetchTeam}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-white/60 text-sm hover:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-raised text-ink/60 text-sm hover:text-ink transition-colors"
         >
           <RefreshCw size={14} />
           Retry
@@ -802,13 +802,13 @@ export default function TeamPage() {
         {/* Sticky top bar */}
         <div className="sticky top-0 z-10 bg-surface/80 backdrop-blur-sm border-b border-surface-border px-4 py-3">
           <div className="flex items-center gap-2">
-            <h1 className="font-display text-base font-semibold text-white">Team</h1>
-            <span className="text-xs text-white/30 ml-auto">
+            <h1 className="font-display text-base font-semibold text-ink">Team</h1>
+            <span className="text-xs text-ink/30 ml-auto">
               {agents.length} agent{agents.length !== 1 ? 's' : ''}
             </span>
             <button
               onClick={fetchTeam}
-              className="w-7 h-7 flex items-center justify-center rounded-lg text-white/30 hover:text-white/60 transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-ink/30 hover:text-ink/60 transition-colors"
               aria-label="Refresh"
             >
               <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -820,7 +820,7 @@ export default function TeamPage() {
         <div className="px-4 py-5 space-y-5">
           {/* Chief hero */}
           {chief && (
-            <div className="rounded-3xl overflow-hidden border border-indigo-500/10">
+            <div className="rounded-3xl overflow-hidden border border-surface-border shadow-card">
               <ChiefHero
                 agent={chief}
                 onView={() => setViewingAgent(chief)}
@@ -841,7 +841,7 @@ export default function TeamPage() {
           ))}
 
           {agents.length === 0 && !loading && (
-            <div className="text-center py-16 text-white/30 text-sm">No team members found</div>
+            <div className="text-center py-16 text-ink/30 text-sm">No team members found</div>
           )}
         </div>
       </div>

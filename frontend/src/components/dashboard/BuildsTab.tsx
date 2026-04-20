@@ -17,10 +17,10 @@ function formatDateTime(iso: string): string {
 }
 
 const SEVERITY_STYLES: Record<string, string> = {
-  CRITICAL: 'text-rose-400',
-  HIGH:     'text-amber-400',
-  MEDIUM:   'text-yellow-400',
-  LOW:      'text-white/40',
+  CRITICAL: 'text-rose-600',
+  HIGH:     'text-accent-dark',
+  MEDIUM:   'text-yellow-600',
+  LOW:      'text-ink/40',
 }
 
 interface BuildsTabProps {
@@ -32,9 +32,9 @@ export function BuildsTab({ builds }: BuildsTabProps): ReactNode {
     return (
       <div className="px-4 py-8 text-center">
         <div className="rounded-xl border border-dashed border-surface-border p-8">
-          <Shield size={24} className="text-white/20 mx-auto mb-3" />
-          <p className="text-sm text-white/30">No build history yet</p>
-          <p className="text-xs text-white/20 mt-1">
+          <Shield size={24} className="text-ink/20 mx-auto mb-3" />
+          <p className="text-sm text-ink/30">No build history yet</p>
+          <p className="text-xs text-ink/20 mt-1">
             Review sweep records will appear here after the first automated build review
           </p>
         </div>
@@ -45,10 +45,10 @@ export function BuildsTab({ builds }: BuildsTabProps): ReactNode {
   return (
     <div className="px-4 py-5 space-y-4">
       <div className="flex items-center justify-between px-1">
-        <h2 className="text-xs font-semibold text-white/50 uppercase tracking-wider">
+        <h2 className="text-xs font-semibold text-ink/50 uppercase tracking-wider">
           Review Sweeps
         </h2>
-        <span className="text-xs text-white/30">{builds.length} records</span>
+        <span className="text-xs text-ink/30">{builds.length} records</span>
       </div>
 
       <div className="space-y-3">
@@ -63,11 +63,11 @@ export function BuildsTab({ builds }: BuildsTabProps): ReactNode {
               className="p-4 rounded-xl bg-surface-raised border border-surface-border"
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-white/40">{formatDateTime(build.timestamp)}</span>
+                <span className="text-xs text-ink/40">{formatDateTime(build.timestamp)}</span>
                 {isClean ? (
                   <span className="text-xs font-semibold text-status-online">Clean ✓</span>
                 ) : (
-                  <span className="text-xs text-white/40">{total} findings</span>
+                  <span className="text-xs text-ink/40">{total} findings</span>
                 )}
               </div>
 
@@ -77,10 +77,10 @@ export function BuildsTab({ builds }: BuildsTabProps): ReactNode {
                     .filter(([, count]) => count > 0)
                     .map(([severity, count]) => (
                       <div key={severity} className="flex items-center gap-1">
-                        <span className={`text-[11px] font-semibold ${SEVERITY_STYLES[severity] ?? 'text-white/40'}`}>
+                        <span className={`text-[11px] font-semibold ${SEVERITY_STYLES[severity] ?? 'text-ink/40'}`}>
                           {count}
                         </span>
-                        <span className="text-[11px] text-white/30">{severity}</span>
+                        <span className="text-[11px] text-ink/30">{severity}</span>
                       </div>
                     ))}
                 </div>

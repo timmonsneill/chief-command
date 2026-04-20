@@ -21,7 +21,7 @@ function ProtectedRoutes() {
   if (isLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-surface">
-        <div className="text-chief text-lg">Connecting to Chief...</div>
+        <div className="font-display text-primary text-lg">Connecting to Chief...</div>
       </div>
     )
   }
@@ -57,9 +57,11 @@ export default function App() {
         position="top-center"
         toastOptions={{
           style: {
-            background: '#1a1a1a',
-            color: '#fff',
-            border: '1px solid #2e2e2e',
+            background: '#ffffff',
+            color: '#15171c',
+            border: '1px solid #e3e7ec',
+            boxShadow:
+              '0 2px 5px rgba(21,23,28,.07), 0 10px 24px rgba(21,23,28,.07)',
           },
         }}
       />
