@@ -35,10 +35,11 @@ Thumbs.db
 # Cloudflare
 *.pem
 
-# Local state (SQLite usage DB, etc.)
+# Local state (SQLite usage DB, voice history DB, etc.)
 *.sqlite
 *.sqlite3
 chief.db
+backend/data/voice_history.db
 
 # Logs
 *.log

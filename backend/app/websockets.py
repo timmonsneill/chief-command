@@ -16,6 +16,7 @@ from services.audio_utils import convert_webm_to_wav
 from services.chief_context import build_chief_system
 from services.classifier import classify_intent
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
+from services.history_store import append_turn, load_recent_for_project
 from services.llm import stream_turn
 from services.project_context import (
     AVAILABLE_PROJECTS,
@@ -100,10 +101,18 @@ async def ws_send_bytes(ws: WebSocket, data: bytes) -> None:
         await ws.send_bytes(data)
 
 
-async def _authenticate_ws(ws: WebSocket) -> bool:
+async def _authenticate_ws(ws: WebSocket) -> Optional[str]:
+    """Validate the connecting client's JWT.
+
+    Returns the JWT subject (e.g. ``"owner"``) on success, ``None`` on
+    failure. Callers should treat a non-None return as authenticated;
+    the subject doubles as a stable ``client_id`` for history resume.
+    """
     token = ws.query_params.get("token")
-    if token and verify_token(token):
-        return True
+    if token:
+        sub = verify_token(token)
+        if sub:
+            return sub
     try:
         first = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
         try:
@@ -111,11 +120,13 @@ async def _authenticate_ws(ws: WebSocket) -> bool:
             token = data.get("token")
         except json.JSONDecodeError:
             token = first.strip()
-        if token and verify_token(token):
-            return True
+        if token:
+            sub = verify_token(token)
+            if sub:
+                return sub
     except (asyncio.TimeoutError, WebSocketDisconnect):
         pass
-    return False
+    return None
 
 
 @router.websocket("/ws/voice")
@@ -143,13 +154,15 @@ async def voice_ws(ws: WebSocket) -> None:
       {"type": "error", "message": "..."}
     """
     await ws.accept()
-    if not await _authenticate_ws(ws):
+    client_id = await _authenticate_ws(ws)
+    if client_id is None:
         await ws_send_json(ws, {"type": "error", "message": "Unauthorized"})
         await ws.close(code=4001)
         return
 
     session_id: Optional[str] = None
     history: list[dict] = []
+
     # Default scope: Chief Command. Per owner: scope is ALWAYS a concrete single project.
     # If an earlier session persisted the dissolved "Archie" scope into the
     # in-memory store, migrate it before we use it as the initial value.
@@ -158,6 +171,22 @@ async def voice_ws(ws: WebSocket) -> None:
         initial = DEFAULT_PROJECT
     current_project: str = initial
     _context_store["ws"] = current_project  # persist the possibly-migrated value
+
+    # Rehydrate recent conversation context for the current project scope so
+    # reconnects (and uvicorn --reload restarts) don't feel amnesiac. We
+    # deliberately do NOT resume the prior session_id — a fresh uuid is
+    # allocated on the first turn (via ensure_session) so usage tracking
+    # doesn't attribute turns to a ghost session row. Hawke CRITICAL 2026-04-20.
+    try:
+        history = await load_recent_for_project(current_project, limit=20)
+        logger.info(
+            "voice_ws hydrated scope=%s history_turns=%d (fresh session)",
+            current_project, len(history),
+        )
+    except Exception as exc:
+        # Best-effort: a broken DB shouldn't 500 the WS.
+        logger.warning("voice_ws history rehydrate failed: %s", exc)
+        history = []
     # TTS speed multiplier. Applied server-side via Google's `speaking_rate` so
     # the audio is time-stretched without pitch shift. Frontend must NOT apply
     # playbackRate on top — that would re-introduce the chipmunk effect.
@@ -417,6 +446,13 @@ async def _run_llm_turn(
             await ws_send_json(ws, {"type": "tts_end"})
 
     history.append({"role": "user", "content": user_text})
+    # Persist the user turn before we kick off the LLM stream. If the stream
+    # fails or gets cancelled mid-flight, the user utterance is still on
+    # disk — reconnect will show it in the rehydrated history.
+    try:
+        await append_turn(session_id, project_scope, "user", user_text)
+    except Exception as exc:
+        logger.warning("history persist (user) failed session=%s: %s", session_id, exc)
 
     tts_task = asyncio.create_task(tts_worker())
 
@@ -440,6 +476,14 @@ async def _run_llm_turn(
 
         assistant_text = usage.get("assistant_text", "")
         history.append({"role": "assistant", "content": assistant_text})
+        # Persist the assistant reply so resume rebuilds both sides of the
+        # turn. Best-effort: if the DB write fails we still finish the turn.
+        try:
+            await append_turn(session_id, project_scope, "assistant", assistant_text)
+        except Exception as exc:
+            logger.warning(
+                "history persist (assistant) failed session=%s: %s", session_id, exc
+            )
 
         await ws_send_json(ws, {"type": "message_done"})
 
