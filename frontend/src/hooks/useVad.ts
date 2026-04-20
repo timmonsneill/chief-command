@@ -49,9 +49,13 @@ export function useVad({ onSpeechEnd, onSpeechStart }: UseVadOptions): UseVadRet
         onnxWASMBasePath: '/vad/',
         model: 'legacy',
         positiveSpeechThreshold: 0.5,
-        negativeSpeechThreshold: 0.35,
+        negativeSpeechThreshold: 0.25,
         minSpeechFrames: 3,
-        redemptionFrames: 6,
+        // ~15 frames * 32ms = 480ms of sub-threshold audio before we call
+        // end-of-speech. 6 (~190ms) was cutting the owner off mid-thought
+        // during natural inter-word dips. 15 matches Siri/Alexa's ballpark
+        // and is still short enough that Chief doesn't feel sluggish.
+        redemptionFrames: 15,
         // The library's TS types for additionalAudioConstraints are narrower
         // than the MediaTrackConstraints the underlying getUserMedia call
         // actually accepts. Cast so we can pass echoCancellation +

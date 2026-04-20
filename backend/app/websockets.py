@@ -158,6 +158,10 @@ async def voice_ws(ws: WebSocket) -> None:
         initial = DEFAULT_PROJECT
     current_project: str = initial
     _context_store["ws"] = current_project  # persist the possibly-migrated value
+    # TTS speed multiplier. Applied server-side via Google's `speaking_rate` so
+    # the audio is time-stretched without pitch shift. Frontend must NOT apply
+    # playbackRate on top — that would re-introduce the chipmunk effect.
+    current_speed: float = 1.0
     current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
@@ -263,6 +267,20 @@ async def voice_ws(ws: WebSocket) -> None:
                         })
                     except Exception as exc:
                         logger.warning("Failed to echo context_switched frame: %s", exc)
+                    continue
+
+                if msg_type == "speed":
+                    # TTS speed preference. Clamp to Google's supported range
+                    # (0.25-4.0) and fall back to 1.0 on bad input. No LLM turn.
+                    raw_speed = data.get("value")
+                    try:
+                        new_speed = float(raw_speed)
+                        if not (0.25 <= new_speed <= 4.0):
+                            new_speed = 1.0
+                    except (TypeError, ValueError):
+                        new_speed = 1.0
+                    current_speed = new_speed
+                    logger.info("Voice WS speed updated speed=%.2f", current_speed)
                     continue
 
                 if msg_type == "interrupt":
@@ -391,7 +409,7 @@ async def _run_llm_turn(
                 if sentence is None:
                     break
                 try:
-                    async for chunk in tts_service.synthesize_stream(sentence):
+                    async for chunk in tts_service.synthesize_stream(sentence, speed=current_speed):
                         await ws_send_bytes(ws, chunk)
                 except Exception as tts_err:
                     logger.warning("TTS failed for sentence: %s", tts_err)

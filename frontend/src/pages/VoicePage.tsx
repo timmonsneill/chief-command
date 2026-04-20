@@ -167,7 +167,9 @@ export default function VoicePage() {
       const buffer = await ctx.decodeAudioData(chunk.slice(0))
       const source = ctx.createBufferSource()
       source.buffer = buffer
-      source.playbackRate.value = speed
+      // Speed is applied server-side via Google TTS `speaking_rate` (proper
+      // time-stretch, preserves pitch). Do NOT set playbackRate here —
+      // that's what produced the chipmunk effect at > 1.0x.
       source.connect(ctx.destination)
       currentSourceRef.current = source
       source.onended = () => {
@@ -183,7 +185,7 @@ export default function VoicePage() {
       if (audioQueueRef.current.length > 0) playNextChunk()
       else setVoiceState('listening')
     }
-  }, [speed])
+  }, [])
 
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
@@ -428,6 +430,14 @@ export default function VoicePage() {
     if (!isConnected) return
     send(JSON.stringify({ type: 'context', project: currentProject }))
   }, [isConnected, currentProject, send])
+
+  // Send TTS speed preference to backend whenever it changes (or on reconnect).
+  // Applied server-side via Google TTS `speaking_rate` — proper time-stretch,
+  // preserves pitch. Frontend no longer sets AudioBufferSource.playbackRate.
+  useEffect(() => {
+    if (!isConnected) return
+    send(JSON.stringify({ type: 'speed', value: speed }))
+  }, [isConnected, speed, send])
 
   useEffect(() => {
     if (!conversationActive) {

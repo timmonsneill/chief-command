@@ -46,12 +46,28 @@ _PROJECT_KEYWORDS: dict[str, str] = {
     "archie_voice": "Arch",
     "archie": "Arch",
     "arch": "Arch",
-    "voice_claude": "Chief Command",
+    # Chief Command — both the full phrase and the short "chief" prefix.
+    # Files like project_chief_ui_design_system.md and
+    # feedback_chief_ui_layout_direction.md don't contain "chief_command"
+    # so without the bare "chief" keyword they'd leak into every scope.
     "chief_command": "Chief Command",
+    "chief": "Chief Command",
+    "voice_claude": "Chief Command",
     "agent_framework": "Chief Command",
     "agent_roster": "Chief Command",
     "infrastructure": "Chief Command",
     "api_transition": "Chief Command",
+    # Session-handoff notes — owner-written day-end summaries. In practice
+    # these are all about Chief Command work sessions; routing them here
+    # prevents them from loading globally and contaminating Arch/PA scopes.
+    "session_handoff": "Chief Command",
+    # Personal Assist ("Jess" — voice alias). All three keywords needed —
+    # project_pa_*, *_jess_*, *_personal_assist_* — so a file like
+    # project_pa_overview.md or project_pa_tomorrow_pickup_*.md routes
+    # correctly and doesn't leak into Chief Command or Arch scopes.
+    "pa_": "Personal Assist",
+    "personal_assist": "Personal Assist",
+    "jess": "Personal Assist",
     # Legacy aliases — "Butler" dissolved into Chief Command Phase 9 on
     # 2026-04-18. Keep these so existing project_butler_*.md archive files
     # still classify under Chief Command instead of going unclassified.
