@@ -94,10 +94,53 @@ export interface Turn {
   cost_cents: number
   user_text: string
   assistant_text: string
+  // Voice-leg columns added by the voice-usage migration. Optional because
+  // rows created before migration may lack them; backend coerces NULL → 0
+  // on the read path.
+  stt_seconds?: number
+  stt_provider?: string | null
+  stt_cost_usd?: number
+  tts_chars?: number
+  tts_provider?: string | null
+  tts_cost_usd?: number
 }
 
 export interface SessionDetail extends Session {
   turns: Turn[]
+}
+
+// --- Voice usage (STT + TTS) types --------------------------------------
+// Backend response shape (services/usage_tracker.py#_voice_rollup_for_window).
+// Costs are in USD (float) because Google per-second / per-char rates produce
+// sub-cent values. UI formats to cents where it makes sense.
+
+export interface VoiceProviderBreakdown {
+  // Keyed by provider name: "google" | "local" | "unknown" (for legacy rows).
+  [provider: string]: {
+    seconds?: number // STT only
+    chars?: number // TTS only
+    cost_usd: number
+  }
+}
+
+export interface VoiceStatRollup {
+  stt: {
+    seconds: number
+    cost_usd: number
+    provider_breakdown: VoiceProviderBreakdown
+  }
+  tts: {
+    chars: number
+    cost_usd: number
+    provider_breakdown: VoiceProviderBreakdown
+  }
+  total_usd: number
+}
+
+export interface VoiceUsageWindows {
+  today: VoiceStatRollup
+  week: VoiceStatRollup
+  month: VoiceStatRollup
 }
 
 export interface UsageSummary {
@@ -105,6 +148,8 @@ export interface UsageSummary {
   week_cents: number
   month_cents: number
   alert_level: 'none' | 'warning' | 'critical'
+  voice?: VoiceUsageWindows
+  voice_alert_level?: 'none' | 'warning'
 }
 
 export interface ReviewFinding {
@@ -227,6 +272,12 @@ export interface WsUsageEvent {
   cached_tokens: number
   turn_cost_cents: number
   session_total_cents: number
+  voice?: {
+    stt: { seconds: number; cost_usd: number; provider: string | null }
+    tts: { chars: number; cost_usd: number; provider: string | null }
+    turn_total_usd: number
+    session_total_usd: number
+  }
 }
 
 export interface WsAgentStatusEvent {
@@ -293,6 +344,11 @@ export interface SessionUsage {
   session_total_cents: number
   turn_count: number
   started_at: string
+  voice?: {
+    stt: { seconds: number; cost_usd: number }
+    tts: { chars: number; cost_usd: number }
+    total_usd: number
+  }
 }
 
 export interface TerminalOutput {
@@ -473,12 +529,17 @@ export interface UsageByModel {
   today: Record<string, ModelUsageStats>
   week: Record<string, ModelUsageStats>
   month: Record<string, ModelUsageStats>
+  voice?: VoiceUsageWindows
 }
 
 export interface UsageDayPoint {
   date: string
   cost_cents: number
   turns: number
+  // Voice cost per day (USD). Older rows default to 0 post-migration.
+  voice_cost_usd?: number
+  stt_cost_usd?: number
+  tts_cost_usd?: number
 }
 
 export const sessionsApi = {
