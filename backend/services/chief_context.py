@@ -367,8 +367,19 @@ def build_chief_system(project_scope: str) -> list[dict]:
     name matches ``project_scope`` exactly.
     """
     if not project_scope or not project_scope.strip():
-        # Defensive — should never happen, but keep Chief functional.
-        logger.warning("chief_context: empty scope, falling back to %s", DEFAULT_SCOPE)
+        # Defensive — should never happen. Upstream fixes (per-subject context
+        # keying + context-frame gate in ``app/websockets.py``) guarantee the
+        # caller has a concrete scope by the time we get here. If we ever land
+        # on this branch it means one of those layers failed and the turn is
+        # about to run against the fallback scope — log ERROR with a stack so
+        # the regression is never invisible. We still fall through (don't
+        # raise) because breaking Chief in prod is worse than a generic reply.
+        logger.error(
+            "chief_context: empty scope, falling back to %s — "
+            "upstream scope plumbing regression",
+            DEFAULT_SCOPE,
+            stack_info=True,
+        )
         project_scope = DEFAULT_SCOPE
 
     # Gather every .md file from every project dir whose canonical name
