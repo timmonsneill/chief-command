@@ -613,18 +613,23 @@ async def _run_llm_turn(
     if is_deep:
         bridge = random_thinking_phrase()
         await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
-        tts_char_total += len(bridge)
+        # NOTE: tally happens in tts_worker AFTER synthesize_stream completes
+        # without raising — see the `tts_char_total += len(sentence)` there.
+        # Enqueueing here does not count a char toward Google's bill; only the
+        # actual synthesize_stream call does.
         await tts_queue.put(bridge)
 
     async def send_token(text: str) -> None:
         await ws_send_json(ws, {"type": "token", "text": text})
 
     async def send_tts_sentence(sentence: str) -> None:
-        nonlocal tts_char_total
-        tts_char_total += len(sentence)
+        # Tally is deferred to tts_worker (post-synthesis) so sentences that
+        # synthesize_stream drops (logged as "TTS failed for sentence ...")
+        # don't get counted against the Google TTS character bill.
         await tts_queue.put(sentence)
 
     async def tts_worker() -> None:
+        nonlocal tts_char_total
         try:
             await ws_send_json(ws, {"type": "tts_start"})
             while True:
@@ -644,6 +649,10 @@ async def _run_llm_turn(
                         if tts_cancel_event.is_set():
                             break
                         await ws_send_bytes(ws, chunk)
+                    # Synthesis completed (or was cancelled mid-stream AFTER
+                    # we handed the full sentence to Google). Either way the
+                    # provider bills for the full input, so tally here.
+                    tts_char_total += len(sentence)
                 except TypeError:
                     # Fallback for a TTS provider that hasn't been updated
                     # with the cancel_event kwarg yet. Less responsive, but
@@ -654,7 +663,11 @@ async def _run_llm_turn(
                         if tts_cancel_event.is_set():
                             break
                         await ws_send_bytes(ws, chunk)
+                    tts_char_total += len(sentence)
                 except Exception as tts_err:
+                    # Provider raised before/during streaming — sentence was
+                    # never billed, so do NOT tally. (Over-count was the bug
+                    # this tally-at-send move fixes.)
                     logger.warning("TTS failed for sentence: %s", tts_err)
         finally:
             try:

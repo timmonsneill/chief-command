@@ -338,3 +338,111 @@ async def test_route_task_rejects_leading_dash_task_spec(
     assert any("command flag" in n for n in narrations), (
         f"expected clarifying narration, got: {narrations}"
     )
+
+
+# ---------------------------------------- fix: TTS tally on actual send
+#
+# Before the tally was moved into tts_worker, every sentence enqueued counted
+# against tts_char_total whether or not synthesize_stream ultimately billed
+# for it. If Google raised mid-turn (logged as "TTS failed for sentence ..."
+# in the worker), the dropped sentence still showed up on the user's usage
+# bill. This test mocks synthesize_stream to fail on the first sentence and
+# succeed on the second, then asserts record_tts_usage received chars for
+# ONLY the successful sentence.
+
+
+@pytest.mark.asyncio
+async def test_tts_char_tally_excludes_failed_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If synthesize_stream raises for one sentence and succeeds for another,
+    tts_char_total (recorded via record_tts_usage.chars) reflects ONLY the
+    successful sentence — we don't over-count dropped audio.
+    """
+    from app import websockets as ws_mod
+
+    # Force non-deep routing so no bridge phrase is emitted; the bridge is
+    # tallied through the same worker path, but isolating the two stream_turn
+    # sentences keeps the assertion simple.
+    monkeypatch.setattr(
+        ws_mod, "classify_and_route", lambda text: ("haiku", False),
+    )
+
+    # stream_turn emits two sentences: the first will fail in TTS, the second
+    # will succeed. Returns a minimal usage dict for the downstream record_turn
+    # call.
+    async def fake_stream_turn(
+        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        project_scope: str, system_blocks: Any,
+    ) -> dict:
+        await send_tts_sentence("first sentence")   # 14 chars — will FAIL
+        await send_tts_sentence("second sentence of text")  # 23 chars — OK
+        return {
+            "assistant_text": "first sentence second sentence of text",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+        }
+
+    monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
+
+    # build_chief_system is called via to_thread — return a simple blob.
+    monkeypatch.setattr(
+        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+    )
+
+    # synthesize_stream: raise on the first sentence, yield on the second.
+    async def flaky_synth(sentence: str, **_: Any):
+        if sentence == "first sentence":
+            raise RuntimeError("simulated Google TTS outage")
+        yield b"audio-chunk"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", flaky_synth)
+
+    # Persistence + usage stubs — capture tts_chars out of record_tts_usage.
+    async def noop_append_turn(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        return {"id": 1, "cost_cents": 0}
+
+    async def fake_record_stt_usage(**kwargs: Any) -> dict:
+        return {
+            "stt_seconds": kwargs.get("audio_seconds", 0.0),
+            "stt_cost_usd": 0.0,
+            "stt_provider": kwargs.get("provider", "local"),
+        }
+
+    captured: dict[str, Any] = {}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        captured["chars"] = kwargs.get("chars")
+        return {
+            "tts_chars": kwargs.get("chars", 0),
+            "tts_cost_usd": 0.0,
+            "tts_provider": kwargs.get("provider", "local"),
+        }
+
+    async def fake_get_session_totals(session_id: str) -> dict:
+        return {"cost_cents": 0, "voice": {"total_usd": 0.0}}
+
+    monkeypatch.setattr(ws_mod, "append_turn", noop_append_turn)
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_stt_usage", fake_record_stt_usage)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+    monkeypatch.setattr(ws_mod, "get_session_totals", fake_get_session_totals)
+
+    ws = FakeWebSocket()
+    await ws_mod._run_llm_turn(
+        ws=ws,
+        session_id="sess-tally",
+        history=[],
+        user_text="hi",
+        project_scope="chief",
+    )
+
+    # Only the successful sentence should be tallied. "first sentence" (14)
+    # would have been billed in the old code — we assert it's NOT.
+    assert captured["chars"] == len("second sentence of text"), (
+        f"expected tally to reflect only the successful synth, got {captured['chars']!r}"
+    )
