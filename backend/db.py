@@ -34,7 +34,13 @@ CREATE TABLE IF NOT EXISTS turns (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cost_cents INTEGER NOT NULL DEFAULT 0,
     user_text TEXT NOT NULL DEFAULT '',
-    assistant_text TEXT NOT NULL DEFAULT ''
+    assistant_text TEXT NOT NULL DEFAULT '',
+    stt_seconds REAL NOT NULL DEFAULT 0,
+    stt_provider TEXT,
+    stt_cost_usd REAL NOT NULL DEFAULT 0,
+    tts_chars INTEGER NOT NULL DEFAULT 0,
+    tts_provider TEXT,
+    tts_cost_usd REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -42,6 +48,30 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 """
+
+
+# Columns to add to `turns` for existing DBs. Each entry = (column_name, DDL).
+# PRAGMA table_info probe before ALTER so re-runs (or concurrent boots) are
+# a no-op rather than an error.
+_TURNS_VOICE_COLUMNS: list[tuple[str, str]] = [
+    ("stt_seconds",    "ALTER TABLE turns ADD COLUMN stt_seconds REAL NOT NULL DEFAULT 0"),
+    ("stt_provider",   "ALTER TABLE turns ADD COLUMN stt_provider TEXT"),
+    ("stt_cost_usd",   "ALTER TABLE turns ADD COLUMN stt_cost_usd REAL NOT NULL DEFAULT 0"),
+    ("tts_chars",      "ALTER TABLE turns ADD COLUMN tts_chars INTEGER NOT NULL DEFAULT 0"),
+    ("tts_provider",   "ALTER TABLE turns ADD COLUMN tts_provider TEXT"),
+    ("tts_cost_usd",   "ALTER TABLE turns ADD COLUMN tts_cost_usd REAL NOT NULL DEFAULT 0"),
+]
+
+
+async def _existing_columns(db: aiosqlite.Connection, table: str) -> set[str]:
+    """Return the current set of column names on `table` via PRAGMA table_info.
+
+    Needed so we don't try ALTER TABLE ADD COLUMN on a column that already
+    exists — SQLite errors rather than no-ops, so we probe first.
+    """
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    rows = await cur.fetchall()
+    return {row[1] for row in rows}
 
 
 async def init_db() -> None:
@@ -56,6 +86,25 @@ async def init_db() -> None:
         except Exception:
             # Column already exists — ignore
             pass
+
+        # Idempotent migration: add voice-usage columns to existing turns tables.
+        # Fresh DBs already have them via _DDL, so we probe first and only add
+        # what's missing. Safe to re-run on every boot.
+        existing = await _existing_columns(db, "turns")
+        added: list[str] = []
+        for name, ddl in _TURNS_VOICE_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                await db.execute(ddl)
+                added.append(name)
+            except Exception:
+                # Most likely the column was added by a concurrent boot or a
+                # prior partial migration — log and move on.
+                logger.exception("Voice column migration failed for %s", name)
+        if added:
+            await db.commit()
+            logger.info("Migrated turns table: added voice columns %s", added)
     logger.info("DB initialised at %s", DB_PATH)
 
 
