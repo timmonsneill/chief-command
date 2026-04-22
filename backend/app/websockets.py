@@ -12,7 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.auth import verify_token
 from services import stt_service, tts_service
-from services.audio_utils import convert_webm_to_wav
+from services.audio_utils import convert_webm_to_wav, get_audio_duration
 from services.chief_context import build_chief_system
 from services.classifier import classify_intent
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
@@ -26,7 +26,14 @@ from services.project_context import (
 )
 from services.repo_map import get_repo_path
 from services.router import classify_and_route, random_thinking_phrase
-from services.usage_tracker import create_session, close_session, record_turn, get_session_totals
+from services.usage_tracker import (
+    close_session,
+    create_session,
+    get_session_totals,
+    record_stt_usage,
+    record_tts_usage,
+    record_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +505,21 @@ async def voice_ws(ws: WebSocket) -> None:
                     await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
                     continue
 
+                # Measure audio duration for STT billing. Best-effort: if
+                # ffprobe / soundfile can't read the WAV we fall back to byte
+                # math against the 16 kHz / 16-bit mono PCM that ffmpeg
+                # produced upstream. Never raise — a bad probe must not kill
+                # the turn.
+                try:
+                    stt_seconds = await get_audio_duration(wav_data)
+                except Exception:
+                    pcm_size = max(0, len(wav_data) - 44)  # subtract WAV hdr
+                    stt_seconds = pcm_size / (16000 * 2)
+                    logger.warning(
+                        "get_audio_duration failed; fell back to byte math: %.2fs",
+                        stt_seconds,
+                    )
+
                 await ws_send_json(ws, {"type": "transcript", "content": transcript})
                 await _maybe_switch_project(transcript)
                 # See the text-path commentary above — spawn a child task that
@@ -507,6 +529,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     sid=sid,
                     transcript=transcript,
                     speed=current_speed,
+                    stt_seconds=stt_seconds,
                 ) -> None:
                     await _await_context_gate()
                     scope = current_project  # re-read AFTER gate opens
@@ -514,7 +537,10 @@ async def voice_ws(ws: WebSocket) -> None:
                         "Voice WS handling audio turn session=%s len=%d scope=%s",
                         sid, len(transcript), scope,
                     )
-                    await _route_user_turn(ws, sid, history, transcript, scope, speed)
+                    await _route_user_turn(
+                        ws, sid, history, transcript, scope, speed,
+                        stt_seconds=stt_seconds,
+                    )
                 current_turn_task = asyncio.create_task(_gated_audio_turn())
 
             else:
@@ -553,12 +579,23 @@ async def _run_llm_turn(
     user_text: str,
     project_scope: str,
     current_speed: float = 1.0,
+    stt_seconds: float = 0.0,
 ) -> None:
-    """Core LLM streaming loop: route → stream tokens → TTS → record."""
+    """Core LLM streaming loop: route → stream tokens → TTS → record.
+
+    `stt_seconds` is the duration of audio transcribed to produce `user_text`
+    (zero for text-mode turns). Recorded against the turn row alongside the
+    Claude token cost and the total characters sent to TTS (tallied below
+    as sentences are queued).
+    """
     model, is_deep = classify_and_route(user_text)
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+    # Total chars sent to the TTS backend for this turn. Every sentence queued
+    # counts (including the bridge "thinking" phrase when routing deep), since
+    # Google bills the full input text per synthesize call.
+    tts_char_total = 0
     # Per-turn TTS cancellation event (Track B #5/#6). Passed into
     # synthesize_stream so the TTS worker stops emitting audio bytes at the
     # next chunk boundary when cancel_current_turn flips it. Storing on the
@@ -576,12 +613,15 @@ async def _run_llm_turn(
     if is_deep:
         bridge = random_thinking_phrase()
         await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
+        tts_char_total += len(bridge)
         await tts_queue.put(bridge)
 
     async def send_token(text: str) -> None:
         await ws_send_json(ws, {"type": "token", "text": text})
 
     async def send_tts_sentence(sentence: str) -> None:
+        nonlocal tts_char_total
+        tts_char_total += len(sentence)
         await tts_queue.put(sentence)
 
     async def tts_worker() -> None:
@@ -673,6 +713,24 @@ async def _run_llm_turn(
             user_text=user_text,
             assistant_text=assistant_text,
         )
+
+        # Record STT + TTS usage against the turn row. Always record both legs
+        # (even when seconds/chars are zero, e.g. text-mode turn or TTS that
+        # was barged before any sentence enqueued) so the schema stays uniform
+        # and rollup queries don't need to distinguish null vs zero. Happens
+        # BEFORE get_session_totals so the returned totals already include
+        # this turn's voice leg.
+        stt_info = await record_stt_usage(
+            turn_id=turn["id"],
+            provider=getattr(stt_service, "provider_name", "local"),
+            audio_seconds=stt_seconds,
+        )
+        tts_info = await record_tts_usage(
+            turn_id=turn["id"],
+            provider=getattr(tts_service, "provider_name", "local"),
+            chars=tts_char_total,
+        )
+
         totals = await get_session_totals(session_id)
 
         await ws_send_json(ws, {
@@ -684,6 +742,20 @@ async def _run_llm_turn(
             "cached_tokens": usage.get("cache_read_input_tokens", 0),
             "turn_cost_cents": turn["cost_cents"],
             "session_total_cents": totals.get("cost_cents", 0),
+            "voice": {
+                "stt": {
+                    "seconds": stt_info["stt_seconds"],
+                    "cost_usd": stt_info["stt_cost_usd"],
+                    "provider": stt_info["stt_provider"],
+                },
+                "tts": {
+                    "chars": tts_info["tts_chars"],
+                    "cost_usd": tts_info["tts_cost_usd"],
+                    "provider": tts_info["tts_provider"],
+                },
+                "turn_total_usd": stt_info["stt_cost_usd"] + tts_info["tts_cost_usd"],
+                "session_total_usd": totals.get("voice", {}).get("total_usd", 0.0),
+            },
         })
 
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -717,9 +789,13 @@ async def _handle_text_turn(
     text: str,
     project_scope: str,
     current_speed: float = 1.0,
+    stt_seconds: float = 0.0,
 ) -> None:
     try:
-        await _run_llm_turn(ws, session_id, history, text, project_scope, current_speed)
+        await _run_llm_turn(
+            ws, session_id, history, text, project_scope, current_speed,
+            stt_seconds=stt_seconds,
+        )
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
         # error. The caller already sent turn_cancelled.
@@ -745,14 +821,24 @@ async def _route_user_turn(
     user_text: str,
     current_project: str,
     current_speed: float = 1.0,
+    stt_seconds: float = 0.0,
 ) -> None:
-    """Single entry point that classifies then routes to chat/task/status/cancel."""
+    """Single entry point that classifies then routes to chat/task/status/cancel.
+
+    `stt_seconds` is the duration of audio transcribed to produce `user_text`.
+    Zero for pure text-mode turns. Only the chat path (record_turn + TTS)
+    consumes it today; task/status/cancel paths don't write turn rows so STT
+    billing doesn't apply there.
+    """
     # Switch intent has already run upstream. Now classify.
     result = await classify_intent(user_text, current_project)
     intent = result["intent"]
 
     if intent == "chat":
-        await _handle_text_turn(ws, session_id, history, user_text, current_project, current_speed)
+        await _handle_text_turn(
+            ws, session_id, history, user_text, current_project, current_speed,
+            stt_seconds=stt_seconds,
+        )
         return
 
     if intent == "task":
@@ -772,7 +858,10 @@ async def _route_user_turn(
         return
 
     # Should not reach — classifier is typed.
-    await _handle_text_turn(ws, session_id, history, user_text, current_project, current_speed)
+    await _handle_text_turn(
+        ws, session_id, history, user_text, current_project, current_speed,
+        stt_seconds=stt_seconds,
+    )
 
 
 async def _route_task(
