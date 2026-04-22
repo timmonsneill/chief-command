@@ -85,6 +85,10 @@ _OWNER_HASH: str = hash_password(settings.OWNER_PASSWORD)
 
 MONTHLY_WARNING_CENTS = 20_000
 MONTHLY_CRITICAL_CENTS = 30_000
+# Voice (Google STT + TTS combined) monthly spend alert threshold. Tripped
+# when rolling_totals.voice.month.total_usd crosses this value. Independent
+# of the Claude thresholds — frontend shows a separate amber banner.
+MONTHLY_VOICE_WARNING_USD = 50.0
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 
 
@@ -331,6 +335,13 @@ async def api_current_session(subject: str = Depends(require_auth)) -> dict | No
         "output_tokens": totals.get("output_tokens", 0),
         "cached_tokens": totals.get("cache_read_tokens", 0),
         "turn_cost_cents": 0,
+        # Voice totals for the active session — frontend "current session"
+        # strip can show a live Google bill alongside Claude cost.
+        "voice": totals.get("voice", {
+            "stt": {"seconds": 0.0, "cost_usd": 0.0},
+            "tts": {"chars": 0, "cost_usd": 0.0},
+            "total_usd": 0.0,
+        }),
     }
 
 
@@ -354,7 +365,19 @@ async def api_usage_summary(subject: str = Depends(require_auth)) -> dict:
     else:
         alert_level = "none"
 
-    return {**totals, "alert_level": alert_level}
+    # Separate voice alert — kept independent of the Claude thresholds so the
+    # frontend can show a calmer banner colour for voice overspend without
+    # turning the hero Claude cards amber.
+    month_voice_usd = (
+        totals.get("voice", {}).get("month", {}).get("total_usd", 0.0)
+    )
+    voice_alert_level = "warning" if month_voice_usd >= MONTHLY_VOICE_WARNING_USD else "none"
+
+    return {
+        **totals,
+        "alert_level": alert_level,
+        "voice_alert_level": voice_alert_level,
+    }
 
 
 @app.get("/api/usage/by_model")
