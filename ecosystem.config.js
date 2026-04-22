@@ -1,9 +1,20 @@
 const path = require("path");
+const os = require("os");
 const PROJECT_DIR = __dirname;
 const VENV_PYTHON = path.join(PROJECT_DIR, "backend", ".venv", "bin", "python");
+const CLOUDFLARED_CONFIG = path.join(os.homedir(), ".cloudflared", "config.yml");
 
 module.exports = {
   apps: [
+    {
+      name: "chief-updater",
+      script: path.join(PROJECT_DIR, "scripts", "watch-updates.sh"),
+      autorestart: false,
+      cron_restart: "*/5 * * * *",
+      watch: false,
+      log_file: path.join(PROJECT_DIR, "logs", "updater.log"),
+      error_file: path.join(PROJECT_DIR, "logs", "updater-error.log"),
+    },
     {
       name: "chief-build",
       script: "npm",
@@ -17,7 +28,7 @@ module.exports = {
     {
       name: "chief-tunnel",
       script: "cloudflared",
-      args: "tunnel --config ~/.cloudflared/config.yml run voice-claude",
+      args: `tunnel --config ${CLOUDFLARED_CONFIG} run voice-claude`,
       autorestart: true,
       restart_delay: 3000,
       max_restarts: 20,
