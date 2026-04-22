@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { CircleDollarSign, ChevronDown, ChevronRight, AlertTriangle, RefreshCw, Zap } from 'lucide-react'
+import { CircleDollarSign, ChevronDown, ChevronRight, AlertTriangle, RefreshCw, Zap, Mic, Volume2 } from 'lucide-react'
 import {
   sessionsApi,
   type Session,
@@ -8,6 +8,7 @@ import {
   type SessionUsage,
   type UsageByModel,
   type UsageDayPoint,
+  type VoiceStatRollup,
 } from '../lib/api'
 import { useProjectContext } from '../hooks/useProjectContext'
 
@@ -23,6 +24,28 @@ function centsToDisplay(cents: number): string {
 
 function centsToFullDisplay(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`
+}
+
+// Voice costs are sub-cent per-turn. Use more decimals for tiny values so the
+// owner can see the number, but drop them for obvious $ amounts.
+function usdToDisplay(usd: number): string {
+  if (!isFinite(usd) || usd <= 0) return '$0.00'
+  if (usd < 0.01) return `¢${(usd * 100).toFixed(3)}`
+  if (usd < 1) return `¢${(usd * 100).toFixed(1)}`
+  return `$${usd.toFixed(2)}`
+}
+
+function secondsToDisplay(s: number): string {
+  if (!isFinite(s) || s <= 0) return '0s'
+  if (s < 60) return `${s.toFixed(1)}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+function charsToDisplay(n: number): string {
+  if (n < 1000) return `${n}`
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
+  return `${(n / 1_000_000).toFixed(2)}M`
 }
 
 function formatDuration(s: number | null): string {
@@ -118,6 +141,7 @@ function HeroCostCard({
 function CurrentSessionStrip({ session }: { session: SessionUsage }) {
   const started = new Date(session.started_at)
   const age = Math.floor((Date.now() - started.getTime()) / 1000)
+  const voiceUsd = session.voice?.total_usd ?? 0
 
   return (
     <div className="rounded-2xl bg-chief/10 border border-chief/30 px-4 py-3 flex items-center gap-3">
@@ -132,7 +156,13 @@ function CurrentSessionStrip({ session }: { session: SessionUsage }) {
         <p className="font-display text-lg font-bold text-ink tabular-nums">
           {centsToDisplay(session.session_total_cents)}
         </p>
-        <p className="text-[10px] text-ink/30">this session</p>
+        {voiceUsd > 0 ? (
+          <p className="text-[10px] text-ink/40 tabular-nums">
+            + {usdToDisplay(voiceUsd)} voice
+          </p>
+        ) : (
+          <p className="text-[10px] text-ink/30">this session</p>
+        )}
       </div>
     </div>
   )
@@ -141,7 +171,12 @@ function CurrentSessionStrip({ session }: { session: SessionUsage }) {
 // ── Per-model breakdown ────────────────────────────────────────────────────
 
 function ModelBreakdown({ data }: { data: UsageByModel }) {
-  const periods: { key: keyof UsageByModel; label: string }[] = [
+  // Narrow to the per-model columns only. UsageByModel gained a `voice?` field
+  // that holds the voice rollup (not a Record<string, ModelUsageStats>), so we
+  // can't use `keyof UsageByModel` directly here — it would include 'voice'
+  // and break the per-model lookup below.
+  type ModelPeriod = 'today' | 'week' | 'month'
+  const periods: { key: ModelPeriod; label: string }[] = [
     { key: 'today', label: 'Today' },
     { key: 'week', label: 'Week' },
     { key: 'month', label: 'Month' },
@@ -403,6 +438,129 @@ function Section({ title, icon: Icon, children }: { title: string; icon: React.E
   )
 }
 
+// ── Voice cost cards (STT + TTS + combined) ────────────────────────────────
+//
+// Same visual language as the Claude hero cards — rounded surface, uppercase
+// label, large number — but with Mic/Volume icons and slightly smaller font so
+// the Claude totals stay the primary eye-catch. Each card's footer shows the
+// underlying unit (seconds of audio / chars of text) so the owner can sanity-
+// check the $ against Google's pricing page at a glance.
+
+function VoiceCostCard({
+  label,
+  icon: Icon,
+  primaryText,
+  secondaryText,
+  warn = false,
+}: {
+  label: string
+  icon: React.ElementType
+  primaryText: string
+  secondaryText: string
+  warn?: boolean
+}) {
+  return (
+    <div className="flex-1 p-4 rounded-2xl bg-surface-raised border border-surface-border text-center min-w-0">
+      <div className="flex items-center justify-center gap-1.5 mb-2">
+        <Icon size={11} className="text-ink/40" />
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-ink/40">{label}</p>
+      </div>
+      <p
+        className={`font-display text-2xl md:text-3xl font-bold tabular-nums ${
+          warn ? 'text-status-working' : 'text-ink'
+        }`}
+      >
+        {primaryText}
+      </p>
+      <p className="text-[10px] text-ink/30 mt-1 truncate">{secondaryText}</p>
+    </div>
+  )
+}
+
+function providerBreakdownSummary(
+  breakdown: VoiceStatRollup['stt']['provider_breakdown'],
+  kind: 'stt' | 'tts',
+): string {
+  const entries = Object.entries(breakdown || {})
+  if (entries.length === 0) return 'no activity'
+  return entries
+    .map(([provider, data]) => {
+      const unit = kind === 'stt' ? secondsToDisplay(data.seconds ?? 0) : charsToDisplay(data.chars ?? 0)
+      return `${provider} ${unit}`
+    })
+    .join(' · ')
+}
+
+function VoiceCostRow({
+  window,
+  warnTotal,
+}: {
+  window: VoiceStatRollup
+  warnTotal: boolean
+}) {
+  return (
+    <div className="flex gap-3 items-stretch">
+      <VoiceCostCard
+        label="STT"
+        icon={Mic}
+        primaryText={usdToDisplay(window.stt.cost_usd)}
+        secondaryText={`${secondsToDisplay(window.stt.seconds)} · ${providerBreakdownSummary(window.stt.provider_breakdown, 'stt')}`}
+      />
+      <VoiceCostCard
+        label="TTS"
+        icon={Volume2}
+        primaryText={usdToDisplay(window.tts.cost_usd)}
+        secondaryText={`${charsToDisplay(window.tts.chars)} chars · ${providerBreakdownSummary(window.tts.provider_breakdown, 'tts')}`}
+      />
+      <VoiceCostCard
+        label="Voice total"
+        icon={CircleDollarSign}
+        primaryText={usdToDisplay(window.total_usd)}
+        secondaryText={warnTotal ? 'monthly voice > $50' : 'STT + TTS'}
+        warn={warnTotal}
+      />
+    </div>
+  )
+}
+
+function VoiceSection({
+  voice,
+  voiceAlert,
+}: {
+  voice: { today: VoiceStatRollup; week: VoiceStatRollup; month: VoiceStatRollup }
+  voiceAlert: boolean
+}) {
+  type Window = 'today' | 'week' | 'month'
+  const [active, setActive] = useState<Window>('today')
+  const tabs: { key: Window; label: string }[] = [
+    { key: 'today', label: 'Today' },
+    { key: 'week', label: 'Week' },
+    { key: 'month', label: 'Month' },
+  ]
+  const data = voice[active]
+
+  return (
+    <Section title="Voice (Google STT + TTS)" icon={Mic}>
+      <div className="flex gap-1 mb-3">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setActive(t.key)}
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider transition-colors ${
+              active === t.key
+                ? 'bg-chief/20 text-chief'
+                : 'bg-surface text-ink/40 active:bg-surface-overlay'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <VoiceCostRow window={data} warnTotal={voiceAlert && active === 'month'} />
+    </Section>
+  )
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────
 
 export default function UsagePage() {
@@ -500,6 +658,17 @@ export default function UsagePage() {
           </div>
         )}
 
+        {/* Voice spend alert — independent of Claude alerts. Fires once the
+            rolling monthly STT+TTS total crosses $50. */}
+        {summary?.voice_alert_level === 'warning' && (
+          <div className="flex items-center gap-2 p-3 rounded-xl border text-sm bg-status-working/10 border-status-working/30 text-status-working">
+            <Mic size={14} className="shrink-0" />
+            <span>
+              Voice spend elevated — Google STT+TTS past $50 this month
+            </span>
+          </div>
+        )}
+
         {/* Hero cost numbers — always shown, defaults to $0.00 while data loads */}
         <div className="flex gap-3">
           <HeroCostCard label="Today" cents={summary?.today_cents ?? 0} />
@@ -510,6 +679,16 @@ export default function UsagePage() {
         {/* Current session strip */}
         {currentSession && (
           <CurrentSessionStrip session={currentSession} />
+        )}
+
+        {/* Voice (Google STT + TTS) — hidden until backend reports a voice
+            block. Backwards-compat: pre-migration deployments omit `voice`
+            from /api/usage/summary and we skip rendering. */}
+        {summary?.voice && (
+          <VoiceSection
+            voice={summary.voice}
+            voiceAlert={summary.voice_alert_level === 'warning'}
+          />
         )}
 
         {/* Per-model breakdown */}
