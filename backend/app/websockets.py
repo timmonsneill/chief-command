@@ -859,6 +859,7 @@ async def _route_user_turn(
             ws, session_id, history,
             result.get("task_spec") or user_text, current_project,
             current_speed,
+            stt_seconds=stt_seconds,
         )
         return
 
@@ -884,6 +885,8 @@ async def _route_task(
     task_spec: str,
     current_project: str,
     current_speed: float = 1.0,
+    *,
+    stt_seconds: float = 0.0,
 ) -> None:
     # Hawke HIGH: wrap the entire body so FileNotFoundError (claude missing
     # on PATH), OSError (exec failures), ValueError (task_spec length cap),
@@ -912,12 +915,17 @@ async def _route_task(
         repo = get_repo_path(current_project)
         if repo is None or not repo.exists():
             # No local repo configured for this scope. Fall back to chat so
-            # Chief can explain rather than silently fail.
+            # Chief can explain rather than silently fail. Thread current_speed
+            # and stt_seconds so the narration honors the user's voice rate
+            # and the STT leg gets billed against the turn row.
             await ws_send_json(ws, {
                 "type": "token",
                 "text": f"I can't dispatch — no local repo configured for {current_project}. ",
             })
-            await _handle_text_turn(ws, session_id, history, task_spec, current_project)
+            await _handle_text_turn(
+                ws, session_id, history, task_spec, current_project,
+                current_speed, stt_seconds=stt_seconds,
+            )
             return
 
         # `task_id` must appear on every task_* frame or the frontend silently
@@ -1005,9 +1013,14 @@ async def _route_task(
             f"Task dispatch failed: {exc}. Staying on chat.",
             speed=current_speed,
         )
-        # Fall back to chat so the user still gets a response.
+        # Fall back to chat so the user still gets a response. Thread
+        # current_speed + stt_seconds so the fallback LLM turn narrates at
+        # the user's chosen rate and bills the STT leg against the turn row.
         try:
-            await _handle_text_turn(ws, session_id, history, task_spec, current_project)
+            await _handle_text_turn(
+                ws, session_id, history, task_spec, current_project,
+                current_speed, stt_seconds=stt_seconds,
+            )
         except Exception:
             logger.exception(
                 "route_task: chat fallback also failed session=%s", session_id,

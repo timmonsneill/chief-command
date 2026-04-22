@@ -275,7 +275,11 @@ async def test_route_task_dispatch_failure_narrates_and_falls_back(
 
     async def fake_handle_text_turn(
         ws: Any, session_id: str, history: list, text: str, project_scope: str,
+        *args: Any, **kwargs: Any,
     ) -> None:
+        # *args/**kwargs absorb current_speed + stt_seconds threaded through
+        # from _route_task's fallback path (so the fallback LLM turn narrates
+        # at the user's rate and bills the STT leg against the turn row).
         chat_fallbacks.append(text)
 
     monkeypatch.setattr(ws_mod, "_narrate", fake_narrate)
