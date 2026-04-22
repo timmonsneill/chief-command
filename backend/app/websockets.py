@@ -759,19 +759,20 @@ async def _route_user_turn(
         await _route_task(
             ws, session_id, history,
             result.get("task_spec") or user_text, current_project,
+            current_speed,
         )
         return
 
     if intent == "status":
-        await _route_status(ws, session_id, history, current_project)
+        await _route_status(ws, session_id, history, current_project, current_speed)
         return
 
     if intent == "cancel":
-        await _route_cancel(ws, session_id)
+        await _route_cancel(ws, session_id, current_speed)
         return
 
     # Should not reach — classifier is typed.
-    await _handle_text_turn(ws, session_id, history, user_text, current_project)
+    await _handle_text_turn(ws, session_id, history, user_text, current_project, current_speed)
 
 
 async def _route_task(
@@ -780,6 +781,7 @@ async def _route_task(
     history: list[dict],
     task_spec: str,
     current_project: str,
+    current_speed: float = 1.0,
 ) -> None:
     # Hawke HIGH: wrap the entire body so FileNotFoundError (claude missing
     # on PATH), OSError (exec failures), ValueError (task_spec length cap),
@@ -801,6 +803,7 @@ async def _route_task(
             await _narrate(
                 ws,
                 "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
+                speed=current_speed,
             )
             return
 
@@ -844,6 +847,7 @@ async def _route_task(
             await _narrate(
                 ws,
                 f"Task complete. Exit code {exit_code}. {summary[:160]}",
+                speed=current_speed,
             )
 
         try:
@@ -858,6 +862,7 @@ async def _route_task(
             await _narrate(
                 ws,
                 "Still working on the previous task. Say status for an update, or stop to cancel.",
+                speed=current_speed,
             )
             return
 
@@ -880,6 +885,7 @@ async def _route_task(
             f"Dispatching to Claude Code on your Mac. Working in {current_project}. "
             "I'll let you know when it's done.",
             terminal=False,
+            speed=current_speed,
         )
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — propagate so the
@@ -895,6 +901,7 @@ async def _route_task(
         await _narrate(
             ws,
             f"Task dispatch failed: {exc}. Staying on chat.",
+            speed=current_speed,
         )
         # Fall back to chat so the user still gets a response.
         try:
@@ -910,12 +917,14 @@ async def _route_status(
     session_id: str,
     history: list[dict],
     current_project: str,
+    current_speed: float = 1.0,
 ) -> None:
     handle = _dispatcher.get_handle(session_id)
     if handle is None:
         await _narrate(
             ws,
             "No task running right now. Ask me something or give me a build task.",
+            speed=current_speed,
         )
         return
 
@@ -945,10 +954,15 @@ async def _route_status(
     await _narrate(
         ws,
         f"{sentence} Running for {elapsed // 60} minutes {elapsed % 60} seconds.",
+        speed=current_speed,
     )
 
 
-async def _route_cancel(ws: WebSocket, session_id: str) -> None:
+async def _route_cancel(
+    ws: WebSocket,
+    session_id: str,
+    current_speed: float = 1.0,
+) -> None:
     # Fetch the handle BEFORE cancel so we still have access to task_id for
     # the frame (cancel() may evict the handle).
     handle = _dispatcher.get_handle(session_id)
@@ -959,39 +973,42 @@ async def _route_cancel(ws: WebSocket, session_id: str) -> None:
             "task_id": handle.task_id,
             "reason": "owner-requested",
         })
-        await _narrate(ws, "Cancelled. Task killed.")
+        await _narrate(ws, "Cancelled. Task killed.", speed=current_speed)
     else:
-        await _narrate(ws, "Nothing to cancel — no task running.")
+        await _narrate(ws, "Nothing to cancel — no task running.", speed=current_speed)
 
 
-async def _narrate(ws: WebSocket, text: str, *, terminal: bool = True) -> None:
+async def _narrate(
+    ws: WebSocket,
+    text: str,
+    *,
+    terminal: bool = True,
+    speed: float = 1.0,
+    cancel_event: Optional[asyncio.Event] = None,
+) -> None:
     """Send a short line of text as a token + trigger TTS.
 
-    Reuses ``tts_service.synthesize_stream`` directly — mirrors the pattern in
-    ``_run_llm_turn``'s tts_worker. Keeps voice consistent between chat
-    narration and task narration.
+    ``speed`` matches the chat-path TTS speed (Google's `speaking_rate`).
+    Without this plumbed through, task/status/cancel narrations ignored the
+    owner's speed preference and always played at 1.0x.
 
-    Frame ordering (Hawke HIGH): match the chat path exactly —
-        token -> tts_start -> (audio bytes...) -> tts_end -> message_done
-
-    Previously we emitted ``message_done`` before TTS bytes, which told the
-    frontend the assistant was "done speaking" while audio was still
-    streaming. The chat path (``_run_llm_turn``) emits ``message_done`` last
-    for a reason; narration should match.
-
-    ``terminal`` controls whether we emit ``message_done`` at all. The
-    initial "dispatching..." narration is NOT terminal — a task_complete
-    frame + a follow-up terminal narration will arrive later, and firing
-    ``message_done`` up front would clear the "assistant speaking" state
-    prematurely. Defaults to True (terminal) because the majority of
-    narrations — task_complete, task_cancelled, "nothing to cancel",
-    rejection messages — are the end of a conversational unit.
+    ``cancel_event`` is checked between TTS chunks so a barge-in stops
+    narration at the next chunk boundary instead of waiting for
+    CancelledError to reach the next await point. Defaults to the running
+    task's ``_tts_cancel_event`` attribute if set (same pattern
+    ``_run_llm_turn`` and ``cancel_current_turn`` use).
     """
+    if cancel_event is None:
+        task = asyncio.current_task()
+        if task is not None:
+            cancel_event = getattr(task, "_tts_cancel_event", None)
     try:
         await ws_send_json(ws, {"type": "token", "text": text + " "})
         await ws_send_json(ws, {"type": "tts_start"})
         try:
-            async for chunk in tts_service.synthesize_stream(text):
+            async for chunk in tts_service.synthesize_stream(
+                text, speed=speed, cancel_event=cancel_event,
+            ):
                 await ws_send_bytes(ws, chunk)
         except Exception as exc:
             logger.warning("narration TTS failed: %s", exc)

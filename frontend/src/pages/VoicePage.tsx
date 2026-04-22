@@ -162,8 +162,11 @@ export default function VoicePage() {
     const ctx = audioContextRef.current
     if (!ctx) {
       // No primed AudioContext — shouldn't happen after a user gesture, but
-      // drop the chunk rather than silently queueing forever.
+      // drop the chunk rather than silently queueing forever. Also force a
+      // state transition so the UI doesn't sit in 'thinking' waiting for audio
+      // that will never decode.
       audioQueueRef.current = []
+      setVoiceState('listening')
       return
     }
     isPlayingAudioRef.current = true
@@ -285,6 +288,13 @@ export default function VoicePage() {
         if (parsed.type === 'tts_end') {
           if (audioQueueRef.current.length > 0) {
             playNextChunk()
+          } else if (!hasStartedAudioRef.current) {
+            // Zero-chunk TTS turn (empty narration / TTS error / all chunks
+            // filtered out). No source.start(0) ever fired, so the
+            // speaking-state transition in playNextChunk is dead code for this
+            // turn — force the UI out of whatever prior state (usually
+            // 'thinking') or it hangs until the next turn.
+            setVoiceState(conversationActive ? 'listening' : 'idle')
           } else {
             setVoiceState('listening')
           }
