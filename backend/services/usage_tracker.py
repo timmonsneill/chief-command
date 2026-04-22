@@ -1,4 +1,15 @@
-"""Session and turn persistence with cost tracking."""
+"""Session and turn persistence with cost tracking.
+
+Tracks three billed legs per voice turn:
+  1. Claude tokens                → turns.cost_cents   (existing)
+  2. Google STT (audio seconds)   → turns.stt_cost_usd (voice port)
+  3. Google TTS (text characters) → turns.tts_cost_usd (voice port)
+
+Voice costs are stored in USD (float) rather than cents (int) because Google's
+per-second / per-character rates produce sub-cent per-turn costs that would
+lose precision if rounded to cents on write. Rollup endpoints convert to
+whatever unit the frontend wants.
+"""
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -12,6 +23,46 @@ PRICING_PER_MTOK = {
     "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "cached_in": 0.3},
     "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "cached_in": 0.5},
 }
+
+# ---------------------------------------------------------------------------
+# Voice pricing (April 2026)
+# ---------------------------------------------------------------------------
+# Cloud Speech-to-Text v2 streaming: $0.016 / minute of audio
+# Cloud TTS Chirp 3 HD:              $30 / 1M characters
+# Local providers (faster-whisper / Kokoro) are free — $0 rate keeps the
+# schema uniform so rollups work regardless of provider.
+VOICE_PRICING: dict[str, dict[str, float | str]] = {
+    "google_stt": {"unit": "second", "usd_per_unit": 0.016 / 60},
+    "google_tts": {"unit": "char",   "usd_per_unit": 30 / 1_000_000},
+    "local_stt":  {"unit": "second", "usd_per_unit": 0.0},
+    "local_tts":  {"unit": "char",   "usd_per_unit": 0.0},
+}
+
+
+def _stt_rate(provider: str) -> float:
+    """USD per second of STT audio for the given provider."""
+    key = f"{(provider or 'local').lower()}_stt"
+    rate = VOICE_PRICING.get(key, VOICE_PRICING["local_stt"])["usd_per_unit"]
+    return float(rate)
+
+
+def _tts_rate(provider: str) -> float:
+    """USD per character of TTS output for the given provider."""
+    key = f"{(provider or 'local').lower()}_tts"
+    rate = VOICE_PRICING.get(key, VOICE_PRICING["local_tts"])["usd_per_unit"]
+    return float(rate)
+
+
+def compute_stt_cost_usd(provider: str, audio_seconds: float) -> float:
+    """Cost in USD for `audio_seconds` of STT at the given provider's rate."""
+    seconds = max(0.0, float(audio_seconds or 0.0))
+    return seconds * _stt_rate(provider)
+
+
+def compute_tts_cost_usd(provider: str, chars: int) -> float:
+    """Cost in USD for `chars` of TTS input at the given provider's rate."""
+    n = max(0, int(chars or 0))
+    return n * _tts_rate(provider)
 
 
 def _now_iso() -> str:
@@ -99,6 +150,55 @@ async def record_turn(
     }
 
 
+async def record_stt_usage(turn_id: int, provider: str, audio_seconds: float) -> dict:
+    """Attach STT usage (seconds + cost) to an already-recorded turn row.
+
+    Called by the WebSocket handler after `record_turn` has returned the
+    turn's rowid. Idempotent-ish: overwrites whatever was there, so a retry
+    in the same turn doesn't double-bill.
+
+    Returns the fields written so the caller can include them in the usage
+    WS event without re-querying.
+    """
+    seconds = max(0.0, float(audio_seconds or 0.0))
+    cost_usd = compute_stt_cost_usd(provider, seconds)
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE turns
+               SET stt_seconds = ?, stt_provider = ?, stt_cost_usd = ?
+               WHERE id = ?""",
+            (seconds, provider, cost_usd, turn_id),
+        )
+        await db.commit()
+    logger.info(
+        "STT usage recorded turn=%s provider=%s seconds=%.2f cost_usd=%.6f",
+        turn_id, provider, seconds, cost_usd,
+    )
+    return {"stt_seconds": seconds, "stt_provider": provider, "stt_cost_usd": cost_usd}
+
+
+async def record_tts_usage(turn_id: int, provider: str, chars: int) -> dict:
+    """Attach TTS usage (chars + cost) to an already-recorded turn row.
+
+    See record_stt_usage — symmetric for TTS.
+    """
+    n = max(0, int(chars or 0))
+    cost_usd = compute_tts_cost_usd(provider, n)
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE turns
+               SET tts_chars = ?, tts_provider = ?, tts_cost_usd = ?
+               WHERE id = ?""",
+            (n, provider, cost_usd, turn_id),
+        )
+        await db.commit()
+    logger.info(
+        "TTS usage recorded turn=%s provider=%s chars=%d cost_usd=%.6f",
+        turn_id, provider, n, cost_usd,
+    )
+    return {"tts_chars": n, "tts_provider": provider, "tts_cost_usd": cost_usd}
+
+
 async def get_session_totals(session_id: str) -> dict:
     async with get_db() as db:
         cur = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -108,9 +208,13 @@ async def get_session_totals(session_id: str) -> dict:
 
         cur2 = await db.execute(
             """SELECT
-               COALESCE(SUM(input_tokens), 0) AS input_tokens,
-               COALESCE(SUM(output_tokens), 0) AS output_tokens,
-               COALESCE(SUM(cache_read_tokens), 0) AS cached_tokens
+               COALESCE(SUM(input_tokens), 0)     AS input_tokens,
+               COALESCE(SUM(output_tokens), 0)    AS output_tokens,
+               COALESCE(SUM(cache_read_tokens), 0) AS cached_tokens,
+               COALESCE(SUM(stt_seconds), 0.0)    AS stt_seconds,
+               COALESCE(SUM(stt_cost_usd), 0.0)   AS stt_cost_usd,
+               COALESCE(SUM(tts_chars), 0)        AS tts_chars,
+               COALESCE(SUM(tts_cost_usd), 0.0)   AS tts_cost_usd
                FROM turns WHERE session_id = ?""",
             (session_id,),
         )
@@ -121,6 +225,9 @@ async def get_session_totals(session_id: str) -> dict:
         ended_at = datetime.fromisoformat(ended_at_str) if ended_at_str else datetime.now(timezone.utc)
         duration_s = (ended_at - started_at).total_seconds()
 
+        stt_cost = float(turns_row["stt_cost_usd"]) if turns_row else 0.0
+        tts_cost = float(turns_row["tts_cost_usd"]) if turns_row else 0.0
+
         return {
             "input_tokens": turns_row["input_tokens"] if turns_row else 0,
             "output_tokens": turns_row["output_tokens"] if turns_row else 0,
@@ -128,7 +235,101 @@ async def get_session_totals(session_id: str) -> dict:
             "cost_cents": row["total_cost_cents"],
             "turn_count": row["turn_count"],
             "duration_s": round(duration_s),
+            "voice": {
+                "stt": {
+                    "seconds": float(turns_row["stt_seconds"]) if turns_row else 0.0,
+                    "cost_usd": stt_cost,
+                },
+                "tts": {
+                    "chars": int(turns_row["tts_chars"]) if turns_row else 0,
+                    "cost_usd": tts_cost,
+                },
+                "total_usd": stt_cost + tts_cost,
+            },
         }
+
+
+async def _voice_rollup_for_window(db, since: str) -> dict:
+    """Voice usage rollup for `turns` created at or after `since`.
+
+    Shape:
+      {
+        stt: { seconds, cost_usd, provider_breakdown: {google|local|unknown: {...}} },
+        tts: { chars,   cost_usd, provider_breakdown: {google|local|unknown: {...}} },
+        total_usd,
+      }
+
+    NULL providers (turns recorded before the migration landed) roll up under
+    'unknown' so they still contribute to totals but don't pollute the
+    google/local counters.
+    """
+    cur = await db.execute(
+        """SELECT
+            COALESCE(SUM(stt_seconds), 0.0)  AS stt_seconds,
+            COALESCE(SUM(stt_cost_usd), 0.0) AS stt_cost_usd,
+            COALESCE(SUM(tts_chars), 0)      AS tts_chars,
+            COALESCE(SUM(tts_cost_usd), 0.0) AS tts_cost_usd
+           FROM turns WHERE created_at >= ?""",
+        (since,),
+    )
+    row = await cur.fetchone()
+    stt_seconds = float(row["stt_seconds"]) if row else 0.0
+    stt_cost = float(row["stt_cost_usd"]) if row else 0.0
+    tts_chars = int(row["tts_chars"]) if row else 0
+    tts_cost = float(row["tts_cost_usd"]) if row else 0.0
+
+    # Provider breakdown — STT. Only rows with >0 seconds so we don't
+    # surface zero-activity providers.
+    cur = await db.execute(
+        """SELECT
+            COALESCE(stt_provider, 'unknown') AS provider,
+            COALESCE(SUM(stt_seconds), 0.0)   AS seconds,
+            COALESCE(SUM(stt_cost_usd), 0.0)  AS cost_usd
+           FROM turns
+           WHERE created_at >= ? AND stt_seconds > 0
+           GROUP BY COALESCE(stt_provider, 'unknown')""",
+        (since,),
+    )
+    stt_providers: dict[str, dict] = {
+        r["provider"]: {
+            "seconds": float(r["seconds"]),
+            "cost_usd": float(r["cost_usd"]),
+        }
+        for r in await cur.fetchall()
+    }
+
+    # Provider breakdown — TTS.
+    cur = await db.execute(
+        """SELECT
+            COALESCE(tts_provider, 'unknown') AS provider,
+            COALESCE(SUM(tts_chars), 0)       AS chars,
+            COALESCE(SUM(tts_cost_usd), 0.0)  AS cost_usd
+           FROM turns
+           WHERE created_at >= ? AND tts_chars > 0
+           GROUP BY COALESCE(tts_provider, 'unknown')""",
+        (since,),
+    )
+    tts_providers: dict[str, dict] = {
+        r["provider"]: {
+            "chars": int(r["chars"]),
+            "cost_usd": float(r["cost_usd"]),
+        }
+        for r in await cur.fetchall()
+    }
+
+    return {
+        "stt": {
+            "seconds": stt_seconds,
+            "cost_usd": stt_cost,
+            "provider_breakdown": stt_providers,
+        },
+        "tts": {
+            "chars": tts_chars,
+            "cost_usd": tts_cost,
+            "provider_breakdown": tts_providers,
+        },
+        "total_usd": stt_cost + tts_cost,
+    }
 
 
 async def get_rolling_totals() -> dict:
@@ -153,10 +354,21 @@ async def get_rolling_totals() -> dict:
         week_cents = await _sum_since(week_start)
         month_cents = await _sum_since(month_start)
 
+        # Voice rollups pulled from `turns` (voice cost is stored per-turn, not
+        # per-session). Claude-side field names unchanged — voice is additive.
+        today_voice = await _voice_rollup_for_window(db, today_start)
+        week_voice = await _voice_rollup_for_window(db, week_start)
+        month_voice = await _voice_rollup_for_window(db, month_start)
+
     return {
         "today_cents": today_cents,
         "week_cents": week_cents,
         "month_cents": month_cents,
+        "voice": {
+            "today": today_voice,
+            "week": week_voice,
+            "month": month_voice,
+        },
     }
 
 
@@ -226,15 +438,32 @@ async def get_by_model_totals() -> dict:
         cur = await db.execute(query, (month_start,))
         month_rows = await cur.fetchall()
 
+        # Voice rollups alongside per-model Claude totals. Frontend renders
+        # them separately but bundling saves a round-trip.
+        today_voice = await _voice_rollup_for_window(db, today_start)
+        week_voice = await _voice_rollup_for_window(db, week_start)
+        month_voice = await _voice_rollup_for_window(db, month_start)
+
     return {
         "today": _rows_to_dict(today_rows),
         "week": _rows_to_dict(week_rows),
         "month": _rows_to_dict(month_rows),
+        "voice": {
+            "today": today_voice,
+            "week": week_voice,
+            "month": month_voice,
+        },
     }
 
 
 async def get_daily_series(days: int = 30) -> list[dict]:
-    """Return daily cost_cents and turn counts for the last `days` days, oldest-first."""
+    """Return daily cost_cents, voice cost_usd and turn counts for the last
+    `days` days, oldest-first.
+
+    Daily series feeds the 30-day trend chart on UsagePage. Voice cost is
+    included alongside Claude cost_cents per day so the chart can stack or
+    overlay them.
+    """
     days = min(days, 365)
     since = (
         datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -245,9 +474,11 @@ async def get_daily_series(days: int = 30) -> list[dict]:
         cur = await db.execute(
             """
             SELECT
-                substr(created_at, 1, 10)    AS date,
-                COALESCE(SUM(cost_cents), 0) AS cost_cents,
-                COUNT(*)                      AS turns
+                substr(created_at, 1, 10)           AS date,
+                COALESCE(SUM(cost_cents), 0)        AS cost_cents,
+                COALESCE(SUM(stt_cost_usd), 0.0)    AS stt_cost_usd,
+                COALESCE(SUM(tts_cost_usd), 0.0)    AS tts_cost_usd,
+                COUNT(*)                             AS turns
             FROM turns
             WHERE created_at >= ?
             GROUP BY date
@@ -258,7 +489,14 @@ async def get_daily_series(days: int = 30) -> list[dict]:
         rows = await cur.fetchall()
 
     return [
-        {"date": row["date"], "cost_cents": row["cost_cents"], "turns": row["turns"]}
+        {
+            "date": row["date"],
+            "cost_cents": row["cost_cents"],
+            "turns": row["turns"],
+            "stt_cost_usd": float(row["stt_cost_usd"]),
+            "tts_cost_usd": float(row["tts_cost_usd"]),
+            "voice_cost_usd": float(row["stt_cost_usd"]) + float(row["tts_cost_usd"]),
+        }
         for row in rows
     ]
 
