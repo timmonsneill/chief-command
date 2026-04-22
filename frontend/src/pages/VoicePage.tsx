@@ -7,7 +7,8 @@ import { useVad } from '../hooks/useVad'
 import { useProjectContext } from '../hooks/useProjectContext'
 import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
-import { TaskBubble, type TaskBubbleStatus } from '../components/TaskBubble'
+import { type TaskBubbleStatus } from '../components/TaskBubble'
+import { InlineTaskActivity } from '../components/InlineTaskActivity'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
 
 type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
@@ -689,7 +690,7 @@ export default function VoicePage() {
             if (item.kind === 'task') {
               const t = item.task
               return (
-                <TaskBubble
+                <InlineTaskActivity
                   key={`task-${t.id}`}
                   taskSpec={t.taskSpec}
                   startedAt={t.startedAt}
