@@ -7,7 +7,8 @@ import { useVad } from '../hooks/useVad'
 import { useProjectContext } from '../hooks/useProjectContext'
 import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
-import { TaskBubble, type TaskBubbleStatus } from '../components/TaskBubble'
+import { type TaskBubbleStatus } from '../components/TaskBubble'
+import { InlineTaskActivity } from '../components/InlineTaskActivity'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
 
 type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
@@ -103,9 +104,15 @@ export default function VoicePage() {
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
-  // Tracks when Chief last started speaking — kept for future half-duplex
-  // refinements (currently we block voice-barge-in entirely while audio plays).
+  // Tracks when Chief's AUDIO actually started playing (not when tts_start
+  // arrived). The barge-in grace window is measured against this so we don't
+  // suppress real user interrupts while the first chunk is still decoding.
   const ttsStartAtRef = useRef<number>(0)
+  // Whether the current TTS turn has produced a `source.start(0)` yet. Reset on
+  // every tts_start; flipped true when the first chunk actually begins playing.
+  // Gates the `setVoiceState('speaking')` transition so the orb doesn't jump to
+  // "speaking" during the 50–200ms of silence between tts_start and first audio.
+  const hasStartedAudioRef = useRef(false)
   // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
   // Creating a new Audio() per chunk in a WebSocket callback fails silently on
   // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
@@ -179,6 +186,15 @@ export default function VoicePage() {
         else setVoiceState('listening')
       }
       source.start(0)
+      // Only the FIRST chunk of a turn flips the UI into "speaking" — that way
+      // the orb and state strip move in lockstep with actual audible audio,
+      // not with the server-sent `tts_start` event (which arrives ~50–200ms
+      // before the first sample is decodable).
+      if (!hasStartedAudioRef.current) {
+        hasStartedAudioRef.current = true
+        ttsStartAtRef.current = Date.now()
+        setVoiceState('speaking')
+      }
     } catch {
       currentSourceRef.current = null
       isPlayingAudioRef.current = false
@@ -258,8 +274,12 @@ export default function VoicePage() {
             )
           )
           responseBuffer.current = ''
-          ttsStartAtRef.current = Date.now()
-          setVoiceState('speaking')
+          // Reset the "has first audio landed?" latch — playNextChunk will flip
+          // it + set voiceState('speaking') when source.start(0) actually fires
+          // on the first decoded chunk. We intentionally DO NOT setVoiceState
+          // here: the 50–200ms gap between tts_start and playable audio was
+          // showing a "speaking" label with zero sound coming out.
+          hasStartedAudioRef.current = false
         }
 
         if (parsed.type === 'tts_end') {
@@ -401,11 +421,13 @@ export default function VoicePage() {
       // Real voice barge-in: if Chief is speaking, cut local audio AND tell
       // backend to stop generating. iOS/Chrome AEC on the mic (see useVad
       // constraints) filters Chief's own speaker audio so this fires on
-      // real user speech, not echo. A 600ms grace period after TTS start
-      // covers the initial speaker→mic priming before AEC converges.
+      // real user speech, not echo. A short grace period after the first
+      // audio chunk starts covers the initial speaker→mic priming before
+      // AEC converges — ~200ms is enough on modern hardware. If regressions
+      // show up as false self-interrupts, bump to 300ms before going higher.
       if (isPlayingAudioRef.current) {
         const sinceTtsMs = Date.now() - ttsStartAtRef.current
-        if (sinceTtsMs < 600) return
+        if (sinceTtsMs < 200) return
         stopAudioPlayback()
         send(JSON.stringify({ type: 'interrupt' }))
       }
@@ -668,7 +690,7 @@ export default function VoicePage() {
             if (item.kind === 'task') {
               const t = item.task
               return (
-                <TaskBubble
+                <InlineTaskActivity
                   key={`task-${t.id}`}
                   taskSpec={t.taskSpec}
                   startedAt={t.startedAt}
