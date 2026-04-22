@@ -343,8 +343,12 @@ async def get_rolling_totals() -> dict:
 
     async with get_db() as db:
         async def _sum_since(since: str) -> int:
+            # Bucket by turns.created_at (not sessions.started_at) so a session
+            # that straddles midnight attributes each turn's Claude cost to the
+            # day the TURN happened. This aligns with voice rollups (also
+            # turn-bucketed) and get_by_model_totals / get_daily_series.
             cur = await db.execute(
-                "SELECT COALESCE(SUM(total_cost_cents), 0) AS total FROM sessions WHERE started_at >= ?",
+                "SELECT COALESCE(SUM(cost_cents), 0) AS total FROM turns WHERE created_at >= ?",
                 (since,),
             )
             row = await cur.fetchone()

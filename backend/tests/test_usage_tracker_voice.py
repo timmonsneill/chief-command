@@ -15,10 +15,6 @@ Run:
     pytest -x backend/tests/test_usage_tracker_voice.py -v
 """
 
-import os
-import tempfile
-from pathlib import Path
-
 import aiosqlite
 import pytest
 import pytest_asyncio
@@ -39,7 +35,6 @@ async def temp_db_path(tmp_path, monkeypatch):
     monkeypatch.setenv("CHIEF_DB_PATH", str(db_file))
 
     # Force a re-import so DB_PATH picks up the new env var.
-    import importlib
     import sys
     for mod in ("db", "services.usage_tracker"):
         if mod in sys.modules:
@@ -341,6 +336,88 @@ async def test_get_daily_series_adds_voice_cost_per_day(seeded_session):
 
 
 @pytest.mark.asyncio
+async def test_rolling_totals_bucket_by_turn_created_at_not_session_start(initialised_db):
+    """A session that straddles midnight must attribute each turn's cost to
+    the day the TURN happened, not the session's started_at.
+
+    Regression against the pre-fix behaviour where get_rolling_totals used
+    ``sessions.started_at`` for Claude cost but ``turns.created_at`` for
+    voice cost — producing disjoint windows.
+
+    Setup: one session starts at 23:55 yesterday with a Claude turn at
+    23:55, then produces a voice turn at 00:05 today. After the fix, the
+    Claude turn should land in yesterday's bucket and the voice turn in
+    today's — and `today_cents` should reflect ONLY the today-turn.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    from db import get_db
+    from services.usage_tracker import (
+        compute_cost_cents,
+        get_rolling_totals,
+        record_stt_usage,
+        record_tts_usage,
+    )
+
+    now = datetime.now(timezone.utc)
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_2355 = (today_midnight - timedelta(minutes=5)).isoformat()
+    today_0005 = (today_midnight + timedelta(minutes=5)).isoformat()
+    session_started = yesterday_2355
+
+    # Insert the session + two turns at explicit timestamps so we can
+    # straddle midnight deterministically.
+    model = "claude-haiku-4-5"
+    yesterday_cost_cents = compute_cost_cents(model, 1000, 500, 0, 0)
+    today_cost_cents = compute_cost_cents(model, 2000, 1000, 0, 0)
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO sessions (id, started_at, total_cost_cents, turn_count) VALUES (?, ?, ?, ?)",
+            ("straddle", session_started, yesterday_cost_cents + today_cost_cents, 2),
+        )
+        # Turn A: 23:55 yesterday — Claude-only
+        await db.execute(
+            """INSERT INTO turns
+               (session_id, created_at, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, cost_cents,
+                user_text, assistant_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("straddle", yesterday_2355, model, 1000, 500, 0, 0, yesterday_cost_cents, "y", "y"),
+        )
+        # Turn B: 00:05 today — Claude + voice
+        cur = await db.execute(
+            """INSERT INTO turns
+               (session_id, created_at, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, cost_cents,
+                user_text, assistant_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("straddle", today_0005, model, 2000, 1000, 0, 0, today_cost_cents, "t", "t"),
+        )
+        today_turn_id = cur.lastrowid
+        await db.commit()
+
+    await record_stt_usage(today_turn_id, "google", 30.0)
+    await record_tts_usage(today_turn_id, "google", 1200)
+
+    totals = await get_rolling_totals()
+
+    # Claude bucket: today must include ONLY the today-turn's cost.
+    assert totals["today_cents"] == today_cost_cents, (
+        "today_cents should bucket by turns.created_at, not sessions.started_at"
+    )
+    # Week still includes both (assuming same ISO week); month likewise.
+    # We only assert the straddle invariant strictly on today.
+
+    # Voice bucket: today must include the voice charges from the today-turn.
+    assert totals["voice"]["today"]["total_usd"] == pytest.approx(0.044)
+
+    # Sanity: yesterday's turn was registered (should be visible in wider windows)
+    # — this guards against accidentally dropping the row.
+    assert totals["week_cents"] >= yesterday_cost_cents + today_cost_cents
+    assert totals["month_cents"] >= yesterday_cost_cents + today_cost_cents
+
+
+@pytest.mark.asyncio
 async def test_get_rolling_totals_no_turns_returns_zero_voice(initialised_db):
     """Empty DB must return a $0 voice block, not missing keys."""
     from services.usage_tracker import get_rolling_totals
@@ -382,7 +459,6 @@ async def test_migration_adds_voice_columns_to_pre_migration_db(tmp_path, monkey
     monkeypatch.setenv("CHIEF_DB_PATH", str(db_file))
 
     # Force re-import so DB_PATH picks up the env var.
-    import importlib
     import sys
     for mod in ("db", "services.usage_tracker"):
         if mod in sys.modules:
