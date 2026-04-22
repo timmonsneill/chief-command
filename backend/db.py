@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS turns (
     user_text TEXT NOT NULL DEFAULT '',
     assistant_text TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
