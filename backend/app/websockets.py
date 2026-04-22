@@ -444,7 +444,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     # two concurrent writers on the same WS.
                     await cancel_current_turn("user-cancelled")
                     sid = await ensure_session()
-                    await _route_cancel(ws, sid)
+                    await _route_cancel(ws, sid, current_speed)
                     continue
 
                 if msg_type and msg_type != "text":
