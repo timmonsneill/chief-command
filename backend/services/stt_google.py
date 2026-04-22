@@ -225,13 +225,28 @@ class GoogleSTTService:
         audio_chunks: AsyncIterator[bytes],
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         language: Optional[str] = None,
+        silence_timeout_ms: Optional[int] = None,
     ) -> AsyncIterator[str]:
         """Stream raw PCM chunks to Google and yield transcript updates.
 
-        Yields interim + final deltas. Callers that only care about finals
-        can filter by detecting result metadata — here we yield strings to
-        match the existing STTService contract, so we yield finals only.
+        Yields finals as Google emits them. Track B #7: if no is_final result
+        arrives within ``silence_timeout_ms`` (default from settings) of the
+        last activity, we surface the best interim transcript we've seen so
+        the caller doesn't hang indefinitely on Google's finalization.
+
+        The timeout resets on every response (interim OR final), so noisy
+        inputs that send a steady stream of interims never trip it — only
+        genuine gaps fire the fallback.
         """
+        from config.settings import settings
+
+        timeout_ms = (
+            silence_timeout_ms
+            if silence_timeout_ms is not None
+            else settings.GOOGLE_STT_SILENCE_TIMEOUT_MS
+        )
+        timeout_s = max(0.0, timeout_ms / 1000.0) if timeout_ms > 0 else None
+
         client = await self._ensure_client()
 
         from google.cloud.speech_v2.types import cloud_speech  # type: ignore
@@ -274,17 +289,72 @@ class GoogleSTTService:
             logger.exception("Google STT streaming_recognize() failed")
             raise
 
-        async for response in responses:
+        # Track the best interim we've seen so the silence-timeout fallback
+        # has something meaningful to surface. Reset on every final we emit
+        # so one audio turn's interim can't bleed into the next turn.
+        best_interim = ""
+        last_final_emitted = False
+
+        # We can't use `async for` here because we need a per-iteration
+        # timeout; instead we manually advance the iterator with wait_for.
+        response_iter = responses.__aiter__()
+        while True:
+            try:
+                if timeout_s is None:
+                    response = await response_iter.__anext__()
+                else:
+                    response = await asyncio.wait_for(
+                        response_iter.__anext__(), timeout=timeout_s
+                    )
+            except StopAsyncIteration:
+                # Google closed the stream cleanly — if we buffered an
+                # interim without ever seeing is_final, surface it now so
+                # the utterance isn't lost.
+                if best_interim and not last_final_emitted:
+                    logger.info(
+                        "Google STT stream ended without final; "
+                        "surfacing best interim (len=%d)",
+                        len(best_interim),
+                    )
+                    yield best_interim
+                return
+            except asyncio.TimeoutError:
+                # No response in ``silence_timeout_ms`` — surface best
+                # interim (if any) and stop. Caller can start a new stream
+                # on the next utterance. Don't raise: timeouts on silence
+                # are expected, not exceptional.
+                if best_interim and not last_final_emitted:
+                    logger.info(
+                        "Google STT silence timeout after %dms; surfacing "
+                        "best interim (len=%d)",
+                        timeout_ms, len(best_interim),
+                    )
+                    yield best_interim
+                else:
+                    logger.debug(
+                        "Google STT silence timeout after %dms with no interim",
+                        timeout_ms,
+                    )
+                return
+
             for result in response.results:
                 if not result.alternatives:
                     continue
-                # Only surface finals to callers — matches STTService
-                # semantics (it only yields when transcription completes a
-                # buffered segment).
-                if getattr(result, "is_final", False):
-                    text = result.alternatives[0].transcript.strip()
-                    if text:
-                        yield text
+                text = result.alternatives[0].transcript.strip()
+                if not text:
+                    continue
+                is_final = getattr(result, "is_final", False)
+                if is_final:
+                    last_final_emitted = True
+                    best_interim = ""  # reset — next utterance starts fresh
+                    yield text
+                else:
+                    # Track the longest interim we've seen — Google sometimes
+                    # emits shorter interims as it refines, and we want the
+                    # richer one if we fall back.
+                    if len(text) > len(best_interim):
+                        best_interim = text
+                    last_final_emitted = False
 
     # ------------------------------------------------------------------ #
     # Audio helpers

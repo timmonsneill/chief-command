@@ -1,5 +1,6 @@
 """Anthropic API streaming integration for Chief Command v2."""
 
+import asyncio
 import logging
 import os
 import re
@@ -106,77 +107,133 @@ async def stream_turn(
             })
         system_blocks.append(SYSTEM_PROMPT)
 
-    async with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_blocks,
-        messages=history,
-        **extra_kwargs,
-    ) as stream:
-        async for event in stream:
-            event_type = getattr(event, "type", None)
+    # Cancellation semantics (Track B #4):
+    #
+    # The outer task can be cancelled at any time (barge-in, superseded turn,
+    # WS disconnect). Before this fix, after a CancelledError we still:
+    #   - awaited ``stream.get_final_message()`` (another network round-trip,
+    #     and more tokens arriving on the wire)
+    #   - fell through to usage-record assembly
+    #   - emitted ~100–300ms of post-cancel tokens to the WS
+    #
+    # The goal is ZERO extra tokens after cancel. We:
+    #   1. Check cancellation BETWEEN events in the stream loop and break
+    #      immediately if the task is cancelling.
+    #   2. Catch CancelledError around the ``async for`` so an in-flight
+    #      ``__anext__`` doesn't need to complete before we exit.
+    #   3. Do NOT call ``get_final_message()`` on cancel — that would block
+    #      on the rest of the remote stream draining.
+    #   4. Let ``async with client.messages.stream(...)`` handle the
+    #      underlying HTTP close via its context manager — no extra awaits
+    #      from us on the cancel path.
+    #
+    # The outer caller re-raises the CancelledError after teardown (see
+    # websockets._run_llm_turn), which is the required behavior for
+    # cooperative cancellation.
+    cancelled = False
+    try:
+        async with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_blocks,
+            messages=history,
+            **extra_kwargs,
+        ) as stream:
+            try:
+                async for event in stream:
+                    # Fast-path cancel check between events. The ``async for``
+                    # itself is a cancellation point via __anext__, but this
+                    # extra check covers the case where we were cancelled
+                    # while processing the previous event (synchronous work
+                    # between two awaits inside the loop body).
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        cancelled = True
+                        break
 
-            if event_type == "content_block_delta":
-                delta = getattr(event, "delta", None)
-                if delta and getattr(delta, "type", None) == "text_delta":
-                    text = delta.text
-                    full_text.append(text)
-                    await send_token(text)
-                    sentence_buf.append(text)
+                    event_type = getattr(event, "type", None)
 
-                    joined = "".join(sentence_buf)
-                    parts = SENTENCE_FLUSH_RE.split(joined)
-                    if len(parts) > 1:
-                        for sentence in parts[:-1]:
-                            sentence = sentence.strip()
-                            if sentence:
-                                await send_tts_sentence(sentence)
-                        sentence_buf.clear()
-                        if parts[-1]:
-                            sentence_buf.append(parts[-1])
+                    if event_type == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta and getattr(delta, "type", None) == "text_delta":
+                            text = delta.text
+                            full_text.append(text)
+                            await send_token(text)
+                            sentence_buf.append(text)
 
-            elif event_type == "content_block_stop":
-                pass
+                            joined = "".join(sentence_buf)
+                            parts = SENTENCE_FLUSH_RE.split(joined)
+                            if len(parts) > 1:
+                                for sentence in parts[:-1]:
+                                    sentence = sentence.strip()
+                                    if sentence:
+                                        await send_tts_sentence(sentence)
+                                sentence_buf.clear()
+                                if parts[-1]:
+                                    sentence_buf.append(parts[-1])
 
-            elif event_type == "message_delta":
-                delta = getattr(event, "delta", None)
-                if delta:
-                    stop_reason = getattr(delta, "stop_reason", stop_reason) or stop_reason
+                    elif event_type == "content_block_stop":
+                        pass
 
-        final_msg = await stream.get_final_message()
+                    elif event_type == "message_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta:
+                            stop_reason = getattr(delta, "stop_reason", stop_reason) or stop_reason
+            except asyncio.CancelledError:
+                # Outer task cancelled mid-iteration. Don't await
+                # get_final_message() — that would pay for the rest of the
+                # stream to drain (the exact 100–300ms of ghost tokens we're
+                # trying to kill). The ``async with`` context manager closes
+                # the underlying HTTP stream cleanly on exit.
+                cancelled = True
+                raise
 
-        remainder = "".join(sentence_buf).strip()
-        if remainder:
-            await send_tts_sentence(remainder)
+            if cancelled:
+                # Structured exit via the cancel fast-path (current_task().cancelling()).
+                # Surface as CancelledError so the caller's ``except
+                # (WebSocketDisconnect, asyncio.CancelledError)`` branch runs.
+                raise asyncio.CancelledError()
 
-        usage = final_msg.usage
-        usage_dict: UsageRecord = {
-            "input_tokens": getattr(usage, "input_tokens", 0),
-            "output_tokens": getattr(usage, "output_tokens", 0),
-            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
-            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-            "model": model,
-            "stop_reason": stop_reason,
-            "assistant_text": "".join(full_text),
-        }
-        usage_dict["cost_cents"] = _compute_cost_cents(model, usage_dict)
+            final_msg = await stream.get_final_message()
 
-        # Cache telemetry — hits once the prompt is stable across turns.
-        cached = usage_dict["cache_read_input_tokens"]
-        created = usage_dict["cache_creation_input_tokens"]
-        if cached > 0:
-            logger.info(
-                "llm cache HIT model=%s cached=%d input=%d output=%d",
-                model, cached, usage_dict["input_tokens"], usage_dict["output_tokens"],
-            )
-        elif created > 0:
-            logger.info(
-                "llm cache MISS (seed) model=%s created=%d input=%d output=%d",
-                model, created, usage_dict["input_tokens"], usage_dict["output_tokens"],
-            )
-        else:
-            logger.info(
-                "llm cache MISS model=%s input=%d output=%d",
-                model, usage_dict["input_tokens"], usage_dict["output_tokens"],
-            )
-        return usage_dict
+            remainder = "".join(sentence_buf).strip()
+            if remainder:
+                await send_tts_sentence(remainder)
+
+            usage = final_msg.usage
+            usage_dict: UsageRecord = {
+                "input_tokens": getattr(usage, "input_tokens", 0),
+                "output_tokens": getattr(usage, "output_tokens", 0),
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                "model": model,
+                "stop_reason": stop_reason,
+                "assistant_text": "".join(full_text),
+            }
+            usage_dict["cost_cents"] = _compute_cost_cents(model, usage_dict)
+
+            # Cache telemetry — hits once the prompt is stable across turns.
+            cached = usage_dict["cache_read_input_tokens"]
+            created = usage_dict["cache_creation_input_tokens"]
+            if cached > 0:
+                logger.info(
+                    "llm cache HIT model=%s cached=%d input=%d output=%d",
+                    model, cached, usage_dict["input_tokens"], usage_dict["output_tokens"],
+                )
+            elif created > 0:
+                logger.info(
+                    "llm cache MISS (seed) model=%s created=%d input=%d output=%d",
+                    model, created, usage_dict["input_tokens"], usage_dict["output_tokens"],
+                )
+            else:
+                logger.info(
+                    "llm cache MISS model=%s input=%d output=%d",
+                    model, usage_dict["input_tokens"], usage_dict["output_tokens"],
+                )
+            return usage_dict
+    except asyncio.CancelledError:
+        logger.info(
+            "llm stream cancelled model=%s tokens_emitted=%d",
+            model, len(full_text),
+        )
+        raise

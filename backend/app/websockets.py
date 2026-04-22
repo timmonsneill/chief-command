@@ -101,6 +101,24 @@ async def ws_send_bytes(ws: WebSocket, data: bytes) -> None:
         await ws.send_bytes(data)
 
 
+def _drain_queue(queue: asyncio.Queue) -> int:
+    """Empty an asyncio.Queue synchronously. Returns the count drained.
+
+    Track B #6: before cancelling a tts worker, drain anything buffered so
+    the next ``queue.get()`` after the cancel flag can't pull one more
+    sentence and synthesize it before the flag is seen. Ordering matters:
+    drain first, THEN cancel the task.
+    """
+    drained = 0
+    while not queue.empty():
+        try:
+            queue.get_nowait()
+            drained += 1
+        except asyncio.QueueEmpty:
+            break
+    return drained
+
+
 async def _authenticate_ws(ws: WebSocket) -> Optional[str]:
     """Validate the connecting client's JWT.
 
@@ -274,10 +292,34 @@ async def voice_ws(ws: WebSocket) -> None:
 
     async def cancel_current_turn(reason: str) -> None:
         """Cancel an in-flight turn and notify the client. Awaits full teardown
-        so sends are serialized on the WS — no concurrent writes with the turn task."""
+        so sends are serialized on the WS — no concurrent writes with the turn task.
+
+        Track B #5/#6 cancel order:
+          1. Set the per-turn TTS cancel_event (if attached) so synthesize_stream
+             stops at the next chunk boundary.
+          2. Drain the tts_queue so the worker can't grab one more sentence
+             between the cancel flag check and the queue.get() call.
+          3. Cancel the outer turn task (which cascades into the LLM stream +
+             TTS worker CancelledError paths).
+          4. Await full teardown so subsequent WS writes (turn_cancelled +
+             later narrations) don't race with the turn's final writes.
+        """
         nonlocal current_turn_task
         if current_turn_task and not current_turn_task.done():
             logger.info("Voice WS cancelling turn session=%s reason=%s", session_id, reason)
+            # Pull the per-turn event + queue off the task if they were attached.
+            tts_event = getattr(current_turn_task, "_tts_cancel_event", None)
+            tts_queue = getattr(current_turn_task, "_tts_queue", None)
+            if tts_event is not None:
+                tts_event.set()
+            if tts_queue is not None:
+                drained = _drain_queue(tts_queue)
+                if drained:
+                    logger.info(
+                        "Voice WS drained %d buffered TTS sentences on cancel "
+                        "session=%s",
+                        drained, session_id,
+                    )
             current_turn_task.cancel()
             try:
                 await current_turn_task
@@ -517,6 +559,19 @@ async def _run_llm_turn(
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+    # Per-turn TTS cancellation event (Track B #5/#6). Passed into
+    # synthesize_stream so the TTS worker stops emitting audio bytes at the
+    # next chunk boundary when cancel_current_turn flips it. Storing on the
+    # current task lets the outer cancel path find it without a third callback
+    # parameter.
+    tts_cancel_event = asyncio.Event()
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        # Attach to the task so cancel_current_turn (which has the task handle
+        # but not this local) can drain+cancel cleanly. getattr/setattr is the
+        # canonical way to pin arbitrary state on a Task — no class gymnastics.
+        current_task._tts_cancel_event = tts_cancel_event  # type: ignore[attr-defined]
+        current_task._tts_queue = tts_queue  # type: ignore[attr-defined]
 
     if is_deep:
         bridge = random_thinking_phrase()
@@ -533,16 +588,41 @@ async def _run_llm_turn(
         try:
             await ws_send_json(ws, {"type": "tts_start"})
             while True:
+                if tts_cancel_event.is_set():
+                    break
                 sentence = await tts_queue.get()
                 if sentence is None:
                     break
+                if tts_cancel_event.is_set():
+                    break
                 try:
-                    async for chunk in tts_service.synthesize_stream(sentence, speed=current_speed):
+                    async for chunk in tts_service.synthesize_stream(
+                        sentence,
+                        speed=current_speed,
+                        cancel_event=tts_cancel_event,
+                    ):
+                        if tts_cancel_event.is_set():
+                            break
+                        await ws_send_bytes(ws, chunk)
+                except TypeError:
+                    # Fallback for a TTS provider that hasn't been updated
+                    # with the cancel_event kwarg yet. Less responsive, but
+                    # won't kill the turn if a custom provider is slotted in.
+                    async for chunk in tts_service.synthesize_stream(
+                        sentence, speed=current_speed,
+                    ):
+                        if tts_cancel_event.is_set():
+                            break
                         await ws_send_bytes(ws, chunk)
                 except Exception as tts_err:
                     logger.warning("TTS failed for sentence: %s", tts_err)
         finally:
-            await ws_send_json(ws, {"type": "tts_end"})
+            try:
+                await ws_send_json(ws, {"type": "tts_end"})
+            except Exception:
+                # WS may already be torn down on cancel — don't let the
+                # tts_end failure mask the primary cancel.
+                pass
 
     history.append({"role": "user", "content": user_text})
     # Persist the user turn before we kick off the LLM stream. If the stream
@@ -607,6 +687,11 @@ async def _run_llm_turn(
         })
 
     except (WebSocketDisconnect, asyncio.CancelledError):
+        # Track B #5/#6: signal the TTS worker to stop at the next chunk,
+        # drain any buffered sentences (so the worker doesn't grab one more
+        # before seeing the cancel flag), then cancel and await teardown.
+        tts_cancel_event.set()
+        _drain_queue(tts_queue)
         tts_task.cancel()
         try:
             await tts_task
@@ -614,6 +699,9 @@ async def _run_llm_turn(
             pass
         raise
     except Exception:
+        # Non-cancel error path: let the worker drain naturally so any
+        # buffered sentences finish speaking before we close out. Keep the
+        # 2s guard so a hung worker can't hold the turn forever.
         await tts_queue.put(None)
         try:
             await asyncio.wait_for(tts_task, timeout=2.0)

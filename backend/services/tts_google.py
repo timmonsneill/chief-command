@@ -235,7 +235,10 @@ class GoogleTTSService:
     # ------------------------------------------------------------------ #
 
     async def synthesize_stream(
-        self, text: str, speed: float = 1.0
+        self,
+        text: str,
+        speed: float = 1.0,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[bytes]:
         """Stream WAV audio chunks as Google renders them.
 
@@ -246,14 +249,27 @@ class GoogleTTSService:
 
         Falls back to per-sentence synthesize_speech if streaming is not
         available on the installed SDK.
+
+        ``cancel_event`` (Track B #5): optional asyncio.Event checked
+        between chunks / sentences. When set, the generator stops yielding
+        and returns cleanly. This is how ``cancel_current_turn`` in the WS
+        handler kills in-flight audio without waiting for Google's full
+        synthesis to drain. A ``None`` cancel_event is equivalent to
+        pre-patch behavior (stream until done) — callers that don't need
+        cancellation can omit it.
         """
         if not text or not text.strip():
+            return
+
+        if cancel_event is not None and cancel_event.is_set():
             return
 
         client = await self._ensure_client()
 
         if hasattr(client, "streaming_synthesize"):
-            async for chunk in self._streaming_synthesize(client, text, speed):
+            async for chunk in self._streaming_synthesize(
+                client, text, speed, cancel_event=cancel_event
+            ):
                 yield chunk
             return
 
@@ -263,6 +279,8 @@ class GoogleTTSService:
             "per-sentence synthesize_speech()"
         )
         for sentence in self._split_sentences(text):
+            if cancel_event is not None and cancel_event.is_set():
+                return
             if not sentence.strip():
                 continue
             try:
@@ -272,7 +290,11 @@ class GoogleTTSService:
                 continue
 
     async def _streaming_synthesize(
-        self, client, text: str, speed: float
+        self,
+        client,
+        text: str,
+        speed: float,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[bytes]:
         from google.cloud import texttospeech  # type: ignore
 
@@ -311,6 +333,16 @@ class GoogleTTSService:
 
         first_chunk = True
         async for response in response_stream:
+            # Track B #5: check cancel between chunks so a barge-in stops
+            # audio at the next chunk boundary instead of waiting for the
+            # full synthesis to drain from Google.
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info(
+                    "Google TTS streaming_synthesize cancelled mid-stream "
+                    "(text_len=%d, first_chunk=%s)",
+                    len(text), first_chunk,
+                )
+                return
             pcm = getattr(response, "audio_content", b"")
             if not pcm:
                 continue

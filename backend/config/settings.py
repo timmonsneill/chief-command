@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
     GOOGLE_TTS_VOICE: str = "en-US-Chirp3-HD-Aoede"
     GOOGLE_STT_LANGUAGE: str = "en-US"
+    # STT streaming silence timeout (ms). If Google hasn't emitted an
+    # is_final result in this window of silence, we surface the best interim
+    # transcript so the backend isn't hanging on Google. 500ms balances
+    # responsiveness (feels snappy) against noisy inputs (where interim
+    # results flicker before settling into a final).
+    GOOGLE_STT_SILENCE_TIMEOUT_MS: int = 500
 
     model_config = {
         "env_file": ".env",
