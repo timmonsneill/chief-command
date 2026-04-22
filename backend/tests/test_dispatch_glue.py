@@ -180,7 +180,7 @@ async def test_narrate_terminal_order(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from app import websockets as ws_mod
 
-    async def fake_synth(text: str):
+    async def fake_synth(text: str, **_: Any):
         # Simulate two audio chunks.
         yield b"chunk-1"
         yield b"chunk-2"
@@ -270,7 +270,7 @@ async def test_route_task_dispatch_failure_narrates_and_falls_back(
     narrations: list[str] = []
     chat_fallbacks: list[str] = []
 
-    async def fake_narrate(ws: Any, text: str, *, terminal: bool = True) -> None:
+    async def fake_narrate(ws: Any, text: str, *, terminal: bool = True, **_: Any) -> None:
         narrations.append(text)
 
     async def fake_handle_text_turn(
@@ -320,7 +320,7 @@ async def test_route_task_rejects_leading_dash_task_spec(
 
     narrations: list[str] = []
 
-    async def fake_narrate(ws: Any, text: str, *, terminal: bool = True) -> None:
+    async def fake_narrate(ws: Any, text: str, *, terminal: bool = True, **_: Any) -> None:
         narrations.append(text)
 
     monkeypatch.setattr(ws_mod, "_narrate", fake_narrate)

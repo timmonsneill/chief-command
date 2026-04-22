@@ -24,6 +24,10 @@ if str(_BACKEND_ROOT) not in sys.path:
 os.environ.setdefault("OWNER_PASSWORD", "test-password")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
+# Google STT v2 resolves project id from env or service-account JSON. Tests
+# run without credentials, so provide an explicit fake so recognizer-path
+# construction succeeds during unit tests.
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project-no-real-calls")
 
 
 # Replace `services` package with an empty namespace so individual modules

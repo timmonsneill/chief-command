@@ -171,7 +171,10 @@ class TTSService:
         return output.getvalue()
 
     async def synthesize_stream(
-        self, text: str, speed: float = 1.0
+        self,
+        text: str,
+        speed: float = 1.0,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[bytes]:
         """Synthesize text and yield WAV audio chunks as they are produced.
 
@@ -182,11 +185,18 @@ class TTSService:
         Args:
             text: Text string to synthesize.
             speed: Playback speed multiplier.
+            cancel_event: Optional asyncio.Event checked between sentences.
+                When set, the generator returns without synthesizing more —
+                mirrors the Google TTS cancellation contract so the WS
+                handler can kill local-provider audio the same way.
 
         Yields:
             WAV audio byte chunks (one per sentence/segment).
         """
         if not text or not text.strip():
+            return
+
+        if cancel_event is not None and cancel_event.is_set():
             return
 
         await self._ensure_pipeline()
@@ -195,6 +205,12 @@ class TTSService:
         logger.debug("Streaming TTS: %d sentence(s)", len(sentences))
 
         for i, sentence in enumerate(sentences):
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info(
+                    "Local TTS synthesize_stream cancelled at sentence %d/%d",
+                    i, len(sentences),
+                )
+                return
             sentence = sentence.strip()
             if not sentence:
                 continue
