@@ -42,6 +42,10 @@ class GoogleSTTService:
     `transcribe_stream` (only non-empty deltas).
     """
 
+    # Tag used by usage_tracker to look up pricing + write stt_provider=...
+    # Matches the VOICE_PRICING map key prefix "google_stt".
+    provider_name: str = "google"
+
     def __init__(
         self,
         language: str = DEFAULT_LANGUAGE,

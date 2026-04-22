@@ -26,6 +26,10 @@ STREAM_SAMPLE_RATE = 16000
 class STTService:
     """Speech-to-Text using faster-whisper with lazy model loading."""
 
+    # Tag used by usage_tracker to look up pricing + write stt_provider=...
+    # Keep lowercase for consistency with the VOICE_PRICING map keys.
+    provider_name: str = "local"
+
     def __init__(self) -> None:
         self._model = None
         self._lock = asyncio.Lock()

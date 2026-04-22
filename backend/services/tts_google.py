@@ -43,6 +43,10 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 class GoogleTTSService:
     """Streaming TTS using Google Cloud Text-to-Speech (Chirp 3 HD)."""
 
+    # Tag used by usage_tracker to look up pricing + write tts_provider=...
+    # Matches the VOICE_PRICING map key prefix "google_tts".
+    provider_name: str = "google"
+
     def __init__(
         self,
         voice: str = DEFAULT_VOICE,

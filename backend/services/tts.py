@@ -26,6 +26,9 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 class TTSService:
     """Text-to-Speech using Kokoro with lazy model loading."""
 
+    # Tag used by usage_tracker to look up pricing + write tts_provider=...
+    provider_name: str = "local"
+
     def __init__(self) -> None:
         self._pipeline = None
         self._lock = asyncio.Lock()
