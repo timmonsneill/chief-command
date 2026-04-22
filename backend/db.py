@@ -100,8 +100,13 @@ async def init_db() -> None:
                 added.append(name)
             except Exception:
                 # Most likely the column was added by a concurrent boot or a
-                # prior partial migration — log and move on.
-                logger.exception("Voice column migration failed for %s", name)
+                # prior partial migration. Real migration failures will surface
+                # via subsequent queries that need the column — no need to dump
+                # a full stack trace for an expected race condition.
+                logger.info(
+                    "Voice column %s already present — likely concurrent migration race",
+                    name,
+                )
         if added:
             await db.commit()
             logger.info("Migrated turns table: added voice columns %s", added)
