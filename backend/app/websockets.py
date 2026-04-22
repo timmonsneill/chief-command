@@ -163,14 +163,83 @@ async def voice_ws(ws: WebSocket) -> None:
     session_id: Optional[str] = None
     history: list[dict] = []
 
+    # Per-subject scope keying. The in-memory ``_context_store`` is a
+    # module-level dict; before this fix it was keyed by the hardcoded literal
+    # ``"ws"``, meaning every open WS (second tab, second device, reload after
+    # a JWT re-auth, uvicorn restart) stomped on or read someone else's scope.
+    # Key by the JWT subject so each authenticated owner session has its own
+    # slot. ``client_id`` is guaranteed non-None past the auth gate above; we
+    # snapshot into a clearer name for readability.
+    context_key = client_id
     # Default scope: Chief Command. Per owner: scope is ALWAYS a concrete single project.
     # If an earlier session persisted the dissolved "Archie" scope into the
     # in-memory store, migrate it before we use it as the initial value.
-    initial = _migrate_dissolved_scope(_context_store.get("ws")) or DEFAULT_PROJECT
+    initial = _migrate_dissolved_scope(_context_store.get(context_key)) or DEFAULT_PROJECT
     if initial not in AVAILABLE_PROJECTS:
         initial = DEFAULT_PROJECT
     current_project: str = initial
-    _context_store["ws"] = current_project  # persist the possibly-migrated value
+    _context_store[context_key] = current_project  # persist the possibly-migrated value
+
+    # Context-frame gate. The frontend sends a ``{type: "context", project: ...}``
+    # frame immediately after WS open, but that frame arrives asynchronously.
+    # If the owner sends a turn (audio or text) before we process it, the turn
+    # runs with whatever ``current_project`` was rehydrated from the store,
+    # which may be stale from a prior session. Defer any non-context inbound
+    # frames until we either (a) receive a context frame, or (b) hit the
+    # timeout and accept the rehydrated scope as authoritative.
+    #
+    # The timeout is absolute — tracked against the WS accept() moment — so
+    # slow clients that send a context frame ~900ms in still get their scope
+    # applied before the gate opens.
+    #
+    # Implementation is an ``asyncio.Event`` set either by the context-frame
+    # handler below OR by the deadline path in ``_await_context_gate``. User
+    # turns are spawned as child tasks that ``await`` the event; the main
+    # receive loop keeps running so the context frame CAN land mid-deferral.
+    CONTEXT_GATE_TIMEOUT_S = 1.0
+    ws_accepted_at = asyncio.get_event_loop().time()
+
+    context_gate_event = asyncio.Event()
+
+    async def _await_context_gate() -> None:
+        """Block (in the turn task — NOT the receive loop) until we've seen a
+        context frame, or fall through on timeout.
+
+        Called at the head of every user-turn path (text + audio) inside the
+        spawned ``_route_user_turn`` wrapper task. Because the turn runs in a
+        child task, the main receive loop keeps servicing ``ws.receive()`` —
+        that's how a context frame sent ~50ms after a user's first utterance
+        can still flip the gate open and let the deferred turn proceed with
+        the correct scope.
+
+        Timeout: ``CONTEXT_GATE_TIMEOUT_S`` measured against WS accept() time.
+        After that we fall back to the rehydrated subject-keyed scope and log
+        WARNING so the fallback is never silent. The rehydrated scope is
+        already safer than the pre-fix global store — each JWT subject has
+        its own slot in ``_context_store`` now.
+        """
+        if context_gate_event.is_set():
+            return
+        loop = asyncio.get_event_loop()
+        remaining = (ws_accepted_at + CONTEXT_GATE_TIMEOUT_S) - loop.time()
+        if remaining <= 0:
+            if not context_gate_event.is_set():
+                logger.warning(
+                    "voice_ws context-frame gate already past deadline subject=%s "
+                    "falling back to rehydrated scope=%s",
+                    context_key, current_project,
+                )
+                context_gate_event.set()
+            return
+        try:
+            await asyncio.wait_for(context_gate_event.wait(), timeout=remaining)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "voice_ws context-frame gate timed out subject=%s "
+                "falling back to rehydrated scope=%s",
+                context_key, current_project,
+            )
+            context_gate_event.set()
 
     # Rehydrate recent conversation context for the current project scope so
     # reconnects (and uvicorn --reload restarts) don't feel amnesiac. We
@@ -243,7 +312,7 @@ async def voice_ws(ws: WebSocket) -> None:
         if detected == current_project:
             return
         current_project = detected
-        _context_store["ws"] = current_project
+        _context_store[context_key] = current_project
         logger.info(
             "Voice WS project-switch intent detected text=%r -> project=%s",
             user_text[:80], current_project,
@@ -282,11 +351,15 @@ async def voice_ws(ws: WebSocket) -> None:
                         current_project = raw_proj
                     else:
                         current_project = DEFAULT_PROJECT
-                    # Persist the remap so any later _context_store reads are
-                    # already canonical. Key is "ws" (no JWT subject here yet —
-                    # in-process state, restart-ephemeral by design).
-                    _context_store["ws"] = current_project
-                    logger.info("Voice WS context updated project=%s", current_project)
+                    # Persist keyed by JWT subject so per-session scope doesn't
+                    # stomp on other tabs / devices / restarts. See context_key
+                    # note above.
+                    _context_store[context_key] = current_project
+                    context_gate_event.set()  # unblock any deferred user turn
+                    logger.info(
+                        "Voice WS context updated subject=%s project=%s",
+                        context_key, current_project,
+                    )
                     # Confirm the (possibly migrated) scope to the client so the
                     # Provider pill reflects the authoritative server value.
                     try:
@@ -346,11 +419,23 @@ async def voice_ws(ws: WebSocket) -> None:
                 # "switch to Arch", we update scope and still continue the turn
                 # with the new scope so Chief replies already-oriented.
                 await _maybe_switch_project(text_content)
-                logger.info("Voice WS handling text turn session=%s len=%d scope=%s",
-                            sid, len(text_content), current_project)
-                current_turn_task = asyncio.create_task(
-                    _route_user_turn(ws, sid, history, text_content, current_project, current_speed)
-                )
+                # Gate + dispatch happens in a child task so the receive loop
+                # keeps servicing ``ws.receive()`` — a context frame racing
+                # with this turn can still land and flip the gate before we
+                # run the LLM. See _await_context_gate() docstring.
+                async def _gated_text_turn(
+                    sid=sid,
+                    text_content=text_content,
+                    speed=current_speed,
+                ) -> None:
+                    await _await_context_gate()
+                    scope = current_project  # re-read AFTER gate opens
+                    logger.info(
+                        "Voice WS handling text turn session=%s len=%d scope=%s",
+                        sid, len(text_content), scope,
+                    )
+                    await _route_user_turn(ws, sid, history, text_content, scope, speed)
+                current_turn_task = asyncio.create_task(_gated_text_turn())
 
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
@@ -373,9 +458,22 @@ async def voice_ws(ws: WebSocket) -> None:
 
                 await ws_send_json(ws, {"type": "transcript", "content": transcript})
                 await _maybe_switch_project(transcript)
-                current_turn_task = asyncio.create_task(
-                    _route_user_turn(ws, sid, history, transcript, current_project, current_speed)
-                )
+                # See the text-path commentary above — spawn a child task that
+                # awaits the context gate before running the turn, so a context
+                # frame racing with the first utterance still lands first.
+                async def _gated_audio_turn(
+                    sid=sid,
+                    transcript=transcript,
+                    speed=current_speed,
+                ) -> None:
+                    await _await_context_gate()
+                    scope = current_project  # re-read AFTER gate opens
+                    logger.info(
+                        "Voice WS handling audio turn session=%s len=%d scope=%s",
+                        sid, len(transcript), scope,
+                    )
+                    await _route_user_turn(ws, sid, history, transcript, scope, speed)
+                current_turn_task = asyncio.create_task(_gated_audio_turn())
 
             else:
                 logger.warning("Voice WS unknown message shape keys=%s", list(message.keys()))
