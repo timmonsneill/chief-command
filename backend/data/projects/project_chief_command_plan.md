@@ -8,10 +8,6 @@ originSessionId: be67e0d9-9428-4101-bdd8-1f21f3e45b19
 
 Single source of truth for where Chief Command is going. Each phase has a goal, concrete tasks underneath, and what "done" means. Completed phases are marked `[x]`. New phases go at the bottom. Checkbox progress and dated lines feed the in-app Projects dashboard tabs (Plan / Todo / Timeline).
 
-## Current focus
-
-**v1.1 — Gemini voice swap.** v1 shipped 2026-04-18 (voice chat + dispatch bridge). Next priority: swap local Whisper + Kokoro for Gemini Live API to cut end-to-end voice latency from 3-4s to ~1.5-2s. Brain stays on Anthropic API. Builds stay on Max subscription via dispatch bridge. Estimated cost: +$15/mo at 2 hrs/day chat.
-
 ---
 
 ## Milestones (Timeline)
@@ -21,10 +17,18 @@ Single source of truth for where Chief Command is going. Each phase has a goal, 
 - 2026-04-18: Chief Context v1.1 merged — real memory injection + agent roster + project-switch intent + scoped-only design + Chef nickname
 - 2026-04-18: Dispatch Bridge v1 shipped — voice can now say "build X" and dispatch to local `claude` CLI on Max subscription (zero API cost for the work)
 - 2026-04-18: v1 SHIPPED — voice Chief with memory + dispatch end-to-end
+- 2026-04-20: UI overhaul — light theme + steel-blue + amber + Fraunces/Inter + collapsible icon-rail sidebar
+- 2026-04-20: Project dashboards live — CC data moved into repo (`backend/data/projects/`), parser + 5 tabs rendering
+- 2026-04-20: Voice hardening — server-side TTS speed, VAD endpoint tuning, classifier gaps, gRPC+AEC fixes
+- 2026-04-20: PM2 ecosystem deployed — auto-update script, cloudflared Tailscale, dropped Netlify dependency
+- 2026-04-21: Voice hardening v2 merged — scope-isolation fix + barge-in tightening + inline task activity row
+- 2026-04-21: Forge Playwright MCP wired — WS smoke tests, idempotent seed user
+- 2026-04-22: Voice cost tracking shipped — STT seconds + TTS chars recorded per turn, per-provider rollups, UsagePage cost cards + $50 warn banner
+- 2026-04-22: Settings key/value table added — persistent settings storage
 
 ---
 
-## Phase 0 — v3 verification ✅ DONE
+## Phase 0: v3 verification ✅
 
 **Goal:** confirm v3 actually works on Neill's iPhone, not just in Forge's Chromium harness.
 
@@ -39,11 +43,11 @@ Single source of truth for where Chief Command is going. Each phase has a goal, 
 
 **Shipped 2026-04-18.**
 
-## Phase 2 — Dispatch Bridge ✅ DONE (shipped as v1)
+---
+
+## Phase 2: Dispatch Bridge ✅
 
 **Goal:** heavy agent work flows from Chief Command to a `claude` CLI subprocess on Neill's Mac, running under Max — NOT API. Voice dispatches, subprocess executes, live output streams back to the TaskBubble while work runs.
-
-### What landed
 
 - [x] `backend/services/classifier.py` — Haiku classifier labeling every turn chat/task/status/cancel
 - [x] `backend/services/dispatcher.py` — TaskDispatcher with `asyncio.create_subprocess_exec` spawning `claude --print`, env allowlist (strips ANTHROPIC_*, AWS_*, GITHUB_TOKEN, OPENAI_*, custom secrets), max-runtime watchdog (30 min default), SIGTERM→5s→SIGKILL cancel, 8KB task_spec cap, serialized_sender helper
@@ -56,74 +60,112 @@ Single source of truth for where Chief Command is going. Each phase has a goal, 
 
 **Shipped 2026-04-18 across commits `8ab5a7c`, `ba415f5`, `5902298`, `5931b46`.**
 
-## Phase 3 — Per-project dashboards (in progress)
+---
 
-**Goal:** every Chief Command project (Arch, Chief Command, Butler, Archie) gets a rich dashboard matching Arch-style depth.
+## Phase 3: Per-project dashboards ✅
+
+**Goal:** every Chief Command project (Arch, Chief Command, Personal Assist) gets a rich dashboard matching planned depth.
 
 - [x] Infrastructure: `PlanTab` / `TodoTab` / `TimelineTab` / `IntegrationsTab` / `BuildsTab` components render from memory-file checkboxes + git log
-- [x] Arch dashboard: iframes `archdashboard.netlify.app` (external Netlify app)
-- [x] Chief Command plan file structured with phases + checkboxes + milestones → this file
-- [ ] Verify CC dashboard Plan tab renders all 9 phases correctly
+- [x] CC data moved into repo (`backend/data/projects/`) — PROJECTS.json + memory files
+- [x] `project_parser.py` — parses `## Phase N`, `- [x]`/`- [ ]`, `YYYY-MM-DD - Label` patterns
+- [x] Chief Command plan file structured with phases + checkboxes + milestones
+- [x] Arch dashboard configured — `project_archie_voice_app.md` + `project_archie_cost_model.md`
+- [x] Personal Assist dashboard configured — `project_pa_plan.md` + `project_pa_decisions.md`
+- [x] `project_arch_plan.md` created — comprehensive Arch phase plan, 6 phases, 100+ todos (2026-04-22)
+- [ ] Verify CC dashboard Plan tab renders all phases correctly
 - [ ] Verify CC dashboard Todo tab groups by phase
-- [ ] Verify CC dashboard Timeline tab shows dated milestones above
-- [ ] Butler + Archie: populate plan files once those projects kick off
+- [ ] Verify CC dashboard Timeline tab shows dated milestones
 
-**"Done" = tap Chief Command project card, see all tabs populated.**
+**"Done" = tap any project card, see all tabs populated with accurate state.**
 
-## Phase 4 — v1.1 Gemini voice swap (next)
+---
 
-**Goal:** cut end-to-end voice latency from 3-4s to ~1.5-2s by replacing local Whisper + Kokoro with Gemini Live API. Brain stays on Anthropic API. Builds stay on Max via dispatch bridge.
+## Phase 4: Voice hardening ✅
 
-- [ ] Research Gemini Live API auth + audio streaming semantics
-- [ ] `backend/services/stt.py` — replace Whisper with Gemini Live STT adapter (WebSocket client to Gemini, stream audio in, get transcript back)
-- [ ] `backend/services/tts.py` — replace Kokoro with Gemini Live TTS adapter (send text, stream audio back)
-- [ ] `GOOGLE_API_KEY` added to settings + env allowlist for dispatcher subprocess (if needed for `gh` + similar)
-- [ ] Integration test: full round-trip on real audio, measure actual end-to-end latency
-- [ ] Cost dashboard entry — track audio minutes + daily $ estimate
-- [ ] Keep Whisper + Kokoro as fallback behind env toggle (`VOICE_PROVIDER=whisper|gemini`) for offline / cost-cap scenarios
+**Goal:** voice feels natural and reliable on Neill's iPhone — no stuck states, no mis-paced speech, barge-in works.
 
-**Cost target:** ~$4-8/mo at 30 min-1 hr daily voice. ~$15/mo at 2 hr/day.
-**Latency target:** 1.5-2s end-to-end (vs 3-4s today).
-**"Done" = Neill says voice feels like normal conversation on his iPhone.**
+- [x] Server-side TTS speed honors user preference (backend reads `current_speed` parameter)
+- [x] VAD endpoint tuning — reduced false positives, better silence detection
+- [x] Classifier gap fixes — status/cancel turns no longer misfired as chat
+- [x] gRPC + AEC fixes for Google STT voice path
+- [x] Per-subject WS scope keying + context-frame gate (scope isolation bug fixed)
+- [x] Barge-in tightening — grace window tuned, "speaking" state delayed until audio actually plays
+- [x] Cancel semantics tightened + STT silence timeout
+- [x] Narration honors user speed — stuck-state failsafe added
+- [x] `current_speed` threaded through all TTS paths including task-dispatch fallbacks
+- [x] Inline task activity row in voice chat transcript
+- [x] Forge WS scope-isolation smoke tests
 
-## Phase 5 — Chief Command internal dashboard polish
+**Shipped 2026-04-20 and 2026-04-21. Merged as `voice-hardening-2026-04-21` (bf20501).**
 
-**Goal:** flesh out CC's in-app dashboard per Neill's ask. Timeline, master todo, version history, memory breakdown — all visible from the CC project card.
+---
 
-- [ ] Timeline tab shows commit history + milestones prettified (not just raw git log)
-- [ ] Todo tab: master list of everything still [ ] across all memory files
-- [ ] Versions sub-section in Plan tab: v2 / v3 / v1 dispatch / v1.1 etc.
-- [ ] Memory files list with preview + quick-edit
-- [ ] Live agent feed on a dedicated widget — current dispatched tasks + recent sweeps
+## Phase 5: Usage + voice cost tracking ✅
 
-**"Done" = tapping Chief Command project gives a real picture of plan, progress, history, and active work.**
+**Goal:** Neill can see exactly what Chief Command is costing — Claude API + STT + TTS — with real numbers, not guesses.
 
-## Phase 6 — Cost controls
+- [x] `backend/db.py` — idempotent voice-usage columns (`stt_seconds`, `tts_chars`, `stt_provider`, `tts_provider`) on `turns` table
+- [x] Settings key/value table for persistent settings storage
+- [x] `feat(voice): tag STT/TTS services with provider_name for usage tracking`
+- [x] `feat(voice): record STT seconds + TTS chars per turn, emit voice block on usage`
+- [x] `feat(api): expose voice costs on /api/usage/summary + /api/sessions/current`
+- [x] `feat(usage): voice cost tracking (STT + TTS) with per-provider rollups`
+- [x] `feat(types): voice usage interfaces for UsagePage + live usage event`
+- [x] `feat(usage-ui): voice cost cards + $50 warn banner on UsagePage`
+- [x] Rolling Claude API cost bucketed by `turns.created_at` — correct daily rollups
+- [x] TTS chars tallied on successful synthesis only (not on enqueue)
+- [x] `stt_seconds`/`current_speed` threaded through task-dispatch cancel paths
 
-**Goal:** bring monthly API burn down via tighter routing + hard stop. Less urgent after v1.1 lands (brain stays on API but build work is free via Max).
+**Shipped 2026-04-22.**
+
+---
+
+## Phase 6: Cost controls (next)
+
+**Goal:** bring monthly API burn down via tighter routing + hard stop.
 
 - [ ] Extend `backend/services/router.py` with Haiku 4.5 tier for short conversational replies + status checks
 - [ ] Tune `classify_and_route` heuristics: Haiku for <50 tokens of expected output, Sonnet default, Opus on bridge phrase
 - [ ] Backend hard-cap: when `/api/usage/summary.alert_level == "critical"`, disable `/ws/voice` LLM path
 - [ ] Frontend: Usage tab shows clear red banner when hard-capped
 - [ ] Settings-driven caps (`MONTHLY_HARD_CAP_CENTS` env var)
+- [ ] 2-week evaluation window: track daily API cost for baseline before tuning
 
 **"Done" = 1 hour of synthetic conversational use routes mostly to Haiku AND hitting critical threshold actually disables voice.**
 
-## Phase 7 — Always-listening voice (wake-word)
+---
 
-**Goal:** current state says "Tap to start voice" — that's tap-to-activate, not always-on. Claude.ai voice is genuinely ambient. Match that.
+## Phase 7: Internal dashboard polish
 
-- [ ] Decision: KEEP tap-to-activate (battery, privacy) and fix the copy, OR build actual always-listening?
-- [ ] If always-listening: "Hey Chief" wake-word detection (Picovoice Porcupine? Open-source options?)
-- [ ] Alternative: proximity / presence trigger (phone face-up while app open)
+**Goal:** CC's in-app dashboard reflects real plan, progress, history, and active work.
+
+- [ ] Timeline tab shows commit history + milestones prettified (not just raw git log)
+- [ ] Todo tab: master list of everything still `[ ]` across all memory files
+- [ ] Versions sub-section in Plan tab: v2 / v3 / v1 dispatch / voice hardening etc.
+- [ ] Memory files list with preview + quick-edit
+- [ ] Live agent feed widget — current dispatched tasks + recent sweeps
+
+**"Done" = tapping Chief Command project gives a real picture of plan, progress, history, and active work.**
+
+---
+
+## Phase 8: Always-listening voice (wake-word)
+
+**Goal:** move from tap-to-activate toward ambient voice.
+
+- [ ] Decision: keep tap-to-activate (battery, privacy) and fix copy — OR build actual always-listening
+- [ ] If always-listening: "Hey Chief" wake-word detection (Picovoice Porcupine or open-source)
+- [ ] Alternative: proximity/presence trigger (phone face-up while app open)
 - [ ] Update VoicePage copy to match chosen model
 
 **"Done" = voice UX matches the description.**
 
-## Phase 8 — Gemini 2.5 Pro second-opinion reviewer ("Gem")
+---
 
-**Goal:** diversify model family for reviews + long-context research. Gemini's 2M context handles whole-repo scans; different blind spots than Claude reviewers.
+## Phase 9: Gemini 2.5 Pro second-opinion reviewer ("Gem")
+
+**Goal:** diversify model family for reviews + long-context research.
 
 - [ ] Install `google-genai` in backend venv
 - [ ] `GOOGLE_API_KEY` in Settings + backfill pattern
@@ -133,11 +175,13 @@ Single source of truth for where Chief Command is going. Each phase has a goal, 
 - [ ] Update roster to include Gem as 13th member — Opus-tier researcher cousin
 - [ ] Wire Atlas's "use Gem when context > 400k" escalation
 
-**"Done" = Gem appears in Team tab, fires on `/build` flows as a second review pass, finds things Claude reviewers missed.**
+**"Done" = Gem appears in Team tab, fires on `/build` flows as a second review pass.**
 
-## Phase 9 — Mac Mini convergence (Butler host)
+---
 
-**Goal:** dispatch bridge currently depends on Neill's Mac being awake + logged in. For 24/7 reliability, move the dispatch target to the Mac Mini per `project_butler_orchestration.md`.
+## Phase 10: Mac Mini convergence (Butler host)
+
+**Goal:** dispatch bridge 24/7 reliability — move dispatch target to Mac Mini.
 
 - [ ] Install Claude Code on Mac Mini
 - [ ] Claude Code auth via Max account on Mac Mini
@@ -147,24 +191,29 @@ Single source of truth for where Chief Command is going. Each phase has a goal, 
 
 **"Done" = Chief Command dispatches work 24/7 regardless of laptop state.**
 
-## Phase 10 — Observation + closing the loop
+---
 
-**Goal:** Chief's "watches all agents" promise actually observable by Neill over time, not just this-moment state.
+## Phase 11: Observation + closing the loop
 
-- [ ] Live agent feed on a dedicated page — scrolling log of every agent dispatched, their lane, status, output summary, cost
+**Goal:** Chief's "watches all agents" promise is actually observable over time.
+
+- [ ] Live agent feed on a dedicated page — scrolling log of every agent dispatched, lane, status, output summary, cost
 - [ ] Cost per dispatched task, per agent, per day
-- [ ] Pattern detection: which agents drift most? Which reviewers catch the most CRITICALs? Where's the bottleneck?
+- [ ] Pattern detection: which agents drift most? Which reviewers catch the most CRITICALs?
 - [ ] "What did Riggs do last week?" — real answer, not a guess
 
 **"Done" = Neill opens Chief Command and understands what all the agents collectively did over time.**
 
-## Phase 11 — Claude.ai + MCP pivot (deferred decision)
+---
 
-**Goal:** evaluate whether Chief Command should be replaced by Claude.ai directly, with chiefcommand.app becoming a pure MCP server that dispatches to local `claude`. Pro: voice + memory + project context already solved by Claude.ai. Con: loses custom UI and long-running background task UX.
+## Phase 12: Claude.ai + MCP pivot (deferred decision)
 
-- [ ] Use v1.1 for a week, collect honest comparison data
+**Goal:** explicit decision on whether Chief Command stays or becomes a pure MCP server.
+
+- [ ] Use current voice for a week, collect honest comparison data vs. Claude mobile app
 - [ ] Install Claude mobile app, test voice + Projects feature head-to-head
 - [ ] If Claude.ai covers 80%+ of Chief Command's value: design MCP server wrapper around dispatcher + classifier + repo_map
 - [ ] Migrate or retire — don't let two similar UIs compete for the same mindspace
+- [ ] Document decision in a memory file either way
 
-**"Done" = explicit decision documented in a memory file. Either "Chief Command stays, here's why" or "Chief Command → MCP server, retirement plan."**
+**"Done" = explicit decision documented. Either "Chief Command stays, here's why" or "Chief Command → MCP server, retirement plan."**

@@ -4,7 +4,7 @@
     "name": "Arch App",
     "path": "/Users/user/Documents/GitHub/arch-to-freedom-emr",
     "repo_url": "/Users/user/Documents/GitHub/arch-to-freedom-emr",
-    "memory_files": ["project_archie_voice_app.md", "project_archie_cost_model.md"],
+    "memory_files": ["project_arch_plan.md", "project_archie_voice_app.md", "project_archie_cost_model.md"],
     "status": "active",
     "description": "Recovery house EMR — clinical notes, medications, billing, tasks, AI assistant (Archie) for staff.",
     "dashboard_url": "https://archdashboard.netlify.app"
