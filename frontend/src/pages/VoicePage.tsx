@@ -287,6 +287,11 @@ export default function VoicePage() {
         }
 
         if (parsed.type === 'tts_end') {
+          // Any pending speech-start-during-TTS flag is no longer valid once
+          // TTS is over — clear it so a stale mid-sentence echo blip can't
+          // be retroactively used to drop a user utterance captured AFTER
+          // Chief went silent.
+          speechStartedDuringTtsRef.current = false
           if (audioQueueRef.current.length > 0) {
             playNextChunk()
           } else if (!hasStartedAudioRef.current) {
@@ -306,6 +311,7 @@ export default function VoicePage() {
           // in flight at cancel-time can still arrive and land in audioQueueRef;
           // flush so they don't replay on the next turn.
           stopAudioPlayback()
+          speechStartedDuringTtsRef.current = false
           setVoiceState(conversationActive ? 'listening' : 'idle')
         }
 
@@ -429,29 +435,28 @@ export default function VoicePage() {
 
   const { start: startVad, stop: stopVad, speaking: vadSpeaking } = useVad({
     onSpeechStart: useCallback(() => {
-      // If Chief is mid-TTS, do NOT immediately interrupt. Browser AEC on
-      // laptop speakers leaks enough of Chief's own voice that VAD fires on
-      // echo, and an immediate interrupt-then-supersede chain cuts Chief off
-      // every few sentences. Defer the decision to onSpeechEnd, where we
-      // gate on captured-audio duration to distinguish real user speech
-      // (~500ms+) from sub-second echo blips.
-      if (isPlayingAudioRef.current) {
-        speechStartedDuringTtsRef.current = true
-        return
+      // Only gate as "during-TTS" if audio has ACTUALLY started playing, not
+      // just queued (isPlayingAudioRef flips true at queue-pop but decode is
+      // async — hasStartedAudioRef only flips true at source.start(0)). This
+      // avoids dropping user speech in the ~100ms between tts_start and the
+      // first decoded chunk.
+      const chiefAudible = isPlayingAudioRef.current && hasStartedAudioRef.current
+      speechStartedDuringTtsRef.current = chiefAudible
+      console.log('[voice] speech-start chiefAudible=', chiefAudible)
+      if (!chiefAudible) {
+        setVoiceState('speaking')
       }
-      speechStartedDuringTtsRef.current = false
-      setVoiceState('speaking')
     }, []),
     onSpeechEnd: useCallback((audio: Float32Array) => {
-      // 16kHz mono → 8000 samples = 500ms. VAD's redemptionFrames already
-      // pads the tail with ~480ms of trailing silence, so even a quick
-      // "stop" lands well above the threshold. Echo blips that AEC misses
-      // are typically <300ms total — drop those without sending to STT
-      // (otherwise the backend treats the transcribed echo as a new user
-      // turn and supersedes the in-flight one).
       const startedDuringTts = speechStartedDuringTtsRef.current
       speechStartedDuringTtsRef.current = false
-      if (startedDuringTts && audio.length < 8000) {
+      console.log('[voice] speech-end samples=', audio.length, 'duringTts=', startedDuringTts)
+      // 16kHz mono → 4000 samples = 250ms. Only applies when Chief is audibly
+      // speaking — outside of TTS playback, every utterance goes through
+      // regardless of length. Echo blips that AEC misses are typically
+      // <200ms total; real barge-in speech ("stop", "wait") with VAD's
+      // ~480ms redemption pad comfortably clears 250ms.
+      if (startedDuringTts && audio.length < 4000) {
         return
       }
       if (startedDuringTts) {
