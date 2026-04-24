@@ -104,15 +104,17 @@ export default function VoicePage() {
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
-  // Tracks when Chief's AUDIO actually started playing (not when tts_start
-  // arrived). The barge-in grace window is measured against this so we don't
-  // suppress real user interrupts while the first chunk is still decoding.
-  const ttsStartAtRef = useRef<number>(0)
   // Whether the current TTS turn has produced a `source.start(0)` yet. Reset on
   // every tts_start; flipped true when the first chunk actually begins playing.
   // Gates the `setVoiceState('speaking')` transition so the orb doesn't jump to
   // "speaking" during the 50–200ms of silence between tts_start and first audio.
   const hasStartedAudioRef = useRef(false)
+  // True when the in-flight VAD speech segment began while Chief was playing
+  // audio. Used by onSpeechEnd to apply a duration gate before treating it as
+  // a real barge-in — browser AEC leaks enough of Chief's own voice on laptop
+  // speakers that VAD's onSpeechStart fires on echo, so we can't trust it as
+  // an immediate interrupt signal.
+  const speechStartedDuringTtsRef = useRef(false)
   // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
   // Creating a new Audio() per chunk in a WebSocket callback fails silently on
   // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
@@ -195,7 +197,6 @@ export default function VoicePage() {
       // before the first sample is decodable).
       if (!hasStartedAudioRef.current) {
         hasStartedAudioRef.current = true
-        ttsStartAtRef.current = Date.now()
         setVoiceState('speaking')
       }
     } catch {
@@ -428,26 +429,39 @@ export default function VoicePage() {
 
   const { start: startVad, stop: stopVad, speaking: vadSpeaking } = useVad({
     onSpeechStart: useCallback(() => {
-      // Real voice barge-in: if Chief is speaking, cut local audio AND tell
-      // backend to stop generating. iOS/Chrome AEC on the mic (see useVad
-      // constraints) filters Chief's own speaker audio so this fires on
-      // real user speech, not echo. A short grace period after the first
-      // audio chunk starts covers the initial speaker→mic priming before
-      // AEC converges — ~200ms is enough on modern hardware. If regressions
-      // show up as false self-interrupts, bump to 300ms before going higher.
+      // If Chief is mid-TTS, do NOT immediately interrupt. Browser AEC on
+      // laptop speakers leaks enough of Chief's own voice that VAD fires on
+      // echo, and an immediate interrupt-then-supersede chain cuts Chief off
+      // every few sentences. Defer the decision to onSpeechEnd, where we
+      // gate on captured-audio duration to distinguish real user speech
+      // (~500ms+) from sub-second echo blips.
       if (isPlayingAudioRef.current) {
-        const sinceTtsMs = Date.now() - ttsStartAtRef.current
-        if (sinceTtsMs < 200) return
+        speechStartedDuringTtsRef.current = true
+        return
+      }
+      speechStartedDuringTtsRef.current = false
+      setVoiceState('speaking')
+    }, []),
+    onSpeechEnd: useCallback((audio: Float32Array) => {
+      // 16kHz mono → 8000 samples = 500ms. VAD's redemptionFrames already
+      // pads the tail with ~480ms of trailing silence, so even a quick
+      // "stop" lands well above the threshold. Echo blips that AEC misses
+      // are typically <300ms total — drop those without sending to STT
+      // (otherwise the backend treats the transcribed echo as a new user
+      // turn and supersedes the in-flight one).
+      const startedDuringTts = speechStartedDuringTtsRef.current
+      speechStartedDuringTtsRef.current = false
+      if (startedDuringTts && audio.length < 8000) {
+        return
+      }
+      if (startedDuringTts) {
         stopAudioPlayback()
         send(JSON.stringify({ type: 'interrupt' }))
       }
-      setVoiceState('speaking')
-    }, [stopAudioPlayback, send]),
-    onSpeechEnd: useCallback((audio: Float32Array) => {
       setVoiceState('thinking')
       const wav = float32ToWav(audio)
       send(wav)
-    }, [send]),
+    }, [send, stopAudioPlayback]),
   })
 
   useEffect(() => {
