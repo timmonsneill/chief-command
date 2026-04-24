@@ -489,10 +489,13 @@ async def voice_ws(ws: WebSocket) -> None:
             elif "bytes" in message:
                 audio_data: bytes = message["bytes"]
                 logger.info("Voice WS AUDIO inbound: %d bytes", len(audio_data))
-                await cancel_current_turn("superseded")
                 sid = await ensure_session()
-                # Transcribe inline (not in a background task) so we can run
-                # switch detection on the utterance before starting the turn.
+                # Transcribe BEFORE cancelling the in-flight turn. VAD misfires
+                # (ambient noise, keyboard clicks, residual echo) that transcribe
+                # to empty otherwise kill Chief's reply for nothing — user
+                # perceives it as "Chief stopped mid-sentence and never answered."
+                # Only after we have a non-empty transcript is it safe to
+                # supersede the current turn.
                 try:
                     wav_data = await convert_webm_to_wav(audio_data)
                     transcript = await stt_service.transcribe(wav_data)
@@ -502,8 +505,11 @@ async def voice_ws(ws: WebSocket) -> None:
                     continue
 
                 if not transcript:
+                    logger.info("Voice WS empty transcript — not superseding in-flight turn")
                     await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
                     continue
+
+                await cancel_current_turn("superseded")
 
                 # Measure audio duration for STT billing. Best-effort: if
                 # ffprobe / soundfile can't read the WAV we fall back to byte

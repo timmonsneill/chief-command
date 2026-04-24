@@ -157,6 +157,10 @@ export default function VoicePage() {
       currentSourceRef.current = null
     }
     isPlayingAudioRef.current = false
+    // Keep `hasStartedAudioRef` in sync with isPlayingAudioRef. Leaving it
+    // true across cancel boundaries is subtly unsafe for any future check
+    // that reads it alone without also reading isPlayingAudioRef.
+    hasStartedAudioRef.current = false
   }, [])
 
   const playNextChunk = useCallback(async () => {
@@ -211,7 +215,13 @@ export default function VoicePage() {
     path: '/ws/voice',
     onBinary: useCallback((data: ArrayBuffer) => {
       audioQueueRef.current.push(data)
-    }, []),
+      // Kick playback on the FIRST chunk so streaming TTS actually streams.
+      // playNextChunk is a no-op if already playing or queue empty, so calling
+      // it on every push is cheap. Without this, chunks pile up until tts_end
+      // fires playNextChunk and Chief's first audible word can land seconds
+      // after the server started rendering.
+      playNextChunk()
+    }, [playNextChunk]),
     onMessage: useCallback((data: string) => {
       try {
         const parsed = JSON.parse(data) as WsEvent
