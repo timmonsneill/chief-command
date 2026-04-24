@@ -115,6 +115,14 @@ export default function VoicePage() {
   // speakers that VAD's onSpeechStart fires on echo, so we can't trust it as
   // an immediate interrupt signal.
   const speechStartedDuringTtsRef = useRef(false)
+  // True from the MOMENT `tts_start` arrives on the WS, false once the last
+  // decoded chunk's `onended` fires (or on explicit cancel). This closes the
+  // 50–300ms race window between `tts_start` and `source.start(0)` where
+  // `isPlayingAudioRef && hasStartedAudioRef` would both be false and a VAD
+  // speech-start would bypass the echo gate — so the owner's own voice would
+  // supersede Chief's own turn before it became audible. Forge caught this
+  // as the likely root cause of "Chief can't hear me, responds to text."
+  const ttsActiveRef = useRef(false)
   // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
   // Creating a new Audio() per chunk in a WebSocket callback fails silently on
   // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
@@ -157,10 +165,8 @@ export default function VoicePage() {
       currentSourceRef.current = null
     }
     isPlayingAudioRef.current = false
-    // Keep `hasStartedAudioRef` in sync with isPlayingAudioRef. Leaving it
-    // true across cancel boundaries is subtly unsafe for any future check
-    // that reads it alone without also reading isPlayingAudioRef.
     hasStartedAudioRef.current = false
+    ttsActiveRef.current = false
   }, [])
 
   const playNextChunk = useCallback(async () => {
@@ -191,8 +197,16 @@ export default function VoicePage() {
       source.onended = () => {
         currentSourceRef.current = null
         isPlayingAudioRef.current = false
-        if (audioQueueRef.current.length > 0) playNextChunk()
-        else setVoiceState('listening')
+        if (audioQueueRef.current.length > 0) {
+          playNextChunk()
+        } else {
+          // Last chunk drained — TTS playback is fully over. Only clear
+          // ttsActiveRef here (not at tts_end) so the echo gate stays on
+          // through the trailing playback window after the server says
+          // "done streaming chunks."
+          ttsActiveRef.current = false
+          setVoiceState('listening')
+        }
       }
       source.start(0)
       // Only the FIRST chunk of a turn flips the UI into "speaking" — that way
@@ -294,6 +308,10 @@ export default function VoicePage() {
           // here: the 50–200ms gap between tts_start and playable audio was
           // showing a "speaking" label with zero sound coming out.
           hasStartedAudioRef.current = false
+          // Gate the echo filter open IMMEDIATELY — a VAD speech-start during
+          // the 50–300ms gap before the first chunk decodes would otherwise
+          // supersede Chief's own turn. Clear only at real end-of-playback.
+          ttsActiveRef.current = true
         }
 
         if (parsed.type === 'tts_end') {
@@ -309,7 +327,9 @@ export default function VoicePage() {
             // filtered out). No source.start(0) ever fired, so the
             // speaking-state transition in playNextChunk is dead code for this
             // turn — force the UI out of whatever prior state (usually
-            // 'thinking') or it hangs until the next turn.
+            // 'thinking') or it hangs until the next turn. Also release the
+            // echo gate since no audio will ever play.
+            ttsActiveRef.current = false
             setVoiceState(conversationActive ? 'listening' : 'idle')
           } else {
             setVoiceState('listening')
@@ -322,6 +342,7 @@ export default function VoicePage() {
           // flush so they don't replay on the next turn.
           stopAudioPlayback()
           speechStartedDuringTtsRef.current = false
+          ttsActiveRef.current = false
           setVoiceState(conversationActive ? 'listening' : 'idle')
         }
 
@@ -445,15 +466,16 @@ export default function VoicePage() {
 
   const { start: startVad, stop: stopVad, speaking: vadSpeaking } = useVad({
     onSpeechStart: useCallback(() => {
-      // Only gate as "during-TTS" if audio has ACTUALLY started playing, not
-      // just queued (isPlayingAudioRef flips true at queue-pop but decode is
-      // async — hasStartedAudioRef only flips true at source.start(0)). This
-      // avoids dropping user speech in the ~100ms between tts_start and the
-      // first decoded chunk.
-      const chiefAudible = isPlayingAudioRef.current && hasStartedAudioRef.current
-      speechStartedDuringTtsRef.current = chiefAudible
-      console.log('[voice] speech-start chiefAudible=', chiefAudible)
-      if (!chiefAudible) {
+      // Gate is active from tts_start through end-of-playback. Using the
+      // combo `isPlayingAudioRef && hasStartedAudioRef` (previous attempt)
+      // left a 50–300ms race after tts_start where neither was true yet —
+      // VAD would bypass the gate and kill Chief's own turn before audio
+      // became audible. Forge verified this as the likely root cause of
+      // "Chief can't hear me, responds to text."
+      const chiefActive = ttsActiveRef.current
+      speechStartedDuringTtsRef.current = chiefActive
+      console.log('[voice] speech-start chiefActive=', chiefActive)
+      if (!chiefActive) {
         setVoiceState('speaking')
       }
     }, []),
