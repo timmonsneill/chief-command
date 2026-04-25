@@ -494,10 +494,16 @@ function providerBreakdownSummary(
 function VoiceCostRow({
   window,
   warnTotal,
+  warningUsd,
 }: {
   window: VoiceStatRollup
   warnTotal: boolean
+  warningUsd: number
 }) {
+  // Threshold is server-driven via /api/usage/summary.voice_warning_usd so the
+  // string here matches whatever the alert was tripped against. Fallback is
+  // baked in by the `?? 50` at the call site.
+  const thresholdLabel = `$${Math.round(warningUsd)}`
   return (
     <div className="flex gap-3 items-stretch">
       <VoiceCostCard
@@ -516,7 +522,7 @@ function VoiceCostRow({
         label="Voice total"
         icon={CircleDollarSign}
         primaryText={usdToDisplay(window.total_usd)}
-        secondaryText={warnTotal ? 'monthly voice > $50' : 'STT + TTS'}
+        secondaryText={warnTotal ? `monthly voice > ${thresholdLabel}` : 'STT + TTS'}
         warn={warnTotal}
       />
     </div>
@@ -526,9 +532,11 @@ function VoiceCostRow({
 function VoiceSection({
   voice,
   voiceAlert,
+  warningUsd,
 }: {
   voice: { today: VoiceStatRollup; week: VoiceStatRollup; month: VoiceStatRollup }
   voiceAlert: boolean
+  warningUsd: number
 }) {
   type Window = 'today' | 'week' | 'month'
   const [active, setActive] = useState<Window>('today')
@@ -556,7 +564,11 @@ function VoiceSection({
           </button>
         ))}
       </div>
-      <VoiceCostRow window={data} warnTotal={voiceAlert && active === 'month'} />
+      <VoiceCostRow
+        window={data}
+        warnTotal={voiceAlert && active === 'month'}
+        warningUsd={warningUsd}
+      />
     </Section>
   )
 }
@@ -659,12 +671,13 @@ export default function UsagePage() {
         )}
 
         {/* Voice spend alert — independent of Claude alerts. Fires once the
-            rolling monthly STT+TTS total crosses $50. */}
+            rolling monthly STT+TTS total crosses the server-side threshold
+            (settings.monthly_voice_warning_usd, default $50). */}
         {summary?.voice_alert_level === 'warning' && (
           <div className="flex items-center gap-2 p-3 rounded-xl border text-sm bg-status-working/10 border-status-working/30 text-status-working">
             <Mic size={14} className="shrink-0" />
             <span>
-              Voice spend elevated — Google STT+TTS past $50 this month
+              Voice spend elevated — Google STT+TTS past ${Math.round(summary.voice_warning_usd ?? 50)} this month
             </span>
           </div>
         )}
@@ -688,6 +701,7 @@ export default function UsagePage() {
           <VoiceSection
             voice={summary.voice}
             voiceAlert={summary.voice_alert_level === 'warning'}
+            warningUsd={summary.voice_warning_usd ?? 50}
           />
         )}
 

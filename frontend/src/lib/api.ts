@@ -150,6 +150,12 @@ export interface UsageSummary {
   alert_level: 'none' | 'warning' | 'critical'
   voice?: VoiceUsageWindows
   voice_alert_level?: 'none' | 'warning'
+  /**
+   * Monthly voice-spend warning threshold in USD. Server reads this from the
+   * `settings` table per request so the owner can re-tune without a redeploy.
+   * Frontend uses it for the banner copy + card "warn over $X" caption.
+   */
+  voice_warning_usd?: number
 }
 
 export interface ReviewFinding {

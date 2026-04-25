@@ -119,3 +119,59 @@ async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         yield db
+
+
+# ---------------------------------------------------------------------------
+# settings table — tiny key/value store for runtime-tunable knobs.
+#
+# Currently bills exactly one consumer: the monthly voice-spend warning
+# threshold (`monthly_voice_warning_usd`) read by /api/usage/summary so the
+# owner can dial the alert level without a redeploy. Future settings (theme,
+# preferred voice provider, etc.) plug into the same get/set pair.
+#
+# Values are stored as TEXT — callers cast on read. Default is returned when
+# the key is missing OR when the cast fails (so a corrupt value doesn't
+# brick the alert).
+# ---------------------------------------------------------------------------
+
+
+async def get_setting(key: str, default: str | None = None) -> str | None:
+    """Read a settings value by key. Returns ``default`` if missing.
+
+    Always returns the raw TEXT (or default). Callers that need numbers
+    should cast — see ``get_setting_float`` for the float convenience.
+    """
+    async with get_db() as db:
+        cur = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = await cur.fetchone()
+    if row is None:
+        return default
+    return row["value"]
+
+
+async def get_setting_float(key: str, default: float) -> float:
+    """Read a settings value as float. Returns ``default`` on missing or
+    on parse failure — never raises, so a corrupted row can't break callers.
+    """
+    raw = await get_setting(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "settings: key=%s value=%r is not a valid float, using default=%s",
+            key, raw, default,
+        )
+        return default
+
+
+async def set_setting(key: str, value: str) -> None:
+    """UPSERT a settings value. SQLite's ON CONFLICT(key) handles re-writes."""
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await db.commit()

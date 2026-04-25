@@ -17,7 +17,7 @@ from slowapi.util import get_remote_address
 
 from app.websockets import router as ws_router
 from config.settings import settings
-from db import init_db
+from db import get_setting_float, init_db
 from services import stt_service, tts_service
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
@@ -85,10 +85,13 @@ _OWNER_HASH: str = hash_password(settings.OWNER_PASSWORD)
 
 MONTHLY_WARNING_CENTS = 20_000
 MONTHLY_CRITICAL_CENTS = 30_000
-# Voice (Google STT + TTS combined) monthly spend alert threshold. Tripped
-# when rolling_totals.voice.month.total_usd crosses this value. Independent
-# of the Claude thresholds — frontend shows a separate amber banner.
-MONTHLY_VOICE_WARNING_USD = 50.0
+# Voice (Google STT + TTS combined) monthly spend alert threshold default.
+# The live value is read from the `settings` table at request time via
+# ``get_setting_float("monthly_voice_warning_usd", DEFAULT_MONTHLY_VOICE_WARNING_USD)``,
+# so the owner can re-tune the threshold without a redeploy. Value here is
+# the fallback used when the row is absent or unparseable.
+DEFAULT_MONTHLY_VOICE_WARNING_USD = 50.0
+SETTING_KEY_MONTHLY_VOICE_WARNING_USD = "monthly_voice_warning_usd"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 
 
@@ -367,16 +370,23 @@ async def api_usage_summary(subject: str = Depends(require_auth)) -> dict:
 
     # Separate voice alert — kept independent of the Claude thresholds so the
     # frontend can show a calmer banner colour for voice overspend without
-    # turning the hero Claude cards amber.
+    # turning the hero Claude cards amber. Threshold reads from settings each
+    # request so the owner can tune it without a redeploy; falls back to the
+    # baked-in default if the row is missing or unparseable.
     month_voice_usd = (
         totals.get("voice", {}).get("month", {}).get("total_usd", 0.0)
     )
-    voice_alert_level = "warning" if month_voice_usd >= MONTHLY_VOICE_WARNING_USD else "none"
+    voice_warning_usd = await get_setting_float(
+        SETTING_KEY_MONTHLY_VOICE_WARNING_USD,
+        DEFAULT_MONTHLY_VOICE_WARNING_USD,
+    )
+    voice_alert_level = "warning" if month_voice_usd >= voice_warning_usd else "none"
 
     return {
         **totals,
         "alert_level": alert_level,
         "voice_alert_level": voice_alert_level,
+        "voice_warning_usd": voice_warning_usd,
     }
 
 

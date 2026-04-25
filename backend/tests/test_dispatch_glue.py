@@ -450,3 +450,352 @@ async def test_tts_char_tally_excludes_failed_synthesis(
     assert captured["chars"] == len("second sentence of text"), (
         f"expected tally to reflect only the successful synth, got {captured['chars']!r}"
     )
+
+
+# ---------------------------------------- fix: cancel-path billing
+#
+# Riggs CRITICAL 2026-04-24 — barge-in / supersede / task-cancel raise
+# CancelledError inside _run_llm_turn before the success-path persistence.
+# Google has already billed for the audio seconds we sent to STT and the
+# chars we sent to TTS, so we must mirror that on disk. The finally guard
+# in _run_llm_turn writes a partial-turn row + STT/TTS usage whenever the
+# success path didn't.
+
+
+@pytest.mark.asyncio
+async def test_run_llm_turn_records_voice_usage_on_cancel_midstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel after one TTS sentence has been synthesized → record_tts_usage
+    fires on the cancel path with the chars synthesized so far.
+
+    Mirrors the user-visible behavior: the user barges in mid-reply, Google
+    has already billed for the first sentence's TTS chars, and the partial
+    audio seconds for the user's utterance are real spend. /api/usage rollups
+    must reflect both legs.
+    """
+    from app import websockets as ws_mod
+
+    monkeypatch.setattr(
+        ws_mod, "classify_and_route", lambda text: ("haiku", False),
+    )
+
+    # Slow stream: emit the first sentence, then sleep long enough for the
+    # outer cancel to land BEFORE the second sentence is enqueued.
+    sentence_one_event = asyncio.Event()
+
+    async def slow_stream_turn(
+        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        project_scope: str, system_blocks: Any,
+    ) -> dict:
+        await send_tts_sentence("first cancelled sentence")  # 24 chars
+        sentence_one_event.set()
+        # Hold long enough that the test's cancel lands first. If cancel
+        # doesn't reach us we'd happily keep streaming.
+        await asyncio.sleep(5.0)
+        await send_tts_sentence("second never reaches tts")
+        return {
+            "assistant_text": "first cancelled sentence",
+            "input_tokens": 1, "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+        }
+
+    monkeypatch.setattr(ws_mod, "stream_turn", slow_stream_turn)
+    monkeypatch.setattr(
+        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+    )
+
+    # synthesize_stream succeeds quickly so the first sentence's chars do
+    # land in tts_char_total before cancel.
+    async def fast_synth(sentence: str, **_: Any):
+        yield b"audio"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", fast_synth)
+
+    # Persistence stubs — capture all record_* calls so we can assert the
+    # cancel path wrote both STT and TTS rows.
+    record_turn_calls: list[dict] = []
+    record_stt_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def noop_append_turn(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": len(record_turn_calls), "cost_cents": 0}
+
+    async def fake_record_stt_usage(**kwargs: Any) -> dict:
+        record_stt_calls.append(kwargs)
+        return {
+            "stt_seconds": kwargs.get("audio_seconds", 0.0),
+            "stt_cost_usd": 0.0,
+            "stt_provider": kwargs.get("provider", "local"),
+        }
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {
+            "tts_chars": kwargs.get("chars", 0),
+            "tts_cost_usd": 0.0,
+            "tts_provider": kwargs.get("provider", "local"),
+        }
+
+    monkeypatch.setattr(ws_mod, "append_turn", noop_append_turn)
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_stt_usage", fake_record_stt_usage)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+
+    ws = FakeWebSocket()
+
+    async def run_turn():
+        await ws_mod._run_llm_turn(
+            ws=ws,
+            session_id="sess-cancel",
+            history=[],
+            user_text="hello",
+            project_scope="chief",
+            stt_seconds=2.5,  # real audio spend that must be billed
+        )
+
+    task = asyncio.create_task(run_turn())
+    # Wait until the first sentence has been enqueued + synthesized.
+    await asyncio.wait_for(sentence_one_event.wait(), timeout=2.0)
+    # Give tts_worker a tick to actually run synthesize_stream and bump
+    # tts_char_total before we cancel.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Cancel-path billing — the success path never ran, but the finally
+    # guard must have written ONE turn row with the partial assistant text
+    # + STT seconds + TTS chars for the synthesized sentence.
+    assert len(record_turn_calls) == 1, (
+        f"expected exactly one partial turn row on cancel; got {len(record_turn_calls)}"
+    )
+    partial = record_turn_calls[0]
+    # Cost-model expectation: zero LLM tokens (we didn't get a final usage).
+    assert partial["usage_dict"]["input_tokens"] == 0
+    assert partial["usage_dict"]["output_tokens"] == 0
+
+    # STT leg recorded with real seconds.
+    assert len(record_stt_calls) == 1, (
+        f"expected STT usage write on cancel; got {record_stt_calls}"
+    )
+    assert record_stt_calls[0]["audio_seconds"] == 2.5
+
+    # TTS leg recorded with the chars we actually synthesized before cancel.
+    assert len(record_tts_calls) == 1, (
+        f"expected TTS usage write on cancel; got {record_tts_calls}"
+    )
+    assert record_tts_calls[0]["chars"] == len("first cancelled sentence"), (
+        f"expected {len('first cancelled sentence')} TTS chars billed on cancel, "
+        f"got {record_tts_calls[0]['chars']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_llm_turn_skips_partial_billing_on_clean_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No partial-turn row when the success path already wrote one.
+
+    Guards against the finally guard double-billing a fully-completed turn.
+    """
+    from app import websockets as ws_mod
+
+    monkeypatch.setattr(
+        ws_mod, "classify_and_route", lambda text: ("haiku", False),
+    )
+
+    async def fake_stream_turn(
+        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        project_scope: str, system_blocks: Any,
+    ) -> dict:
+        await send_tts_sentence("only sentence")
+        return {
+            "assistant_text": "only sentence",
+            "input_tokens": 5, "output_tokens": 3,
+            "cache_read_input_tokens": 0,
+        }
+
+    monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
+    monkeypatch.setattr(
+        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+    )
+
+    async def fast_synth(sentence: str, **_: Any):
+        yield b"audio"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", fast_synth)
+
+    record_turn_calls: list[dict] = []
+    record_stt_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def noop_append_turn(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": len(record_turn_calls), "cost_cents": 0}
+
+    async def fake_record_stt_usage(**kwargs: Any) -> dict:
+        record_stt_calls.append(kwargs)
+        return {"stt_seconds": 0.0, "stt_cost_usd": 0.0, "stt_provider": "local"}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": 0, "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    async def fake_get_session_totals(session_id: str) -> dict:
+        return {"cost_cents": 0, "voice": {"total_usd": 0.0}}
+
+    monkeypatch.setattr(ws_mod, "append_turn", noop_append_turn)
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_stt_usage", fake_record_stt_usage)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+    monkeypatch.setattr(ws_mod, "get_session_totals", fake_get_session_totals)
+
+    ws = FakeWebSocket()
+    await ws_mod._run_llm_turn(
+        ws=ws,
+        session_id="sess-clean",
+        history=[],
+        user_text="hi",
+        project_scope="chief",
+        stt_seconds=1.0,
+    )
+
+    # Exactly ONE turn row + one of each usage call — finally guard saw
+    # ``persisted=True`` and skipped the partial-record path.
+    assert len(record_turn_calls) == 1
+    assert len(record_stt_calls) == 1
+    assert len(record_tts_calls) == 1
+
+
+# ---------------------------------------- fix: narrate billing
+#
+# Riggs CRITICAL 2026-04-24 — every _narrate() call is real Google TTS
+# spend. Before this fix, dispatch / status / cancel narrations went out
+# unbilled. Now the helper writes a synthetic narration turn row +
+# record_tts_usage when synthesis completes successfully and a session_id
+# is provided.
+
+
+@pytest.mark.asyncio
+async def test_narrate_records_tts_usage_when_session_id_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful narration with session_id produces exactly one turn
+    row tagged 'narration' + one record_tts_usage call with the right
+    char count."""
+    from app import websockets as ws_mod
+
+    async def fake_synth(text: str, **_: Any):
+        yield b"audio-chunk"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", fake_synth)
+
+    record_turn_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": len(record_turn_calls), "cost_cents": 0}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": kwargs.get("chars", 0), "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+
+    ws = FakeWebSocket()
+    text = "Task complete. Exit code 0."
+    await ws_mod._narrate(ws, text, terminal=True, session_id="sess-narrate")
+
+    assert len(record_turn_calls) == 1, (
+        f"expected one narration turn row, got {len(record_turn_calls)}"
+    )
+    assert record_turn_calls[0]["model"] == "narration"
+    assert record_turn_calls[0]["assistant_text"] == text
+
+    assert len(record_tts_calls) == 1
+    assert record_tts_calls[0]["chars"] == len(text)
+
+
+@pytest.mark.asyncio
+async def test_narrate_no_billing_when_session_id_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backwards-compat: callers that don't pass session_id still work
+    without crashing AND don't produce phantom turn rows.
+
+    Defends the existing test suite (which calls _narrate without a session
+    in test_narrate_terminal_order / test_narrate_non_terminal_omits_message_done)
+    from regressing.
+    """
+    from app import websockets as ws_mod
+
+    async def fake_synth(text: str, **_: Any):
+        yield b"audio"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", fake_synth)
+
+    record_turn_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": 1, "cost_cents": 0}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": 0, "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+
+    ws = FakeWebSocket()
+    await ws_mod._narrate(ws, "no session here", terminal=True)
+
+    assert record_turn_calls == []
+    assert record_tts_calls == []
+
+
+@pytest.mark.asyncio
+async def test_narrate_no_billing_on_synthesis_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If synthesize_stream raises, no chars went to Google → no billing."""
+    from app import websockets as ws_mod
+
+    async def boom_synth(text: str, **_: Any):
+        raise RuntimeError("Google TTS outage")
+        yield b""  # pragma: no cover — async generator structural requirement
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", boom_synth)
+
+    record_turn_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": 1, "cost_cents": 0}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": 0, "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+
+    ws = FakeWebSocket()
+    await ws_mod._narrate(ws, "this won't synth", session_id="sess-fail")
+
+    # Not billed: synth raised before any chunk made it out, so Google
+    # didn't charge us either.
+    assert record_turn_calls == []
+    assert record_tts_calls == []

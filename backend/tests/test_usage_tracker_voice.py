@@ -629,6 +629,44 @@ async def test_ws_flow_local_mode_records_zero_cost(initialised_db):
 # End-to-end sanity
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# settings table — runtime-tunable knobs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_setting_returns_default_when_missing(initialised_db):
+    """A fresh DB has no rows in `settings`; reads must return the default."""
+    from db import get_setting, get_setting_float
+
+    assert await get_setting("nonexistent") is None
+    assert await get_setting("nonexistent", default="fallback") == "fallback"
+    assert await get_setting_float("nonexistent_float", 50.0) == 50.0
+
+
+@pytest.mark.asyncio
+async def test_set_then_get_setting_round_trip(initialised_db):
+    """UPSERT semantics: write then read returns the latest value."""
+    from db import get_setting, get_setting_float, set_setting
+
+    await set_setting("monthly_voice_warning_usd", "75.0")
+    assert await get_setting("monthly_voice_warning_usd") == "75.0"
+    assert await get_setting_float("monthly_voice_warning_usd", 50.0) == 75.0
+
+    # Re-write — ON CONFLICT replaces.
+    await set_setting("monthly_voice_warning_usd", "100.0")
+    assert await get_setting_float("monthly_voice_warning_usd", 50.0) == 100.0
+
+
+@pytest.mark.asyncio
+async def test_get_setting_float_falls_back_on_garbage(initialised_db):
+    """Corrupted text in the table must not break the caller — return default."""
+    from db import get_setting_float, set_setting
+
+    await set_setting("monthly_voice_warning_usd", "not-a-number")
+    # Rather than raising, fall back to the default.
+    assert await get_setting_float("monthly_voice_warning_usd", 50.0) == 50.0
+
+
 @pytest.mark.asyncio
 async def test_end_to_end_google_turn_math(initialised_db):
     """Record a turn with 30s STT + 1200-char TTS @ google rates.

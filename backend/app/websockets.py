@@ -593,6 +593,16 @@ async def _run_llm_turn(
     (zero for text-mode turns). Recorded against the turn row alongside the
     Claude token cost and the total characters sent to TTS (tallied below
     as sentences are queued).
+
+    Cancel-path billing (Riggs CRITICAL 2026-04-24): barge-in / supersede /
+    task-cancel raise CancelledError before the success-path persistence
+    runs. Google has already billed for the audio seconds we sent to STT and
+    the chars we sent to TTS — we MUST mirror that on disk or rolling totals
+    silently under-count. The ``finally`` block writes a partial-turn row
+    when nothing was persisted on the success path AND there was real
+    voice activity. ``cost_cents=0`` because LLM-token billing depends on
+    a final usage block we never received on cancel; STT/TTS legs are
+    populated normally so the dashboard reflects what Google actually billed.
     """
     model, is_deep = classify_and_route(user_text)
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
@@ -602,6 +612,13 @@ async def _run_llm_turn(
     # counts (including the bridge "thinking" phrase when routing deep), since
     # Google bills the full input text per synthesize call.
     tts_char_total = 0
+    # Tokens we've emitted to the client so far. Used on the cancel path to
+    # persist a partial assistant_text on the turn row — easier debugging than
+    # a blank assistant column on a partial turn.
+    streamed_tokens: list[str] = []
+    # Flipped to True after the success path writes the turn row + voice
+    # usage. The cancel/finally guard checks this so we don't double-record.
+    persisted = False
     # Per-turn TTS cancellation event (Track B #5/#6). Passed into
     # synthesize_stream so the TTS worker stops emitting audio bytes at the
     # next chunk boundary when cancel_current_turn flips it. Storing on the
@@ -626,6 +643,7 @@ async def _run_llm_turn(
         await tts_queue.put(bridge)
 
     async def send_token(text: str) -> None:
+        streamed_tokens.append(text)
         await ws_send_json(ws, {"type": "token", "text": text})
 
     async def send_tts_sentence(sentence: str) -> None:
@@ -749,6 +767,10 @@ async def _run_llm_turn(
             provider=getattr(tts_service, "provider_name", "local"),
             chars=tts_char_total,
         )
+        # Mark recorded BEFORE get_session_totals so a finally-path retry
+        # can't double-write if some downstream throw (network glitch on the
+        # usage send) trips us into the cancel guard.
+        persisted = True
 
         totals = await get_session_totals(session_id)
 
@@ -799,6 +821,70 @@ async def _run_llm_turn(
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             tts_task.cancel()
         raise
+    finally:
+        # CRITICAL — cancel-path billing.
+        #
+        # If the success path persisted, ``persisted`` is True and we no-op.
+        # Otherwise we MAY have already had real voice spend before the cancel
+        # arrived: STT seconds were billed when ``stt_service.transcribe``
+        # ran (back in the receive loop), and TTS chars were billed each time
+        # ``synthesize_stream`` returned without raising (see tts_worker —
+        # only successful synth bumps ``tts_char_total``). Persist whatever
+        # is real so /api/usage rollups match what Google actually charged.
+        #
+        # We deliberately do NOT call ws_send_json here — the connection is
+        # often already torn down on the cancel path, and the user-visible
+        # frame ``turn_cancelled`` is sent by ``cancel_current_turn``. This
+        # block exists purely to keep the books straight.
+        if not persisted and (stt_seconds > 0 or tts_char_total > 0):
+            try:
+                # Build a usage_dict that records 0 LLM tokens — we never got
+                # a final usage block, and undercounting LLM cost is the
+                # correct behaviour (Anthropic doesn't bill cancelled streams
+                # for output tokens we never received).
+                partial_usage = {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "assistant_text": "".join(streamed_tokens),
+                }
+                partial_assistant = partial_usage["assistant_text"]
+                # NOTE: cost_cents is computed from the (zero) token counts
+                # so the row reflects $0 LLM spend. The voice legs below
+                # carry the actual Google bill.
+                turn = await record_turn(
+                    session_id=session_id,
+                    model=model,
+                    usage_dict=partial_usage,
+                    user_text=user_text,
+                    assistant_text=partial_assistant,
+                )
+                if stt_seconds > 0:
+                    await record_stt_usage(
+                        turn_id=turn["id"],
+                        provider=getattr(stt_service, "provider_name", "local"),
+                        audio_seconds=stt_seconds,
+                    )
+                if tts_char_total > 0:
+                    await record_tts_usage(
+                        turn_id=turn["id"],
+                        provider=getattr(tts_service, "provider_name", "local"),
+                        chars=tts_char_total,
+                    )
+                logger.info(
+                    "Voice WS persisted partial-turn voice usage on cancel "
+                    "session=%s turn_id=%s stt_seconds=%.2f tts_chars=%d",
+                    session_id, turn["id"], stt_seconds, tts_char_total,
+                )
+            except Exception as exc:
+                # Never let a billing-record failure mask the original cancel/
+                # error — this is a best-effort double-entry guard, not a hard
+                # invariant the caller needs to know about.
+                logger.warning(
+                    "Voice WS partial-turn billing record failed session=%s: %s",
+                    session_id, exc,
+                )
 
 
 async def _handle_text_turn(
@@ -915,6 +1001,7 @@ async def _route_task(
                 ws,
                 "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
                 speed=current_speed,
+                session_id=session_id,
             )
             return
 
@@ -924,10 +1011,18 @@ async def _route_task(
             # Chief can explain rather than silently fail. Thread current_speed
             # and stt_seconds so the narration honors the user's voice rate
             # and the STT leg gets billed against the turn row.
-            await ws_send_json(ws, {
-                "type": "token",
-                "text": f"I can't dispatch — no local repo configured for {current_project}. ",
-            })
+            #
+            # Pre-2026-04-24 this branch sent a raw `token` frame and only
+            # the chat fallback got TTS — meaning users on /voice heard
+            # nothing about the missing repo. Switch to _narrate for parity
+            # with every other path (and so the leg gets billed).
+            await _narrate(
+                ws,
+                f"I can't dispatch — no local repo configured for {current_project}.",
+                terminal=False,
+                speed=current_speed,
+                session_id=session_id,
+            )
             await _handle_text_turn(
                 ws, session_id, history, task_spec, current_project,
                 current_speed, stt_seconds=stt_seconds,
@@ -964,6 +1059,7 @@ async def _route_task(
                 ws,
                 f"Task complete. Exit code {exit_code}. {summary[:160]}",
                 speed=current_speed,
+                session_id=session_id,
             )
 
         try:
@@ -979,6 +1075,7 @@ async def _route_task(
                 ws,
                 "Still working on the previous task. Say status for an update, or stop to cancel.",
                 speed=current_speed,
+                session_id=session_id,
             )
             return
 
@@ -1002,6 +1099,7 @@ async def _route_task(
             "I'll let you know when it's done.",
             terminal=False,
             speed=current_speed,
+            session_id=session_id,
         )
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — propagate so the
@@ -1018,6 +1116,7 @@ async def _route_task(
             ws,
             f"Task dispatch failed: {exc}. Staying on chat.",
             speed=current_speed,
+            session_id=session_id,
         )
         # Fall back to chat so the user still gets a response. Thread
         # current_speed + stt_seconds so the fallback LLM turn narrates at
@@ -1046,6 +1145,7 @@ async def _route_status(
             ws,
             "No task running right now. Ask me something or give me a build task.",
             speed=current_speed,
+            session_id=session_id,
         )
         return
 
@@ -1076,6 +1176,7 @@ async def _route_status(
         ws,
         f"{sentence} Running for {elapsed // 60} minutes {elapsed % 60} seconds.",
         speed=current_speed,
+        session_id=session_id,
     )
 
 
@@ -1094,9 +1195,15 @@ async def _route_cancel(
             "task_id": handle.task_id,
             "reason": "owner-requested",
         })
-        await _narrate(ws, "Cancelled. Task killed.", speed=current_speed)
+        await _narrate(
+            ws, "Cancelled. Task killed.",
+            speed=current_speed, session_id=session_id,
+        )
     else:
-        await _narrate(ws, "Nothing to cancel — no task running.", speed=current_speed)
+        await _narrate(
+            ws, "Nothing to cancel — no task running.",
+            speed=current_speed, session_id=session_id,
+        )
 
 
 async def _narrate(
@@ -1106,6 +1213,7 @@ async def _narrate(
     terminal: bool = True,
     speed: float = 1.0,
     cancel_event: Optional[asyncio.Event] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Send a short line of text as a token + trigger TTS.
 
@@ -1118,11 +1226,23 @@ async def _narrate(
     CancelledError to reach the next await point. Defaults to the running
     task's ``_tts_cancel_event`` attribute if set (same pattern
     ``_run_llm_turn`` and ``cancel_current_turn`` use).
+
+    ``session_id`` — when provided AND TTS synthesis completes without
+    raising, the chars sent to Google get persisted as a synthetic
+    narration turn row (cost_cents=0, model="narration"). This was a real
+    spend leak: every "task complete", "cancelled", "no task running",
+    dispatch failure narration etc. was a billed Google TTS call that
+    /api/usage saw zero of. Riggs CRITICAL 2026-04-24.
     """
     if cancel_event is None:
         task = asyncio.current_task()
         if task is not None:
             cancel_event = getattr(task, "_tts_cancel_event", None)
+    # Track whether synthesis fully completed without raising — only then
+    # has Google billed for the input chars. A raised exception means
+    # nothing went out; a cancelled mid-stream means Google still billed
+    # for the full input we handed it.
+    tts_billed = False
     try:
         await ws_send_json(ws, {"type": "token", "text": text + " "})
         await ws_send_json(ws, {"type": "tts_start"})
@@ -1131,6 +1251,9 @@ async def _narrate(
                 text, speed=speed, cancel_event=cancel_event,
             ):
                 await ws_send_bytes(ws, chunk)
+            # Reached only if the async generator drained cleanly — provider
+            # accepted the input and streamed it back. Bills as a real send.
+            tts_billed = True
         except Exception as exc:
             logger.warning("narration TTS failed: %s", exc)
         await ws_send_json(ws, {"type": "tts_end"})
@@ -1140,6 +1263,38 @@ async def _narrate(
         # WS may be gone mid-narration — swallow so the caller (callback or
         # router) doesn't propagate a disconnect as a turn error.
         logger.warning("narration send failed: %s", exc)
+
+    # Bill the narration. Synthetic turn row: cost_cents=0 (no LLM tokens),
+    # model tagged "narration" so the by_model rollup can distinguish these
+    # from real Chief replies. user_text/assistant_text both reflect the
+    # narration line so the audit log is readable.
+    if tts_billed and session_id is not None and text:
+        try:
+            turn = await record_turn(
+                session_id=session_id,
+                model="narration",
+                usage_dict={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                user_text="",
+                assistant_text=text,
+            )
+            await record_tts_usage(
+                turn_id=turn["id"],
+                provider=getattr(tts_service, "provider_name", "local"),
+                chars=len(text),
+            )
+        except Exception as exc:
+            # Never let a billing-record failure surface — narration is
+            # already played at this point, the user shouldn't see a noisy
+            # error because the audit row failed.
+            logger.warning(
+                "narration billing record failed session=%s: %s",
+                session_id, exc,
+            )
 
 
 @router.websocket("/ws/terminal")
