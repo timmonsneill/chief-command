@@ -750,6 +750,15 @@ async def _run_llm_turn(
             user_text=user_text,
             assistant_text=assistant_text,
         )
+        # CRITICAL — flip ``persisted`` IMMEDIATELY after the turn row exists,
+        # BEFORE the STT/TTS legs (Riggs 2026-04-24 round 2). Semantic is "row
+        # exists", not "fully complete". If a CancelledError lands at the await
+        # between record_turn and record_stt_usage, the success-path leaves
+        # tts_chars=0 / stt_seconds=0 on the row; the finally guard sees
+        # persisted=True and skips its partial-write block — so the cancel
+        # cannot double-write a second turn row + duplicate usage rows. A rare
+        # under-bill on this exact race is acceptable; double-bill is not.
+        persisted = True
 
         # Record STT + TTS usage against the turn row. Always record both legs
         # (even when seconds/chars are zero, e.g. text-mode turn or TTS that
@@ -767,10 +776,6 @@ async def _run_llm_turn(
             provider=getattr(tts_service, "provider_name", "local"),
             chars=tts_char_total,
         )
-        # Mark recorded BEFORE get_session_totals so a finally-path retry
-        # can't double-write if some downstream throw (network glitch on the
-        # usage send) trips us into the cancel guard.
-        persisted = True
 
         totals = await get_session_totals(session_id)
 
@@ -1007,25 +1012,22 @@ async def _route_task(
 
         repo = get_repo_path(current_project)
         if repo is None or not repo.exists():
-            # No local repo configured for this scope. Fall back to chat so
-            # Chief can explain rather than silently fail. Thread current_speed
-            # and stt_seconds so the narration honors the user's voice rate
-            # and the STT leg gets billed against the turn row.
+            # No local repo configured for this scope. The narration IS the
+            # reply — it explains why we couldn't dispatch and the user can
+            # ask a follow-up if they want more.
             #
-            # Pre-2026-04-24 this branch sent a raw `token` frame and only
-            # the chat fallback got TTS — meaning users on /voice heard
-            # nothing about the missing repo. Switch to _narrate for parity
-            # with every other path (and so the leg gets billed).
+            # Riggs CRITICAL 2026-04-24 round 2: previously this fell through
+            # to ``_handle_text_turn`` AFTER the narration, which produced
+            # two assistant bubbles + two TTS streams for a single user
+            # input (every ``tts_start`` frame is a bubble boundary on the
+            # frontend). Drop the chained text turn — narration is now
+            # terminal AND billed (carries its own narration turn row +
+            # TTS usage write).
             await _narrate(
                 ws,
                 f"I can't dispatch — no local repo configured for {current_project}.",
-                terminal=False,
                 speed=current_speed,
                 session_id=session_id,
-            )
-            await _handle_text_turn(
-                ws, session_id, history, task_spec, current_project,
-                current_speed, stt_seconds=stt_seconds,
             )
             return
 
@@ -1112,24 +1114,17 @@ async def _route_task(
             task_spec[:120],
             exc,
         )
+        # Riggs CRITICAL 2026-04-24 round 2: previously this narrated the
+        # failure AND chained ``_handle_text_turn`` for the same user input,
+        # producing two assistant bubbles + two TTS streams. The narration
+        # is now the full reply — it tells the user dispatch failed and
+        # they can ask a follow-up. Drop the chained text turn.
         await _narrate(
             ws,
             f"Task dispatch failed: {exc}. Staying on chat.",
             speed=current_speed,
             session_id=session_id,
         )
-        # Fall back to chat so the user still gets a response. Thread
-        # current_speed + stt_seconds so the fallback LLM turn narrates at
-        # the user's chosen rate and bills the STT leg against the turn row.
-        try:
-            await _handle_text_turn(
-                ws, session_id, history, task_spec, current_project,
-                current_speed, stt_seconds=stt_seconds,
-            )
-        except Exception:
-            logger.exception(
-                "route_task: chat fallback also failed session=%s", session_id,
-            )
 
 
 async def _route_status(
@@ -1238,10 +1233,16 @@ async def _narrate(
         task = asyncio.current_task()
         if task is not None:
             cancel_event = getattr(task, "_tts_cancel_event", None)
-    # Track whether synthesis fully completed without raising — only then
-    # has Google billed for the input chars. A raised exception means
-    # nothing went out; a cancelled mid-stream means Google still billed
-    # for the full input we handed it.
+    # Track whether at least one chunk made it through synthesize_stream.
+    # Riggs CRITICAL 2026-04-24 round 2: flipping this AFTER the async-for
+    # exits cleanly was wrong because synthesize_stream short-circuits at
+    # entry when cancel_event.is_set() is already True (see tts_google.py
+    # line ~268), yielding zero chunks and never submitting to Google. The
+    # async-for then exits cleanly, tts_billed=True ran, and we wrote a
+    # phantom record_tts_usage(chars=len(text)) for chars Google never saw.
+    # By flipping the flag inside the loop body, we require at least one
+    # chunk to have been yielded — which matches Google's billing model
+    # (input is billed when synthesis actually fires).
     tts_billed = False
     try:
         await ws_send_json(ws, {"type": "token", "text": text + " "})
@@ -1250,10 +1251,10 @@ async def _narrate(
             async for chunk in tts_service.synthesize_stream(
                 text, speed=speed, cancel_event=cancel_event,
             ):
+                # First chunk yielded → Google has billed us; mark before send
+                # so even a downstream ws send failure still bills correctly.
+                tts_billed = True
                 await ws_send_bytes(ws, chunk)
-            # Reached only if the async generator drained cleanly — provider
-            # accepted the input and streamed it back. Bills as a real send.
-            tts_billed = True
         except Exception as exc:
             logger.warning("narration TTS failed: %s", exc)
         await ws_send_json(ws, {"type": "tts_end"})

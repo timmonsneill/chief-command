@@ -699,3 +699,239 @@ async def test_end_to_end_google_turn_math(initialised_db):
     # Claude cost is independent — $0.0015 input + $0.0045 output = ~$0.006
     # Cents, rounded. Don't pin exact — just confirm it's non-zero.
     assert totals["cost_cents"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Round 2 fix C: narration rows must NOT pollute by_model + daily series
+# ---------------------------------------------------------------------------
+#
+# Riggs CRITICAL 2026-04-24 round 2: ``_narrate`` writes synthetic turn rows
+# tagged ``model='narration'`` so per-narration TTS spend is auditable. But
+# UsagePage's ModelBreakdown groups by model — pre-fix, that exposed a literal
+# "narration" bucket with $0 cost in every period (internal bookkeeping
+# leaked to the owner). And the daily series' ``COUNT(*)`` inflated turn
+# counts by every narration row — roughly 2× on a busy voice day.
+#
+# Voice $ rollups (`_voice_rollup_for_window`) MUST keep counting narration
+# TTS chars because that Google spend is real.
+
+
+@pytest.mark.asyncio
+async def test_get_by_model_totals_excludes_narration_bucket(initialised_db):
+    """A narration row must not appear as a 'narration' key in by_model."""
+    from services.usage_tracker import (
+        create_session,
+        get_by_model_totals,
+        record_tts_usage,
+        record_turn,
+    )
+
+    session_id = "narr-by-model"
+    await create_session(session_id)
+    # Real Claude turn.
+    await record_turn(
+        session_id=session_id,
+        model="claude-haiku-4-5",
+        usage_dict={"input_tokens": 100, "output_tokens": 50},
+        user_text="hi",
+        assistant_text="hello",
+    )
+    # Synthetic narration turn (zero LLM tokens, real TTS spend).
+    narr = await record_turn(
+        session_id=session_id,
+        model="narration",
+        usage_dict={"input_tokens": 0, "output_tokens": 0},
+        user_text="",
+        assistant_text="Task complete.",
+    )
+    await record_tts_usage(narr["id"], "google", 14)
+
+    by_model = await get_by_model_totals()
+    for window in ("today", "week", "month"):
+        assert "narration" not in by_model[window], (
+            f"narration leaked into by_model[{window}]: {by_model[window]}"
+        )
+        assert "claude-haiku-4-5" in by_model[window], (
+            f"real model missing from by_model[{window}]: {by_model[window]}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_daily_series_excludes_narration_from_turn_count(initialised_db):
+    """Narration rows must NOT inflate the per-day turn count."""
+    from services.usage_tracker import (
+        create_session,
+        get_daily_series,
+        record_tts_usage,
+        record_turn,
+    )
+
+    session_id = "narr-daily"
+    await create_session(session_id)
+    # 1 real turn.
+    await record_turn(
+        session_id=session_id,
+        model="claude-haiku-4-5",
+        usage_dict={"input_tokens": 100, "output_tokens": 50},
+        user_text="hi",
+        assistant_text="hello",
+    )
+    # 3 narration rows on the same day.
+    for i in range(3):
+        narr = await record_turn(
+            session_id=session_id,
+            model="narration",
+            usage_dict={"input_tokens": 0, "output_tokens": 0},
+            user_text="",
+            assistant_text=f"narration {i}",
+        )
+        await record_tts_usage(narr["id"], "google", 50)
+
+    series = await get_daily_series(days=30)
+    assert len(series) >= 1
+    today = series[-1]
+    # Pre-fix this would have been 4 (1 claude + 3 narrations). After fix: 1.
+    assert today["turns"] == 1, (
+        f"narration rows leaked into turn count: got {today['turns']}, expected 1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_rollup_still_counts_narration_tts_chars(initialised_db):
+    """Filtering narration from by_model + daily turns MUST NOT remove its
+    voice $ from the rollup. Google billed for every narration char.
+    """
+    from services.usage_tracker import (
+        _voice_rollup_for_window,
+        create_session,
+        record_tts_usage,
+        record_turn,
+    )
+    from datetime import datetime, timezone
+    from db import get_db
+
+    session_id = "narr-voice-roll"
+    await create_session(session_id)
+    narr = await record_turn(
+        session_id=session_id,
+        model="narration",
+        usage_dict={"input_tokens": 0, "output_tokens": 0},
+        user_text="",
+        assistant_text="Cancelled. Task killed.",
+    )
+    await record_tts_usage(narr["id"], "google", 22)
+
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    ).isoformat()
+    async with get_db() as db:
+        rollup = await _voice_rollup_for_window(db, today_start)
+    # 22 chars × $30/1e6 = $0.00066
+    assert rollup["tts"]["chars"] == 22, (
+        f"narration TTS chars dropped from rollup: {rollup['tts']}"
+    )
+    assert rollup["tts"]["cost_usd"] == pytest.approx(22 * 30 / 1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_get_daily_series_includes_narration_voice_cost_per_day(
+    initialised_db,
+):
+    """Narration TTS spend MUST still show up in the daily series voice
+    columns even though narration rows don't count toward `turns`.
+    """
+    from services.usage_tracker import (
+        create_session,
+        get_daily_series,
+        record_tts_usage,
+        record_turn,
+    )
+
+    session_id = "narr-daily-voice"
+    await create_session(session_id)
+    # Real claude turn (no voice).
+    await record_turn(
+        session_id=session_id,
+        model="claude-haiku-4-5",
+        usage_dict={"input_tokens": 100, "output_tokens": 50},
+        user_text="hi",
+        assistant_text="hello",
+    )
+    # Narration turn with real TTS.
+    narr = await record_turn(
+        session_id=session_id,
+        model="narration",
+        usage_dict={"input_tokens": 0, "output_tokens": 0},
+        user_text="",
+        assistant_text="Task complete.",
+    )
+    await record_tts_usage(narr["id"], "google", 1000)
+
+    series = await get_daily_series(days=30)
+    today = series[-1]
+    # 1000 chars * $30/1e6 = $0.030
+    assert today["tts_cost_usd"] == pytest.approx(0.030), (
+        f"narration TTS cost not added back into daily series: {today}"
+    )
+    assert today["turns"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 2 fix D: get_setting_float must reject inf / nan
+# ---------------------------------------------------------------------------
+#
+# Pre-fix, ``float("inf")`` and ``float("nan")`` parsed cleanly. The API
+# response then included ``voice_warning_usd: Infinity`` — not RFC-8259 valid
+# JSON. ``json.dumps`` emits the literal token; ``JSON.parse`` on the frontend
+# throws on the entire response.
+
+
+@pytest.mark.asyncio
+async def test_get_setting_float_rejects_inf(initialised_db):
+    """``"inf"``, ``"+inf"``, and ``"-inf"`` parse as float but must fall
+    back to the default — non-finite would brick JSON serialization.
+    """
+    from db import get_setting_float, set_setting
+
+    for sentinel in ("inf", "+inf", "-inf", "Infinity", "-Infinity"):
+        await set_setting("monthly_voice_warning_usd", sentinel)
+        result = await get_setting_float("monthly_voice_warning_usd", 50.0)
+        assert result == 50.0, (
+            f"{sentinel!r} should fall back to default, got {result}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_setting_float_rejects_nan(initialised_db):
+    """``"nan"`` parses as float but is non-finite — must fall back."""
+    from db import get_setting_float, set_setting
+
+    for sentinel in ("nan", "NaN", "-nan"):
+        await set_setting("monthly_voice_warning_usd", sentinel)
+        result = await get_setting_float("monthly_voice_warning_usd", 50.0)
+        assert result == 50.0, (
+            f"{sentinel!r} should fall back to default, got {result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Round 2 fix F: compute_cost_cents("narration", ...) must short-circuit to 0
+# ---------------------------------------------------------------------------
+
+
+def test_compute_cost_cents_narration_returns_zero():
+    """Narration must never bill at the haiku fallback rate.
+
+    Pre-fix, ``compute_cost_cents("narration", ...)`` fell through the
+    ``PRICING_PER_MTOK.get(...)`` default to ``claude-haiku-4-5`` rates.
+    Today every caller passes zero tokens so cost=0 by accident; a refactor
+    that passes nonzero tokens would silently bill at haiku.
+    """
+    from services.usage_tracker import compute_cost_cents
+
+    # Zero tokens → 0 (matches today's behavior).
+    assert compute_cost_cents("narration", 0, 0, 0, 0) == 0
+    # Nonzero tokens → still 0 (defends against future refactor).
+    assert compute_cost_cents("narration", 1_000_000, 1_000_000, 0, 0) == 0
+    # Sanity: a real model name with the same nonzero tokens does NOT return 0.
+    assert compute_cost_cents("claude-haiku-4-5", 1_000_000, 1_000_000, 0, 0) > 0

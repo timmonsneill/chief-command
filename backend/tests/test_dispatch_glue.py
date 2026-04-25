@@ -245,10 +245,14 @@ async def test_route_task_dispatch_failure_narrates_and_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If _dispatcher.dispatch() raises an unexpected exception (e.g.
-    FileNotFoundError because `claude` isn't on PATH), _route_task must:
+    FileNotFoundError because `claude` isn't on PATH), _route_task must
+    narrate a user-visible failure message.
 
-      1. Narrate a user-visible failure message.
-      2. Fall back to chat so Chief still responds.
+    Riggs CRITICAL 2026-04-24 round 2: previously this path ALSO chained
+    ``_handle_text_turn`` for the same user input, producing 2 assistant
+    bubbles + 2 TTS streams for one logical reply. The narration is now
+    the full reply — see the dedicated
+    ``test_route_task_dispatch_failure_does_not_chain_text_turn``.
 
     Hawke HIGH — without this wrapper the exception dies silently in the
     background task and the user sees nothing.
@@ -268,22 +272,11 @@ async def test_route_task_dispatch_failure_narrates_and_falls_back(
     monkeypatch.setattr(ws_mod._dispatcher, "dispatch", boom_dispatch)
 
     narrations: list[str] = []
-    chat_fallbacks: list[str] = []
 
     async def fake_narrate(ws: Any, text: str, *, terminal: bool = True, **_: Any) -> None:
         narrations.append(text)
 
-    async def fake_handle_text_turn(
-        ws: Any, session_id: str, history: list, text: str, project_scope: str,
-        *args: Any, **kwargs: Any,
-    ) -> None:
-        # *args/**kwargs absorb current_speed + stt_seconds threaded through
-        # from _route_task's fallback path (so the fallback LLM turn narrates
-        # at the user's rate and bills the STT leg against the turn row).
-        chat_fallbacks.append(text)
-
     monkeypatch.setattr(ws_mod, "_narrate", fake_narrate)
-    monkeypatch.setattr(ws_mod, "_handle_text_turn", fake_handle_text_turn)
 
     ws = FakeWebSocket()
     await ws_mod._route_task(
@@ -297,10 +290,6 @@ async def test_route_task_dispatch_failure_narrates_and_falls_back(
     # User-visible narration about the failure.
     assert any("Task dispatch failed" in n for n in narrations), (
         f"no failure narration emitted: {narrations}"
-    )
-    # Fell back to chat with the same user intent so they aren't left stranded.
-    assert chat_fallbacks == ["add tests for parser"], (
-        f"chat fallback didn't fire: {chat_fallbacks}"
     )
 
 
@@ -799,3 +788,270 @@ async def test_narrate_no_billing_on_synthesis_failure(
     # didn't charge us either.
     assert record_turn_calls == []
     assert record_tts_calls == []
+
+
+# ---------------------------------------- Round 2 fix B: phantom narration bill
+#
+# Riggs CRITICAL 2026-04-24 round 2 — synthesize_stream short-circuits at
+# the first __anext__() when cancel_event.is_set() is already True (see
+# tts_google.py around line 268). Pre-fix, _narrate's async-for then exited
+# cleanly with zero chunks yielded, but ``tts_billed = True`` ran AFTER the
+# loop, producing a phantom record_tts_usage call for chars Google never
+# saw. Now ``tts_billed`` is set INSIDE the loop body, so a zero-chunk
+# stream never bills.
+
+
+@pytest.mark.asyncio
+async def test_narrate_no_billing_when_cancel_event_preset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If cancel_event is already set when _narrate calls synthesize_stream,
+    no chunks are yielded and no TTS bill must be written.
+    """
+    from app import websockets as ws_mod
+
+    # Mimic synthesize_stream's actual short-circuit: if cancel_event is set,
+    # the generator returns without yielding.
+    async def short_circuit_synth(text: str, *, cancel_event=None, **_: Any):
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        yield b"unreachable"  # pragma: no cover — only here for typing
+
+    monkeypatch.setattr(
+        ws_mod.tts_service, "synthesize_stream", short_circuit_synth,
+    )
+
+    record_turn_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": 1, "cost_cents": 0}
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": 0, "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+
+    ws = FakeWebSocket()
+    pre_set = asyncio.Event()
+    pre_set.set()  # cancel arrived BEFORE narration began
+    await ws_mod._narrate(
+        ws, "this should not bill", session_id="sess-precancel",
+        cancel_event=pre_set,
+    )
+
+    assert record_turn_calls == [], (
+        f"phantom narration row written for zero-chunk synth: {record_turn_calls}"
+    )
+    assert record_tts_calls == [], (
+        f"phantom TTS bill written for zero-chunk synth: {record_tts_calls}"
+    )
+
+
+# ---------------------------------------- Round 2 fix A: cancel between
+# record_turn and record_stt_usage must NOT double-write.
+#
+# Pre-fix, ``persisted = True`` ran AFTER record_stt_usage + record_tts_usage.
+# A CancelledError landing on the await in record_stt_usage would leave
+# ``persisted=False``, even though the success path had already written the
+# turn row. The finally guard then wrote a SECOND turn row + duplicate STT
+# row. Net: 2× billing on the same logical turn.
+
+
+@pytest.mark.asyncio
+async def test_run_llm_turn_no_double_write_when_cancel_after_record_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel lands between record_turn and record_stt_usage → exactly ONE
+    turn row in the books, NOT two.
+
+    Slight under-bill (record_stt_usage / record_tts_usage may not have run
+    on the row that did get written) is acceptable; double-bill is not.
+    """
+    from app import websockets as ws_mod
+
+    monkeypatch.setattr(
+        ws_mod, "classify_and_route", lambda text: ("haiku", False),
+    )
+
+    async def fake_stream_turn(
+        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        project_scope: str, system_blocks: Any,
+    ) -> dict:
+        await send_tts_sentence("done")
+        return {
+            "assistant_text": "done",
+            "input_tokens": 5, "output_tokens": 3,
+            "cache_read_input_tokens": 0,
+        }
+
+    monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
+    monkeypatch.setattr(
+        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+    )
+
+    async def fast_synth(sentence: str, **_: Any):
+        yield b"audio"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", fast_synth)
+
+    record_turn_calls: list[dict] = []
+    record_stt_calls: list[dict] = []
+    record_tts_calls: list[dict] = []
+
+    async def noop_append_turn(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        record_turn_calls.append(kwargs)
+        return {"id": len(record_turn_calls), "cost_cents": 0}
+
+    async def cancelling_record_stt_usage(**kwargs: Any) -> dict:
+        # Simulate an external cancel landing on this await — same shape
+        # as a CancelledError propagating up from any awaited call between
+        # record_turn and the persisted=True flip.
+        record_stt_calls.append(kwargs)
+        raise asyncio.CancelledError()
+
+    async def fake_record_tts_usage(**kwargs: Any) -> dict:
+        record_tts_calls.append(kwargs)
+        return {"tts_chars": 0, "tts_cost_usd": 0.0, "tts_provider": "local"}
+
+    async def fake_get_session_totals(session_id: str) -> dict:
+        return {"cost_cents": 0, "voice": {"total_usd": 0.0}}
+
+    monkeypatch.setattr(ws_mod, "append_turn", noop_append_turn)
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_stt_usage", cancelling_record_stt_usage)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_tts_usage)
+    monkeypatch.setattr(ws_mod, "get_session_totals", fake_get_session_totals)
+
+    ws = FakeWebSocket()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ws_mod._run_llm_turn(
+            ws=ws,
+            session_id="sess-mid-cancel",
+            history=[],
+            user_text="hi",
+            project_scope="chief",
+            stt_seconds=2.5,
+        )
+
+    # Only ONE turn row (the success-path row from the first record_turn call).
+    # The finally guard MUST NOT have written a second.
+    assert len(record_turn_calls) == 1, (
+        f"double-write on cancel: expected 1 turn row, got {len(record_turn_calls)}"
+    )
+    # record_stt_usage was called once on the success path (and raised);
+    # the finally guard should have skipped re-calling it.
+    assert len(record_stt_calls) == 1, (
+        f"double-bill: STT usage written {len(record_stt_calls)} times, expected 1"
+    )
+    # record_tts_usage was never reached on the success path (cancel hit STT
+    # first) and the finally guard saw persisted=True so it skipped — net 0.
+    assert len(record_tts_calls) == 0, (
+        f"phantom TTS bill on cancel: {record_tts_calls}"
+    )
+
+
+# ---------------------------------------- Round 2 fix E: no-repo + dispatch-failure
+# narrations must NOT chain a second LLM turn.
+#
+# Pre-fix the no-repo and dispatch-failure paths each did:
+#   await _narrate(...)
+#   await _handle_text_turn(...)
+# for the SAME user input. The frontend treats every tts_start as a new
+# assistant bubble boundary, so the user got 2 bubbles + 2 TTS streams for
+# one logical reply. Narration is now the full reply on these paths.
+
+
+@pytest.mark.asyncio
+async def test_route_task_no_repo_does_not_chain_text_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No-repo fallback narrates ONCE and does not chain _handle_text_turn."""
+    from app import websockets as ws_mod
+
+    # Repo lookup returns None → triggers no-repo branch.
+    monkeypatch.setattr(ws_mod, "get_repo_path", lambda project: None)
+
+    narrations: list[str] = []
+    chat_fallbacks: list[str] = []
+
+    async def fake_narrate(ws: Any, text: str, **_: Any) -> None:
+        narrations.append(text)
+
+    async def should_not_chain(*args: Any, **kwargs: Any) -> None:
+        chat_fallbacks.append("called")
+
+    monkeypatch.setattr(ws_mod, "_narrate", fake_narrate)
+    monkeypatch.setattr(ws_mod, "_handle_text_turn", should_not_chain)
+
+    ws = FakeWebSocket()
+    await ws_mod._route_task(
+        ws=ws,
+        session_id="sess-norepo",
+        history=[],
+        task_spec="add tests for parser",
+        current_project="chief",
+    )
+
+    assert len(narrations) == 1, (
+        f"expected exactly one narration on no-repo path, got: {narrations}"
+    )
+    assert "no local repo configured" in narrations[0]
+    assert chat_fallbacks == [], (
+        f"_handle_text_turn was chained — produces 2 bubbles: {chat_fallbacks}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_route_task_dispatch_failure_does_not_chain_text_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch-failure fallback narrates ONCE and does not chain text turn."""
+    from app import websockets as ws_mod
+
+    monkeypatch.setattr(
+        ws_mod,
+        "get_repo_path",
+        lambda project: __import__("pathlib").Path("/tmp"),
+    )
+
+    async def boom_dispatch(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("claude: command not found")
+
+    monkeypatch.setattr(ws_mod._dispatcher, "dispatch", boom_dispatch)
+
+    narrations: list[str] = []
+    chat_fallbacks: list[str] = []
+
+    async def fake_narrate(ws: Any, text: str, **_: Any) -> None:
+        narrations.append(text)
+
+    async def should_not_chain(*args: Any, **kwargs: Any) -> None:
+        chat_fallbacks.append("called")
+
+    monkeypatch.setattr(ws_mod, "_narrate", fake_narrate)
+    monkeypatch.setattr(ws_mod, "_handle_text_turn", should_not_chain)
+
+    ws = FakeWebSocket()
+    await ws_mod._route_task(
+        ws=ws,
+        session_id="sess-fail-once",
+        history=[],
+        task_spec="add tests for parser",
+        current_project="chief",
+    )
+
+    assert len(narrations) == 1, (
+        f"expected exactly one narration on dispatch-failure path, got: {narrations}"
+    )
+    assert "Task dispatch failed" in narrations[0]
+    assert chat_fallbacks == [], (
+        f"_handle_text_turn was chained — produces 2 bubbles: {chat_fallbacks}"
+    )

@@ -1,6 +1,7 @@
 """SQLite database layer for session and turn persistence."""
 
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -152,18 +153,31 @@ async def get_setting(key: str, default: str | None = None) -> str | None:
 async def get_setting_float(key: str, default: float) -> float:
     """Read a settings value as float. Returns ``default`` on missing or
     on parse failure — never raises, so a corrupted row can't break callers.
+
+    Riggs HIGH 2026-04-24 round 2: ``float("inf")`` and ``float("nan")``
+    parse cleanly; if they reach the API response, Starlette emits
+    literal ``Infinity`` / ``NaN`` which is not RFC-8259 valid JSON, and
+    ``JSON.parse`` on the frontend throws — bricking the entire response.
+    Treat non-finite values as garbage and fall back to default.
     """
     raw = await get_setting(key)
     if raw is None:
         return default
     try:
-        return float(raw)
+        result = float(raw)
     except (TypeError, ValueError):
         logger.warning(
             "settings: key=%s value=%r is not a valid float, using default=%s",
             key, raw, default,
         )
         return default
+    if not math.isfinite(result):
+        logger.warning(
+            "settings: key=%s value=%r is not finite (inf/nan), using default=%s",
+            key, raw, default,
+        )
+        return default
+    return result
 
 
 async def set_setting(key: str, value: str) -> None:

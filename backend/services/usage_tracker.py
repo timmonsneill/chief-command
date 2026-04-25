@@ -70,6 +70,13 @@ def _now_iso() -> str:
 
 
 def compute_cost_cents(model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_creation_tokens: int) -> int:
+    # Synthetic narration turn rows carry no LLM tokens — they're just an
+    # audit anchor for the per-narration TTS char bill. Short-circuit to 0
+    # so a future refactor that accidentally passes nonzero tokens here
+    # can't silently bill them at the haiku fallback rate. Riggs HIGH
+    # 2026-04-24 round 2.
+    if model == "narration":
+        return 0
     rates = PRICING_PER_MTOK.get(model, PRICING_PER_MTOK["claude-haiku-4-5"])
     billable_input = max(0, input_tokens - cache_read_tokens)
     cost_dollars = (
@@ -409,6 +416,13 @@ async def get_by_model_totals() -> dict:
     ).isoformat()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
+    # Filter ``model = 'narration'`` so synthetic narration rows
+    # (task-complete / cancelled / dispatch-failed lines) don't show up as
+    # a distinct "narration" bucket on UsagePage.ModelBreakdown — that
+    # would expose internal bookkeeping to the owner. Voice $ for those
+    # narrations is still counted by `_voice_rollup_for_window` (which
+    # rolls every row regardless of model). Riggs CRITICAL 2026-04-24
+    # round 2.
     query = """
         SELECT
             model,
@@ -417,7 +431,7 @@ async def get_by_model_totals() -> dict:
             COALESCE(SUM(output_tokens), 0) AS output_tokens,
             COUNT(*)                         AS turns
         FROM turns
-        WHERE created_at >= ?
+        WHERE created_at >= ? AND model != 'narration'
         GROUP BY model
     """
 
@@ -475,6 +489,15 @@ async def get_daily_series(days: int = 30) -> list[dict]:
     ).isoformat()
 
     async with get_db() as db:
+        # Exclude narration rows from the COUNT(turns) column so the daily
+        # turn count reflects real Chief replies, not internal narration
+        # bookkeeping (which on a busy day would roughly double the rendered
+        # number). The voice cost columns (stt_cost_usd / tts_cost_usd) MUST
+        # still include narration rows because that Google spend is real.
+        # Implementation: the main aggregate filters narration out for the
+        # turn count + claude cost, then a correlated subquery ADDS the
+        # narration row's voice cost back per-day. Riggs CRITICAL
+        # 2026-04-24 round 2.
         cur = await db.execute(
             """
             SELECT
@@ -484,7 +507,7 @@ async def get_daily_series(days: int = 30) -> list[dict]:
                 COALESCE(SUM(tts_cost_usd), 0.0)    AS tts_cost_usd,
                 COUNT(*)                             AS turns
             FROM turns
-            WHERE created_at >= ?
+            WHERE created_at >= ? AND model != 'narration'
             GROUP BY date
             ORDER BY date ASC
             """,
@@ -492,17 +515,59 @@ async def get_daily_series(days: int = 30) -> list[dict]:
         )
         rows = await cur.fetchall()
 
-    return [
-        {
+        # Per-day voice cost for narration rows specifically — added back
+        # onto the per-day series so Google spend isn't lost. Keyed by the
+        # same `date` substring used in the main query.
+        cur = await db.execute(
+            """
+            SELECT
+                substr(created_at, 1, 10)           AS date,
+                COALESCE(SUM(stt_cost_usd), 0.0)    AS stt_cost_usd,
+                COALESCE(SUM(tts_cost_usd), 0.0)    AS tts_cost_usd
+            FROM turns
+            WHERE created_at >= ? AND model = 'narration'
+            GROUP BY date
+            """,
+            (since,),
+        )
+        narration_voice = {
+            row["date"]: (
+                float(row["stt_cost_usd"]),
+                float(row["tts_cost_usd"]),
+            )
+            for row in await cur.fetchall()
+        }
+        # Days that had ONLY narration rows (and no real-Claude rows) won't
+        # appear in `rows` because the main query filtered them. Synthesize
+        # zero-turn entries for those days so their voice $ shows up.
+        narration_only_dates = set(narration_voice) - {row["date"] for row in rows}
+
+    out: list[dict] = []
+    for row in rows:
+        narr_stt, narr_tts = narration_voice.get(row["date"], (0.0, 0.0))
+        stt_total = float(row["stt_cost_usd"]) + narr_stt
+        tts_total = float(row["tts_cost_usd"]) + narr_tts
+        out.append({
             "date": row["date"],
             "cost_cents": row["cost_cents"],
             "turns": row["turns"],
-            "stt_cost_usd": float(row["stt_cost_usd"]),
-            "tts_cost_usd": float(row["tts_cost_usd"]),
-            "voice_cost_usd": float(row["stt_cost_usd"]) + float(row["tts_cost_usd"]),
-        }
-        for row in rows
-    ]
+            "stt_cost_usd": stt_total,
+            "tts_cost_usd": tts_total,
+            "voice_cost_usd": stt_total + tts_total,
+        })
+    # Days that had ONLY narration rows still need to appear in the trend.
+    for date in sorted(narration_only_dates):
+        narr_stt, narr_tts = narration_voice[date]
+        out.append({
+            "date": date,
+            "cost_cents": 0,
+            "turns": 0,
+            "stt_cost_usd": narr_stt,
+            "tts_cost_usd": narr_tts,
+            "voice_cost_usd": narr_stt + narr_tts,
+        })
+    out.sort(key=lambda r: r["date"])
+    return out
 
 
 async def get_session_with_turns(session_id: str) -> dict | None:
