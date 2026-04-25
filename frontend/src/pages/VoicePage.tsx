@@ -225,6 +225,12 @@ export default function VoicePage() {
     }
   }, [])
 
+  // Mirror VAD's `speaking` state into a ref so the synchronous tts_end handler
+  // can read the live value without re-creating the WS onMessage callback on
+  // every speech transition. Used to keep speechStartedDuringTtsRef armed when
+  // tts_end arrives WHILE the owner is mid-utterance (barge-in race).
+  const vadIsSpeakingRef = useRef(false)
+
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
     onBinary: useCallback((data: ArrayBuffer) => {
@@ -318,8 +324,16 @@ export default function VoicePage() {
           // Any pending speech-start-during-TTS flag is no longer valid once
           // TTS is over — clear it so a stale mid-sentence echo blip can't
           // be retroactively used to drop a user utterance captured AFTER
-          // Chief went silent.
-          speechStartedDuringTtsRef.current = false
+          // Chief went silent. EXCEPTION: if VAD reports the user is CURRENTLY
+          // speaking, this is a real barge-in mid-utterance — leave the flag
+          // armed so the upcoming onSpeechEnd still triggers stopAudioPlayback
+          // + interrupt. Without this guard, owner-speech that begins ~150ms
+          // before tts_end gets its barge-in path silently downgraded to a
+          // normal turn, and the trailing TTS chunks already on the local
+          // queue keep playing over the new question.
+          if (!vadIsSpeakingRef.current) {
+            speechStartedDuringTtsRef.current = false
+          }
           if (audioQueueRef.current.length > 0) {
             playNextChunk()
           } else if (!hasStartedAudioRef.current) {
@@ -472,6 +486,7 @@ export default function VoicePage() {
       // VAD would bypass the gate and kill Chief's own turn before audio
       // became audible. Forge verified this as the likely root cause of
       // "Chief can't hear me, responds to text."
+      vadIsSpeakingRef.current = true
       const chiefActive = ttsActiveRef.current
       speechStartedDuringTtsRef.current = chiefActive
       console.log('[voice] speech-start chiefActive=', chiefActive)
@@ -480,6 +495,7 @@ export default function VoicePage() {
       }
     }, []),
     onSpeechEnd: useCallback((audio: Float32Array) => {
+      vadIsSpeakingRef.current = false
       const startedDuringTts = speechStartedDuringTtsRef.current
       speechStartedDuringTtsRef.current = false
       console.log('[voice] speech-end samples=', audio.length, 'duringTts=', startedDuringTts)
@@ -506,6 +522,22 @@ export default function VoicePage() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [messages])
+
+  // WS dropped (network blip / backend restart). Reset every piece of voice
+  // state that could otherwise survive into the auto-reconnected session and
+  // strand the orb in a wedged state. Concrete bug this fixes: a drop between
+  // `tts_start` and any audio chunk leaves `ttsActiveRef=true` forever, so
+  // every subsequent owner utterance gets treated as "barge-in of nothing"
+  // and the echo gate stays half-on indefinitely. stopAudioPlayback() clears
+  // ttsActiveRef + hasStartedAudioRef + flushes the audio queue + stops the
+  // current source; we additionally clear the barge-in latch and VAD-speaking
+  // mirror, neither of which stopAudioPlayback knows about.
+  useEffect(() => {
+    if (isConnected) return
+    stopAudioPlayback()
+    speechStartedDuringTtsRef.current = false
+    vadIsSpeakingRef.current = false
+  }, [isConnected, stopAudioPlayback])
 
   // Send project context frame to backend whenever the context changes or WS connects.
   // This keeps the backend in sync so it can scope the system prompt correctly.
