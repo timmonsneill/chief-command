@@ -22,6 +22,13 @@ PRICING_PER_MTOK = {
     "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "cached_in": 0.1},
     "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "cached_in": 0.3},
     "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "cached_in": 0.5},
+    # Phase 2 — Gemini 2.5 Flash via Vertex AI is now Chief's brain.
+    # Pricing per Vertex AI public rate card (May 2026):
+    #   text/image/video input         $0.30 / 1M
+    #   cached text/image/video input  $0.03 / 1M
+    #   text output                    $2.50 / 1M
+    # Audio input ($1.00/1M) doesn't apply — text-mode only in Phase 2.
+    "gemini-2.5-flash":  {"in": 0.30, "out": 2.50, "cached_in": 0.03},
 }
 
 # ---------------------------------------------------------------------------

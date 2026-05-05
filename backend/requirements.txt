@@ -20,3 +20,12 @@ playwright>=1.58.0
 # VOICE_PROVIDER=google). Local mode works without these installed.
 google-cloud-speech>=2.27
 google-cloud-texttospeech>=2.16
+# Phase 2 — Gemini 2.5 Flash via Vertex AI (Chief's brain).
+# google-genai is the unified SDK Google publishes for both AI Studio and
+# Vertex AI; the older google-cloud-aiplatform path is being deprecated.
+# Pinned at >=1.0 so we get the stable streaming + tool API surface.
+google-genai>=1.0
+# Phase 2 — Claude Code SDK is now invoked via the dispatch_agent tool
+# (cc_session pool) rather than as the primary brain. Required at runtime
+# whenever dispatch_agent fires.
+claude-agent-sdk>=0.1.50

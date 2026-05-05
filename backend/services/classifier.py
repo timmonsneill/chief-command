@@ -1,4 +1,19 @@
-"""Intent classifier — routes voice turns to chat / task / status / cancel.
+"""Intent classifier — Phase 1 voice-turn router (DEPRECATED Phase 2).
+
+Phase 2 status (2026-05-04): the Gemini brain self-routes via tool use, so
+the classifier preflight is no longer wired into the WS turn path. The
+module is kept import-able for two reasons:
+
+  1. ``_route_status`` (in app.websockets) still uses ``_get_client()`` to
+     summarize a running dispatched task via Haiku. Cheap, self-contained.
+  2. The 200+ classifier-eval tests still pass against Haiku and serve as
+     a regression net if we ever revisit a hybrid routing strategy.
+
+If you're reading this in 2026-Q3 and Phase 2 has stuck, this module + its
+tests can be deleted in one commit — nothing on the user-turn path imports
+``classify_intent`` anymore.
+
+Original notes follow.
 
 Uses Claude Haiku 4.5 with a short, cached system prompt. Cheap enough to run on
 every turn (~150 input tokens after cache, ~20 output). Designed so Chief can
@@ -25,10 +40,26 @@ classifier doesn't need it and it's a cost / prompt-injection concern.
 
 import json
 import logging
+import os
 import re
 from typing import Literal, Optional, TypedDict
 
-from services.llm import _get_client  # shared AsyncAnthropic client
+# Phase 2: llm.py is the Gemini brain shim and no longer exposes a shared
+# AsyncAnthropic client. Construct one locally for the (still-used) status
+# summarizer + (deprecated but kept) classifier preflight. The lazy
+# constructor pattern matches the old llm._get_client behavior so callers
+# of services.classifier._get_client keep working unchanged.
+_anthropic_client = None
+
+
+def _get_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        from anthropic import AsyncAnthropic
+        from config.settings import settings
+        api_key = settings.ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY")
+        _anthropic_client = AsyncAnthropic(api_key=api_key)
+    return _anthropic_client
 
 logger = logging.getLogger(__name__)
 

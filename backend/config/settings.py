@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "/tmp/chief-uploads"
 
     # ------------------------------------------------------------------ #
+    # Phase 2 — Gemini-on-Vertex-AI brain
+    # ------------------------------------------------------------------ #
+    # Project + region used by gemini_brain when it constructs the
+    # ``google-genai`` Vertex AI client. Defaults match the existing
+    # ``chief-command-voice`` GCP project (same one Phase 1.1 voice uses);
+    # location is the lowest-latency region for the owner's home network.
+    # Override either via environment variables if Vertex moves elsewhere.
+    VERTEX_AI_PROJECT: str = "chief-command-voice"
+    VERTEX_AI_LOCATION: str = "us-central1"
+
+    # ------------------------------------------------------------------ #
     # Voice provider selection (Phase 1.1)
     # ------------------------------------------------------------------ #
     # "local" (default) uses faster-whisper + Kokoro, no cloud creds needed.

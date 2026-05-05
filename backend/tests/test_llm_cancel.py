@@ -1,10 +1,18 @@
-"""Track B #4 — stream_turn must NOT emit tokens after cancel.
+"""Phase 2 — services.llm is a thin wrapper over services.gemini_brain.
 
-We stub the Anthropic client so we can drive a fake event stream and assert
-zero tokens leak out after a cancel. The real goal: after CancelledError,
-no further `send_token` / `send_tts_sentence` calls occur, and we don't
-await `get_final_message()` (which would pay for the remote stream to
-drain before we release).
+The legacy Anthropic-specific cancellation tests (which mocked
+``client.messages.stream(...)``) live on in spirit at
+``tests/test_gemini_brain.py::TestCancellation``. This module verifies the
+WRAPPER preserves the contract:
+
+  1. CancelledError raised by gemini_brain.stream propagates verbatim.
+  2. The wrapper does NOT do extra awaits between gemini_brain raising
+     CancelledError and the caller seeing it.
+  3. On a clean run, the wrapper passes through Gemini's usage_dict
+     unchanged.
+
+Both tests stub ``services.gemini_brain.stream`` so we don't need a live
+Vertex AI client.
 """
 
 from __future__ import annotations
@@ -23,163 +31,184 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 
-# Stub `anthropic.AsyncAnthropic` before importing services.llm so import
-# doesn't require the real SDK shape. The real module is installed in the
-# runtime venv but we don't want real API calls from unit tests.
 def _install_anthropic_stub():
     if "anthropic" in sys.modules:
         return
-    anthropic_mod = types.ModuleType("anthropic")
+    mod = types.ModuleType("anthropic")
 
     class _FakeAsyncAnthropic:
         def __init__(self, **kwargs):
             self.messages = MagicMock()
 
-    anthropic_mod.AsyncAnthropic = _FakeAsyncAnthropic
-    sys.modules["anthropic"] = anthropic_mod
+    mod.AsyncAnthropic = _FakeAsyncAnthropic
+    sys.modules["anthropic"] = mod
 
 
 _install_anthropic_stub()
 
-from services import llm  # noqa: E402
 
-
-class _FakeEvent:
-    def __init__(self, text: str):
-        self.type = "content_block_delta"
-        self.delta = types.SimpleNamespace(type="text_delta", text=text)
-
-
-class _FakeFinalUsage:
-    def __init__(self):
-        self.input_tokens = 10
-        self.output_tokens = 20
-        self.cache_read_input_tokens = 0
-        self.cache_creation_input_tokens = 0
-
-
-class _FakeFinalMessage:
-    def __init__(self):
-        self.usage = _FakeFinalUsage()
-
-
-class _SlowStreamContext:
-    """Fake ``client.messages.stream(...)`` context manager.
-
-    Yields fake text_delta events with a small delay between each so a cancel
-    mid-stream can take effect. If cancel doesn't break the iterator cleanly,
-    the test will see tokens emitted AFTER the cancel point.
-    """
-
-    def __init__(self, texts: list[str], per_event_sleep: float = 0.02):
-        self._texts = texts
-        self._sleep = per_event_sleep
-        self._get_final_called = False
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    def __aiter__(self):
-        return self._gen()
-
-    async def _gen(self):
-        for t in self._texts:
-            await asyncio.sleep(self._sleep)
-            yield _FakeEvent(t)
-
-    async def get_final_message(self):
-        # Flag so the test can assert this was NOT called on cancel.
-        self._get_final_called = True
-        # Also block briefly so an accidental call after cancel still
-        # shows up as measurable extra latency.
-        await asyncio.sleep(0.1)
-        return _FakeFinalMessage()
-
-
-class _FakeMessagesClient:
-    def __init__(self, stream_ctx):
-        self._ctx = stream_ctx
-
-    def stream(self, **kwargs):
-        return self._ctx
-
-
-class _FakeAsyncAnthropic:
-    def __init__(self, stream_ctx):
-        self.messages = _FakeMessagesClient(stream_ctx)
+from services import gemini_brain, llm  # noqa: E402
 
 
 @pytest.mark.asyncio
-async def test_cancel_midstream_emits_no_tokens_after_cancel(monkeypatch):
-    stream_ctx = _SlowStreamContext(
-        ["Hel", "lo, ", "this ", "is ", "a ", "long ", "reply."],
-        per_event_sleep=0.03,
-    )
-    fake_client = _FakeAsyncAnthropic(stream_ctx)
-    monkeypatch.setattr(llm, "_get_client", lambda: fake_client)
+async def test_cancel_propagates_through_wrapper(monkeypatch):
+    """If gemini_brain.stream raises CancelledError, llm.stream_turn must
+    re-raise without swallowing or wrapping it."""
 
+    cancel_signal = asyncio.Event()
     tokens: list[str] = []
-    sentences: list[str] = []
 
-    async def send_token(text: str) -> None:
-        tokens.append(text)
+    async def fake_brain_stream(**kwargs):
+        send_token = kwargs["send_token"]
+        # Emit a couple of tokens, then block until cancel lands.
+        await send_token("Hi ")
+        await send_token("there. ")
+        cancel_signal.set()
+        await asyncio.sleep(60)  # would never complete
+        await send_token("LATE")  # should not happen
+        return {}
 
-    async def send_tts_sentence(s: str) -> None:
-        sentences.append(s)
+    monkeypatch.setattr(gemini_brain, "stream", fake_brain_stream)
+
+    async def send_token(t):
+        tokens.append(t)
+
+    async def send_tts_sentence(s):
+        pass
 
     async def run_turn():
         await llm.stream_turn(
             history=[{"role": "user", "content": "hi"}],
-            model="claude-haiku-4-5",
+            model="ignored",
             send_token=send_token,
             send_tts_sentence=send_tts_sentence,
             system_blocks=[{"type": "text", "text": "sys"}],
         )
 
     task = asyncio.create_task(run_turn())
-    await asyncio.sleep(0.08)  # let ~2–3 tokens through
-    tokens_at_cancel = len(tokens)
+    # Wait for the brain to emit the two tokens, then cancel.
+    await asyncio.wait_for(cancel_signal.wait(), timeout=2.0)
+    tokens_at_cancel = list(tokens)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    # Allow any loose straggler callbacks to settle.
-    await asyncio.sleep(0.15)
-    tokens_after_cancel_settled = len(tokens)
-
-    # Strict: no additional tokens after the cancel point.
-    assert tokens_after_cancel_settled == tokens_at_cancel, (
-        f"Expected zero tokens after cancel; saw {tokens_after_cancel_settled - tokens_at_cancel} "
-        f"extra. tokens_at_cancel={tokens_at_cancel} "
-        f"final={tokens_after_cancel_settled}"
-    )
-
-    # Must NOT have called get_final_message on the cancel path.
-    assert stream_ctx._get_final_called is False
+    # Settle any stragglers.
+    await asyncio.sleep(0.05)
+    assert list(tokens) == tokens_at_cancel
+    assert tokens_at_cancel == ["Hi ", "there. "]
 
 
 @pytest.mark.asyncio
-async def test_normal_stream_returns_usage_and_calls_final(monkeypatch):
-    stream_ctx = _SlowStreamContext(["Done."], per_event_sleep=0.0)
-    fake_client = _FakeAsyncAnthropic(stream_ctx)
-    monkeypatch.setattr(llm, "_get_client", lambda: fake_client)
+async def test_normal_stream_returns_usage_dict(monkeypatch):
+    """Happy path — the wrapper returns the usage_dict gemini_brain produced."""
 
-    async def send_token(text: str) -> None:
-        pass
+    async def fake_brain_stream(**kwargs):
+        send_token = kwargs["send_token"]
+        send_tts = kwargs["send_tts_sentence"]
+        await send_token("Done.")
+        await send_tts("Done.")
+        return {
+            "input_tokens": 100,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "model": "gemini-2.5-flash",
+            "stop_reason": "stop",
+            "assistant_text": "Done.",
+            "cost_cents": 1,
+        }
 
-    async def send_tts_sentence(s: str) -> None:
-        pass
+    monkeypatch.setattr(gemini_brain, "stream", fake_brain_stream)
+
+    seen_tokens: list[str] = []
+    seen_sentences: list[str] = []
+
+    async def send_token(t):
+        seen_tokens.append(t)
+
+    async def send_tts_sentence(s):
+        seen_sentences.append(s)
 
     usage = await llm.stream_turn(
         history=[{"role": "user", "content": "hi"}],
-        model="claude-haiku-4-5",
+        model="ignored",
         send_token=send_token,
         send_tts_sentence=send_tts_sentence,
         system_blocks=[{"type": "text", "text": "sys"}],
     )
     assert usage["assistant_text"] == "Done."
-    assert usage["input_tokens"] == 10
-    assert stream_ctx._get_final_called is True
+    assert usage["model"] == "gemini-2.5-flash"
+    assert seen_tokens == ["Done."]
+    assert seen_sentences == ["Done."]
+
+
+@pytest.mark.asyncio
+async def test_wrapper_pops_user_turn_from_history(monkeypatch):
+    """The wrapper extracts the trailing user-role entry off ``history`` and
+    passes it as ``user_text`` to gemini_brain. Ensures we don't double-count
+    the user turn in the brain's contents list."""
+
+    captured = {}
+
+    async def fake_brain_stream(**kwargs):
+        captured["history"] = kwargs["history"]
+        captured["user_text"] = kwargs["user_text"]
+        return {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            "model": "gemini-2.5-flash", "stop_reason": "stop",
+            "assistant_text": "", "cost_cents": 0,
+        }
+
+    monkeypatch.setattr(gemini_brain, "stream", fake_brain_stream)
+
+    async def noop(*a, **kw):
+        pass
+
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"},  # last → user_text
+    ]
+    await llm.stream_turn(
+        history=history,
+        model="ignored",
+        send_token=noop,
+        send_tts_sentence=noop,
+        system_blocks=[{"type": "text", "text": "sys"}],
+    )
+    assert captured["user_text"] == "third"
+    assert captured["history"] == history[:-1]
+
+
+@pytest.mark.asyncio
+async def test_wrapper_flattens_system_blocks(monkeypatch):
+    captured = {}
+
+    async def fake_brain_stream(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        return {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            "model": "gemini-2.5-flash", "stop_reason": "stop",
+            "assistant_text": "", "cost_cents": 0,
+        }
+
+    monkeypatch.setattr(gemini_brain, "stream", fake_brain_stream)
+
+    async def noop(*a, **kw):
+        pass
+
+    await llm.stream_turn(
+        history=[{"role": "user", "content": "hi"}],
+        model="ignored",
+        send_token=noop,
+        send_tts_sentence=noop,
+        system_blocks=[
+            {"type": "text", "text": "Block A"},
+            {"type": "text", "text": "Block B"},
+            {"type": "text", "text": "Block C"},
+        ],
+    )
+    assert captured["system_prompt"] == "Block A\n\nBlock B\n\nBlock C"

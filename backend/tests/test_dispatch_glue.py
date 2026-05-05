@@ -365,8 +365,8 @@ async def test_tts_char_tally_excludes_failed_synthesis(
     # will succeed. Returns a minimal usage dict for the downstream record_turn
     # call.
     async def fake_stream_turn(
-        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
-        project_scope: str, system_blocks: Any,
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
     ) -> dict:
         await send_tts_sentence("first sentence")   # 14 chars — will FAIL
         await send_tts_sentence("second sentence of text")  # 23 chars — OK
@@ -474,8 +474,8 @@ async def test_run_llm_turn_records_voice_usage_on_cancel_midstream(
     sentence_one_event = asyncio.Event()
 
     async def slow_stream_turn(
-        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
-        project_scope: str, system_blocks: Any,
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
     ) -> dict:
         await send_tts_sentence("first cancelled sentence")  # 24 chars
         sentence_one_event.set()
@@ -599,8 +599,8 @@ async def test_run_llm_turn_skips_partial_billing_on_clean_success(
     )
 
     async def fake_stream_turn(
-        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
-        project_scope: str, system_blocks: Any,
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
     ) -> dict:
         await send_tts_sentence("only sentence")
         return {
@@ -878,8 +878,8 @@ async def test_run_llm_turn_no_double_write_when_cancel_after_record_turn(
     )
 
     async def fake_stream_turn(
-        *, history: list, model: str, send_token: Any, send_tts_sentence: Any,
-        project_scope: str, system_blocks: Any,
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
     ) -> dict:
         await send_tts_sentence("done")
         return {

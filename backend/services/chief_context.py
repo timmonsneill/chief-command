@@ -493,3 +493,20 @@ def _enforce_budget_by_file(
 def estimate_prompt_tokens(project_scope: str) -> int:
     """Convenience for tests/logs — returns the estimated token count."""
     return _estimate_tokens(build_chief_system(project_scope))
+
+
+def build_chief_system_string(project_scope: str) -> str:
+    """Flatten the Anthropic-shaped block list into a single string.
+
+    Used by providers that take a single ``system_instruction`` parameter
+    (e.g. Gemini via ``GenerateContentConfig.system_instruction``). The
+    block boundaries don't carry semantic meaning past the cache_control
+    optimization, so concatenating with ``\\n\\n`` between blocks preserves
+    everything Gemini needs to be Chief.
+
+    Identical to calling ``build_chief_system(project_scope)`` and joining
+    each block's ``text`` field. We keep the underlying builder unchanged so
+    Anthropic-cached calls still hit identical bytes.
+    """
+    blocks = build_chief_system(project_scope)
+    return "\n\n".join(b.get("text", "") for b in blocks if b.get("text"))

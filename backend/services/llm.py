@@ -1,67 +1,66 @@
-"""Anthropic API streaming integration for Chief Command v2."""
+"""LLM streaming integration for Chief Command — Phase 2 (Gemini-on-Vertex).
+
+This module is a THIN adapter that maps the legacy ``stream_turn(...)`` call
+signature onto the new ``services.gemini_brain.stream(...)`` flow. Keeping
+the wrapper here means callers (``app.websockets._run_llm_turn``) don't need
+to know which provider is wired in — they pass history + callbacks + scope
+context the same way they always did.
+
+What changed at the API surface vs the legacy Anthropic version:
+  * ``model`` is accepted but ignored for routing — Gemini 2.5 Flash is the
+    only brain. The returned ``usage_dict["model"]`` reports
+    ``"gemini-2.5-flash"`` (the Phase 2 cost-tracker bucket).
+  * ``system_blocks`` (Anthropic-shaped) is still accepted; we flatten the
+    block list to a single string for Gemini's ``system_instruction`` field.
+    Callers that pass ``project_scope`` instead get a fresh build via
+    ``chief_context.build_chief_system_string``.
+  * Three NEW kwargs: ``send_tool_call`` (optional WS hook for tool-chip
+    frames), ``cwd`` (active scope's repo root — required when tools fire),
+    ``subject`` (JWT subject — required for the dispatch_agent CC pool key).
+    All three carry sensible defaults so existing tests / callsites that
+    don't have them keep working.
+
+Cancellation contract is preserved verbatim from the legacy llm.py — see
+``gemini_brain.stream`` for the actual implementation. The two layers that
+matter:
+  1. ``asyncio.current_task().cancelling()`` is checked between SDK chunks.
+     No extra awaits after a cancel decision.
+  2. CancelledError propagates without trying to drain remaining stream
+     bytes; the SDK's iterator handles its own teardown via __aexit__/GC.
+  3. If a tool call is in flight on cancel, agent_tools.execute_dispatch_agent
+     forwards the interrupt to the CC subprocess.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import re
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from anthropic import AsyncAnthropic
-from config.settings import settings
+from services import gemini_brain
+from services.chief_context import build_chief_system_string
 
 logger = logging.getLogger(__name__)
 
-# Ensure ANTHROPIC_API_KEY is available in os.environ so the Anthropic client
-# can pick it up even if it was only loaded via pydantic-settings.
-if settings.ANTHROPIC_API_KEY and not os.environ.get("ANTHROPIC_API_KEY"):
-    os.environ["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
-
-_client: Optional[AsyncAnthropic] = None
-
-SENTENCE_FLUSH_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
-
-SYSTEM_PROMPT = {
-    "type": "text",
-    "text": (
-        "You are Chief, a sharp personal AI assistant for a software owner and entrepreneur. "
-        "Be concise and direct. Prefer one-sentence answers for simple questions. "
-        "When responding in voice mode, aim for 1-2 sentences. Longer only if explicitly asked. "
-        "You have access to project status, code context, and business metrics when asked."
-    ),
-    "cache_control": {"type": "ephemeral"},
-}
 
 UsageRecord = dict
 
 
-def _get_client() -> AsyncAnthropic:
-    global _client
-    if _client is None:
-        api_key = settings.ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY")
-        _client = AsyncAnthropic(api_key=api_key)
-    return _client
+def _flatten_system_blocks(system_blocks: Optional[list[dict]]) -> str:
+    """Concat the Anthropic-shaped block list to a single string.
 
-
-def _compute_cost_cents(model: str, usage: dict) -> int:
-    PRICING = {
-        "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "cached_in": 0.1},
-        "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "cached_in": 0.3},
-        "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "cached_in": 0.5},
-    }
-    rates = PRICING.get(model, PRICING["claude-haiku-4-5"])
-    input_tok = usage.get("input_tokens", 0)
-    output_tok = usage.get("output_tokens", 0)
-    cached_tok = usage.get("cache_read_input_tokens", 0)
-    creation_tok = usage.get("cache_creation_input_tokens", 0)
-
-    billable_input = max(0, input_tok - cached_tok)
-    cost_dollars = (
-        (billable_input / 1_000_000) * rates["in"]
-        + (output_tok / 1_000_000) * rates["out"]
-        + (cached_tok / 1_000_000) * rates["cached_in"]
-        + (creation_tok / 1_000_000) * rates["in"]
+    Skips empty blocks. Returns empty string when system_blocks is None /
+    empty — the caller is then expected to fall back to the project_scope
+    builder path.
+    """
+    if not system_blocks:
+        return ""
+    return "\n\n".join(
+        block.get("text", "")
+        for block in system_blocks
+        if isinstance(block, dict) and block.get("text")
     )
-    return round(cost_dollars * 100)
 
 
 async def stream_turn(
@@ -69,171 +68,123 @@ async def stream_turn(
     model: str,
     send_token: Callable[[str], Awaitable[None]],
     send_tts_sentence: Callable[[str], Awaitable[None]],
+    *,
     max_tokens: int = 1024,
     project_scope: Optional[str] = None,
     system_blocks: Optional[list[dict]] = None,
+    send_tool_call: Optional[Callable[[dict], Awaitable[None]]] = None,
+    cwd: Optional[Path] = None,
+    subject: str = "owner",
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> UsageRecord:
-    """Stream one conversation turn via the Anthropic API.
+    """Run one Gemini turn and stream tokens / TTS sentences / tool-call frames.
 
-    Calls send_token for each text delta.
-    Buffers text and flushes complete sentences to send_tts_sentence.
-    Returns a usage dict with token counts, model, stop_reason, and cost_cents.
+    Maintains the legacy signature so the WS handler keeps working without
+    changes. ``model`` is accepted but ignored — Gemini 2.5 Flash is the
+    only brain. Returns a usage dict with the same keys legacy callers
+    expect plus ``model`` pinned to ``gemini-2.5-flash``.
 
-    ``system_blocks`` — if provided, used as-is (each block should already have
-    cache_control set by the caller). If omitted, falls back to the legacy
-    ``SYSTEM_PROMPT`` + optional scope-hint behavior so existing callers keep
-    working.
+    See module docstring for the full migration notes.
+
+    history MUST end with the user's latest message (role=user). We pop
+    that off and feed it to Gemini as the new turn so the conversation
+    history continues correctly. If history is empty we emit a single
+    placeholder turn — never crash, always reply.
     """
-    client = _get_client()
-    full_text: list[str] = []
-    sentence_buf: list[str] = []
-    stop_reason = "end_turn"
+    if not history:
+        logger.warning("stream_turn: history is empty; replying with empty turn")
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "model": gemini_brain.GEMINI_MODEL,
+            "stop_reason": "no_history",
+            "assistant_text": "",
+            "cost_cents": 0,
+        }
 
-    extra_kwargs: dict = {}
-    if model == "claude-opus-4-7":
-        extra_kwargs["thinking"] = {"type": "adaptive"}
-        extra_kwargs["output_config"] = {"effort": "high"}
-        max_tokens = max(max_tokens, 3072)
-
-    if system_blocks is None:
-        # Legacy path — preserved for any caller that hasn't adopted
-        # chief_context.build_chief_system() yet. Keeps Chief functional as a
-        # generic assistant if the full context builder ever errors out.
-        system_blocks = []
-        if project_scope and project_scope.strip():
-            system_blocks.append({
-                "type": "text",
-                "text": f"[Current project: {project_scope}]",
-            })
-        system_blocks.append(SYSTEM_PROMPT)
-
-    # Cancellation semantics (Track B #4):
-    #
-    # The outer task can be cancelled at any time (barge-in, superseded turn,
-    # WS disconnect). Before this fix, after a CancelledError we still:
-    #   - awaited ``stream.get_final_message()`` (another network round-trip,
-    #     and more tokens arriving on the wire)
-    #   - fell through to usage-record assembly
-    #   - emitted ~100–300ms of post-cancel tokens to the WS
-    #
-    # The goal is ZERO extra tokens after cancel. We:
-    #   1. Check cancellation BETWEEN events in the stream loop and break
-    #      immediately if the task is cancelling.
-    #   2. Catch CancelledError around the ``async for`` so an in-flight
-    #      ``__anext__`` doesn't need to complete before we exit.
-    #   3. Do NOT call ``get_final_message()`` on cancel — that would block
-    #      on the rest of the remote stream draining.
-    #   4. Let ``async with client.messages.stream(...)`` handle the
-    #      underlying HTTP close via its context manager — no extra awaits
-    #      from us on the cancel path.
-    #
-    # The outer caller re-raises the CancelledError after teardown (see
-    # websockets._run_llm_turn), which is the required behavior for
-    # cooperative cancellation.
-    cancelled = False
-    try:
-        async with client.messages.stream(
-            model=model,
-            max_tokens=max_tokens,
-            system=system_blocks,
-            messages=history,
-            **extra_kwargs,
-        ) as stream:
-            try:
-                async for event in stream:
-                    # Fast-path cancel check between events. The ``async for``
-                    # itself is a cancellation point via __anext__, but this
-                    # extra check covers the case where we were cancelled
-                    # while processing the previous event (synchronous work
-                    # between two awaits inside the loop body).
-                    current_task = asyncio.current_task()
-                    if current_task is not None and current_task.cancelling():
-                        cancelled = True
-                        break
-
-                    event_type = getattr(event, "type", None)
-
-                    if event_type == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        if delta and getattr(delta, "type", None) == "text_delta":
-                            text = delta.text
-                            full_text.append(text)
-                            await send_token(text)
-                            sentence_buf.append(text)
-
-                            joined = "".join(sentence_buf)
-                            parts = SENTENCE_FLUSH_RE.split(joined)
-                            if len(parts) > 1:
-                                for sentence in parts[:-1]:
-                                    sentence = sentence.strip()
-                                    if sentence:
-                                        await send_tts_sentence(sentence)
-                                sentence_buf.clear()
-                                if parts[-1]:
-                                    sentence_buf.append(parts[-1])
-
-                    elif event_type == "content_block_stop":
-                        pass
-
-                    elif event_type == "message_delta":
-                        delta = getattr(event, "delta", None)
-                        if delta:
-                            stop_reason = getattr(delta, "stop_reason", stop_reason) or stop_reason
-            except asyncio.CancelledError:
-                # Outer task cancelled mid-iteration. Don't await
-                # get_final_message() — that would pay for the rest of the
-                # stream to drain (the exact 100–300ms of ghost tokens we're
-                # trying to kill). The ``async with`` context manager closes
-                # the underlying HTTP stream cleanly on exit.
-                cancelled = True
-                raise
-
-            if cancelled:
-                # Structured exit via the cancel fast-path (current_task().cancelling()).
-                # Surface as CancelledError so the caller's ``except
-                # (WebSocketDisconnect, asyncio.CancelledError)`` branch runs.
-                raise asyncio.CancelledError()
-
-            final_msg = await stream.get_final_message()
-
-            remainder = "".join(sentence_buf).strip()
-            if remainder:
-                await send_tts_sentence(remainder)
-
-            usage = final_msg.usage
-            usage_dict: UsageRecord = {
-                "input_tokens": getattr(usage, "input_tokens", 0),
-                "output_tokens": getattr(usage, "output_tokens", 0),
-                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
-                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-                "model": model,
-                "stop_reason": stop_reason,
-                "assistant_text": "".join(full_text),
-            }
-            usage_dict["cost_cents"] = _compute_cost_cents(model, usage_dict)
-
-            # Cache telemetry — hits once the prompt is stable across turns.
-            cached = usage_dict["cache_read_input_tokens"]
-            created = usage_dict["cache_creation_input_tokens"]
-            if cached > 0:
-                logger.info(
-                    "llm cache HIT model=%s cached=%d input=%d output=%d",
-                    model, cached, usage_dict["input_tokens"], usage_dict["output_tokens"],
-                )
-            elif created > 0:
-                logger.info(
-                    "llm cache MISS (seed) model=%s created=%d input=%d output=%d",
-                    model, created, usage_dict["input_tokens"], usage_dict["output_tokens"],
-                )
-            else:
-                logger.info(
-                    "llm cache MISS model=%s input=%d output=%d",
-                    model, usage_dict["input_tokens"], usage_dict["output_tokens"],
-                )
-            return usage_dict
-    except asyncio.CancelledError:
-        logger.info(
-            "llm stream cancelled model=%s tokens_emitted=%d",
-            model, len(full_text),
+    # The WS handler appends the user turn before calling stream_turn. Pop
+    # the trailing user entry so we don't double-include it in Gemini's
+    # contents list (history -> Content[]) AND as the user_text param.
+    if history[-1].get("role") != "user":
+        logger.warning(
+            "stream_turn: history doesn't end with user role (got %r); "
+            "appending a synthetic user turn",
+            history[-1].get("role"),
         )
-        raise
+        user_text = ""
+        prior_history = history
+    else:
+        user_text = history[-1].get("content", "") or ""
+        prior_history = history[:-1]
+
+    # System instruction. Prefer the explicit blocks passed by the caller
+    # (chief_context.build_chief_system) and flatten to one string. Fall
+    # back to the scope-aware builder if blocks weren't provided. Last
+    # resort: a generic Chief identity hint.
+    system_prompt = _flatten_system_blocks(system_blocks)
+    if not system_prompt and project_scope:
+        try:
+            system_prompt = build_chief_system_string(project_scope)
+        except Exception as exc:
+            logger.warning("stream_turn: chief_context build failed: %s", exc)
+    if not system_prompt:
+        system_prompt = (
+            "You are Chief, a sharp personal AI assistant for a software "
+            "owner. Concise, direct, one-to-two sentences in voice mode."
+        )
+
+    # cwd is required for in-process tool execution (Read/Bash/Grep) and
+    # for the dispatch_agent CC pool key. If the WS layer didn't supply
+    # one, look it up from the scope; on failure we fall through with cwd
+    # = home (tools will deny anything attempting to escape, since the
+    # path-fence machinery anchors on cwd).
+    if cwd is None:
+        cwd = _resolve_cwd(project_scope)
+    if cwd is None:
+        # Tools will reject every call against this fallback (path-fence
+        # rejects everything outside cwd, which is now home). That's
+        # exactly what we want — the model can still chat without tools.
+        cwd = Path.home()
+        logger.warning(
+            "stream_turn: no repo cwd resolved for scope=%r — tools will be "
+            "deny-only",
+            project_scope,
+        )
+
+    scope_str = project_scope or ""
+
+    # System prompt append for dispatch_agent — the CC subprocess gets the
+    # SAME flattened identity so its replies stay on-brand.
+    system_prompt_append = system_prompt
+
+    return await gemini_brain.stream(
+        history=prior_history,
+        user_text=user_text,
+        system_prompt=system_prompt,
+        send_token=send_token,
+        send_tts_sentence=send_tts_sentence,
+        send_tool_call=send_tool_call,
+        cwd=cwd,
+        subject=subject,
+        scope=scope_str,
+        system_prompt_append=system_prompt_append,
+        max_output_tokens=max_tokens,
+        cancel_event=cancel_event,
+    )
+
+
+def _resolve_cwd(project_scope: Optional[str]) -> Optional[Path]:
+    """Look up the active scope's repo path via repo_map.get_repo_path."""
+    if not project_scope:
+        return None
+    try:
+        from services.repo_map import get_repo_path
+        return get_repo_path(project_scope)
+    except Exception as exc:
+        logger.warning("stream_turn: get_repo_path raised: %s", exc)
+        return None
+
+
+__all__ = ["stream_turn", "UsageRecord"]

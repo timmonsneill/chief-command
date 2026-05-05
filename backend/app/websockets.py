@@ -14,7 +14,11 @@ from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav, get_audio_duration
 from services.chief_context import build_chief_system
-from services.classifier import classify_intent
+# Phase 2: classifier preflight retired. The Gemini brain self-routes to
+# tool calls (Bash/Grep/Read/dispatch_agent) when work is needed, so the
+# Haiku-based "chat / task / status / cancel" preflight is dead weight.
+# We keep the dispatcher import below for the manual cancel button (the
+# task chip's red X still calls _route_cancel directly).
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
 from services.history_store import append_turn, load_recent_for_project
 from services.llm import stream_turn
@@ -604,7 +608,14 @@ async def _run_llm_turn(
     a final usage block we never received on cancel; STT/TTS legs are
     populated normally so the dashboard reflects what Google actually billed.
     """
-    model, is_deep = classify_and_route(user_text)
+    # Phase 2: Gemini 2.5 Flash is the only brain. The router's "deep"
+    # signal still fires the bridge-phrase TTS hint for thinkier prompts so
+    # the user gets immediate feedback while Gemini formulates a longer
+    # reply, but the Anthropic model id it returns is no longer used for
+    # routing. The cost row carries whatever ``gemini_brain.stream`` reports
+    # in its usage_dict (currently "gemini-2.5-flash").
+    _legacy_model, is_deep = classify_and_route(user_text)
+    model = "gemini-2.5-flash"
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
@@ -651,6 +662,16 @@ async def _run_llm_turn(
         # synthesize_stream drops (logged as "TTS failed for sentence ...")
         # don't get counted against the Google TTS character bill.
         await tts_queue.put(sentence)
+
+    async def send_tool_call(payload: dict) -> None:
+        """Push a tool_call WS frame for the frontend chip component.
+
+        Called twice per tool by gemini_brain — once on start (status=
+        running) and once on end (status=complete|error + duration_ms +
+        preview). Schema matches the legacy tool-call frame so the
+        existing chip renderer doesn't need to change.
+        """
+        await ws_send_json(ws, {"type": "tool_call", **payload})
 
     async def tts_worker() -> None:
         nonlocal tts_char_total
@@ -718,6 +739,18 @@ async def _run_llm_turn(
     system_blocks = await asyncio.to_thread(build_chief_system, project_scope)
 
     try:
+        # Resolve the active scope's repo path so tool calls (Read/Bash/
+        # Grep/dispatch_agent) have a sandboxed cwd. None on a scope without
+        # a repo configured — gemini_brain falls back to a deny-by-default
+        # cwd (the path-fence rejects everything), so the brain still
+        # answers from memory but tools are unusable.
+        from services.repo_map import get_repo_path
+        repo_cwd = get_repo_path(project_scope)
+        # Subject identifies the JWT owner; used as the dispatch_agent CC
+        # pool key so different tabs / devices don't share session state.
+        # session_id is per-WS-connection (also fine as a pool key); we use
+        # session_id here because owner is single-user and session is the
+        # finer-grained boundary.
         usage = await stream_turn(
             history=history,
             model=model,
@@ -725,6 +758,9 @@ async def _run_llm_turn(
             send_tts_sentence=send_tts_sentence,
             project_scope=project_scope,
             system_blocks=system_blocks,
+            send_tool_call=send_tool_call,
+            cwd=repo_cwd,
+            subject=session_id,
         )
 
         await tts_queue.put(None)
@@ -933,42 +969,22 @@ async def _route_user_turn(
     current_speed: float = 1.0,
     stt_seconds: float = 0.0,
 ) -> None:
-    """Single entry point that classifies then routes to chat/task/status/cancel.
+    """Single entry point — Phase 2: every turn goes to the Gemini brain.
+
+    The classifier preflight (chat / task / status / cancel) was retired
+    because the Gemini brain self-routes via tool use:
+      * Read / Bash / Grep handle "show me the latest commits" / "what's
+        in this file" / "find all callers of X" — formerly the chat path.
+      * dispatch_agent handles "build me X" / "fix the auth bug" — formerly
+        the task path.
+      * Direct UI cancel button (TaskBubble red-X) still hits _route_cancel
+        below; that path is wired straight to the WS frame ``msg_type ==
+        "cancel"`` handler in voice_ws and bypasses this router.
 
     `stt_seconds` is the duration of audio transcribed to produce `user_text`.
-    Zero for pure text-mode turns. Only the chat path (record_turn + TTS)
-    consumes it today; task/status/cancel paths don't write turn rows so STT
-    billing doesn't apply there.
+    Zero for pure text-mode turns. Recorded against the turn row by the
+    chat path's billing leg.
     """
-    # Switch intent has already run upstream. Now classify.
-    result = await classify_intent(user_text, current_project)
-    intent = result["intent"]
-
-    if intent == "chat":
-        await _handle_text_turn(
-            ws, session_id, history, user_text, current_project, current_speed,
-            stt_seconds=stt_seconds,
-        )
-        return
-
-    if intent == "task":
-        await _route_task(
-            ws, session_id, history,
-            result.get("task_spec") or user_text, current_project,
-            current_speed,
-            stt_seconds=stt_seconds,
-        )
-        return
-
-    if intent == "status":
-        await _route_status(ws, session_id, history, current_project, current_speed)
-        return
-
-    if intent == "cancel":
-        await _route_cancel(ws, session_id, current_speed)
-        return
-
-    # Should not reach — classifier is typed.
     await _handle_text_turn(
         ws, session_id, history, user_text, current_project, current_speed,
         stt_seconds=stt_seconds,
