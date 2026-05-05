@@ -528,6 +528,94 @@ class TestCancellation:
 
 
 # ---------------------------------------------------------------------------
+# Auth-path selection in _get_client
+# ---------------------------------------------------------------------------
+class TestGetClientAuthSelection:
+    """Verify _get_client picks AI Studio when an API key is set, and
+    falls back to Vertex AI service-account auth otherwise."""
+
+    def test_uses_ai_studio_when_api_key_set(self, monkeypatch):
+        # Clear cached client + creds env so the resolver runs fresh.
+        monkeypatch.setattr(gemini_brain, "_client", None)
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-abc")
+        # Settings was loaded at import time without the key — patch the
+        # attribute so our resolver sees it (mirrors the .env-loaded path).
+        monkeypatch.setattr(
+            gemini_brain.settings, "GEMINI_API_KEY", "fake-key-abc",
+            raising=False,
+        )
+
+        captured: dict = {}
+
+        class _FakeAIStudioClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        # Patch the genai module that _get_client imports.
+        from google import genai as real_genai
+        monkeypatch.setattr(real_genai, "Client", _FakeAIStudioClient)
+
+        client = gemini_brain._get_client()
+        assert isinstance(client, _FakeAIStudioClient)
+        assert captured == {"api_key": "fake-key-abc"}
+        assert "vertexai" not in captured
+        assert "project" not in captured
+
+    def test_falls_back_to_vertex_when_no_api_key(self, monkeypatch):
+        monkeypatch.setattr(gemini_brain, "_client", None)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.setattr(
+            gemini_brain.settings, "GEMINI_API_KEY", None, raising=False,
+        )
+        monkeypatch.setattr(
+            gemini_brain.settings, "GOOGLE_API_KEY", None, raising=False,
+        )
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+        monkeypatch.setattr(
+            gemini_brain.settings, "VERTEX_AI_PROJECT", "test-project",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            gemini_brain.settings, "VERTEX_AI_LOCATION", "us-central1",
+            raising=False,
+        )
+
+        captured: dict = {}
+
+        class _FakeVertexClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        from google import genai as real_genai
+        monkeypatch.setattr(real_genai, "Client", _FakeVertexClient)
+
+        client = gemini_brain._get_client()
+        assert isinstance(client, _FakeVertexClient)
+        assert captured["vertexai"] is True
+        assert captured["project"] == "test-project"
+        assert captured["location"] == "us-central1"
+        assert "api_key" not in captured
+
+    def test_raises_when_neither_configured(self, monkeypatch):
+        monkeypatch.setattr(gemini_brain, "_client", None)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setattr(
+            gemini_brain.settings, "GEMINI_API_KEY", None, raising=False,
+        )
+        monkeypatch.setattr(
+            gemini_brain.settings, "GOOGLE_API_KEY", None, raising=False,
+        )
+
+        with pytest.raises(RuntimeError, match="no auth configured"):
+            gemini_brain._get_client()
+
+
+# ---------------------------------------------------------------------------
 # Cost computation
 # ---------------------------------------------------------------------------
 class TestCostComputation:

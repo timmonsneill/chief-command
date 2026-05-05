@@ -73,11 +73,20 @@ _client: Optional[Any] = None
 
 
 def _get_client() -> Any:
-    """Lazily construct + cache the google-genai Vertex AI client.
+    """Lazily construct + cache the google-genai client.
 
-    Auth: relies on GOOGLE_APPLICATION_CREDENTIALS in os.environ (set by
-    config.settings on import when present in .env). Project + location come
-    from settings; both have sensible defaults so a bare-minimum .env works.
+    Auto-detects which auth path to use:
+      1. **AI Studio (api_key)** — if ``GEMINI_API_KEY`` (or its alias
+         ``GOOGLE_API_KEY``) is set in env or settings, build
+         ``genai.Client(api_key=...)``. No project/location/IAM needed; the
+         key is minted from "Gemini API" / Generative Language API in GCP.
+      2. **Vertex AI (service account)** — otherwise, if
+         ``GOOGLE_APPLICATION_CREDENTIALS`` points at a JSON key, build
+         ``genai.Client(vertexai=True, project=..., location=...)`` using
+         the project + location from settings.
+      3. If neither is configured, raise a clear ``RuntimeError`` so the
+         failure mode shows up plainly in the logs instead of as a Google
+         auth 403.
 
     The genai client is light enough to be created per-process; we cache one
     instance to avoid the constructor's HTTP discovery cost on every turn.
@@ -87,23 +96,40 @@ def _get_client() -> Any:
         return _client
     from google import genai
 
-    project = settings.VERTEX_AI_PROJECT
-    location = settings.VERTEX_AI_LOCATION
-    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        logger.warning(
-            "gemini_brain: GOOGLE_APPLICATION_CREDENTIALS not set in env — "
-            "Vertex AI auth will fail unless ADC is configured another way."
+    # Resolve API key from settings first, then fall back to raw env so
+    # values set after settings was loaded still work. settings.GEMINI_API_KEY
+    # takes precedence over GOOGLE_API_KEY when both are set.
+    api_key = (
+        getattr(settings, "GEMINI_API_KEY", None)
+        or getattr(settings, "GOOGLE_API_KEY", None)
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+    )
+
+    if api_key:
+        _client = genai.Client(api_key=api_key)
+        logger.info("gemini_brain: using AI Studio (api_key)")
+        return _client
+
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        project = settings.VERTEX_AI_PROJECT
+        location = settings.VERTEX_AI_LOCATION
+        _client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
         )
-    _client = genai.Client(
-        vertexai=True,
-        project=project,
-        location=location,
+        logger.info(
+            "gemini_brain: using Vertex AI (project=%s location=%s)",
+            project, location,
+        )
+        return _client
+
+    raise RuntimeError(
+        "gemini_brain: no auth configured. Set GEMINI_API_KEY for the "
+        "AI Studio path, or GOOGLE_APPLICATION_CREDENTIALS + Vertex AI "
+        "roles for the service-account path."
     )
-    logger.info(
-        "gemini_brain: Vertex AI client initialized project=%s location=%s",
-        project, location,
-    )
-    return _client
 
 
 def _compute_cost_cents(usage_meta: Any) -> int:

@@ -46,9 +46,20 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "/tmp/chief-uploads"
 
     # ------------------------------------------------------------------ #
-    # Phase 2 — Gemini-on-Vertex-AI brain
+    # Phase 2 — Gemini brain (AI Studio API key OR Vertex AI service-account)
     # ------------------------------------------------------------------ #
-    # Project + region used by gemini_brain when it constructs the
+    # The brain auto-detects which auth path to use at client init:
+    #   1. If GEMINI_API_KEY (or its alias GOOGLE_API_KEY) is set, the
+    #      AI Studio path is used — no project/location/IAM required, just
+    #      enable "Generative Language API" in GCP and mint a key.
+    #   2. Otherwise the Vertex AI service-account path is used, requiring
+    #      GOOGLE_APPLICATION_CREDENTIALS pointed at a JSON key with the
+    #      Vertex AI roles, plus the project + location below.
+    # See services/gemini_brain._get_client for the resolution order.
+    GEMINI_API_KEY: Optional[str] = None
+    GOOGLE_API_KEY: Optional[str] = None  # alias accepted by genai SDK
+
+    # Project + region used by gemini_brain when it falls back to the
     # ``google-genai`` Vertex AI client. Defaults match the existing
     # ``chief-command-voice`` GCP project (same one Phase 1.1 voice uses);
     # location is the lowest-latency region for the owner's home network.
