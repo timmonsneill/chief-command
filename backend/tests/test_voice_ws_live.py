@@ -152,15 +152,25 @@ class FakeLiveSession:
         self.on_output_transcript = kwargs.get("on_output_transcript")
         self.on_interrupted = kwargs.get("on_interrupted")
         self.on_turn_complete = kwargs.get("on_turn_complete")
+        self.on_tool_call = kwargs.get("on_tool_call")
         self.on_session_resumed = kwargs.get("on_session_resumed")
         self.on_go_away = kwargs.get("on_go_away")
+        self.extra_tools = kwargs.get("extra_tools")
 
         self.opened = False
         self.closed = False
         self.sent_audio: list[bytes] = []
         self.sent_text: list[str] = []
         self.cancel_calls = 0
+        # Function responses sent back by the WS layer in response to
+        # tool_call events. Tests assert against this list.
+        self.tool_responses: list[list] = []
         FakeLiveSession.instances.append(self)
+
+    async def send_tool_response(self, *, function_responses) -> None:
+        # Capture the list reference so the test can introspect each
+        # FunctionResponse's id / name / payload.
+        self.tool_responses.append(list(function_responses))
 
     async def open(self) -> None:
         self.opened = True
@@ -206,6 +216,35 @@ def patched_ws(monkeypatch):
 
     # Replace LiveSession constructor with the fake.
     monkeypatch.setattr(ws_mod, "LiveSession", FakeLiveSession)
+
+    # Daily cap check defaults to under-cap (so the WS opens). Tests that
+    # need over-cap behaviour patch this in-place.
+    cap_calls: list[str] = []
+
+    async def fake_check_daily_cap(subject="owner"):
+        cap_calls.append(subject)
+        return False, 0.0
+    monkeypatch.setattr(ws_mod, "check_daily_cap", fake_check_daily_cap)
+
+    # to_gemini_tool stub — returns a sentinel so we can assert it was
+    # passed through to LiveSession via extra_tools without dragging in
+    # the genai SDK.
+    sentinel_tool = object()
+    monkeypatch.setattr(ws_mod, "to_gemini_tool", lambda: sentinel_tool)
+
+    # Tool dispatch stub — captures calls; default returns a benign result.
+    dispatch_calls: list[dict] = []
+
+    async def fake_dispatch_tool(name, args, *, cwd, subject, scope, system_prompt_append):
+        dispatch_calls.append({
+            "name": name,
+            "args": dict(args),
+            "subject": subject,
+            "scope": scope,
+        })
+        from services.agent_tools import ToolResult
+        return ToolResult(output=f"<{name} ran>", error=False)
+    monkeypatch.setattr(ws_mod, "dispatch_tool", fake_dispatch_tool)
 
     # Memory load: deterministic stub. Each call returns (summary, history)
     # tagged with the scope so scope-flip-rebuild is observable.
@@ -294,6 +333,9 @@ def patched_ws(monkeypatch):
         sessions_closed=sessions_closed,
         record_turn_calls=record_turn_calls,
         dispatcher=fake_dispatcher,
+        cap_calls=cap_calls,
+        sentinel_tool=sentinel_tool,
+        dispatch_calls=dispatch_calls,
     )
 
 
@@ -472,15 +514,19 @@ async def test_on_turn_complete_persists_history_and_spawns_rollup(patched_ws):
     # maybe_rollup spawned for the current scope.
     assert "Chief Command" in patched_ws.rollup_spawns
 
-    # record_turn called with mapped usage + Live model.
+    # record_turn called with mapped usage + Live model. Stage 3: when
+    # the modality breakdown is present, ``input_tokens`` is text-only
+    # (20) and audio_input_tokens (80) bills separately at the audio rate.
     assert len(patched_ws.record_turn_calls) == 1
     call = patched_ws.record_turn_calls[0]
     assert call["model"] == patched_ws.ws_mod.LIVE_MODEL
     assert call["user_text"] == "hello chief"
     assert call["assistant_text"] == "hi neill"
-    assert call["usage_dict"]["input_tokens"] == 100
-    assert call["usage_dict"]["output_tokens"] == 40
+    assert call["usage_dict"]["input_tokens"] == 20
+    assert call["usage_dict"]["output_tokens"] == 10
     assert call["usage_dict"]["cache_read_input_tokens"] == 10
+    assert call["usage_dict"]["audio_input_tokens"] == 80
+    assert call["usage_dict"]["audio_output_tokens"] == 30
 
     # FE saw generation_complete + usage frames.
     types_seen = [f.get("type") for f in ws.outbound_json]
@@ -527,6 +573,214 @@ async def test_input_and_output_transcripts_emit_ws_frames(patched_ws):
         {"type": "output_transcript", "text": "reply chunk", "is_final": False},
         {"type": "output_transcript", "text": "reply chunk done", "is_final": True},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: tool-call wiring + daily cap
+# ---------------------------------------------------------------------------
+class _FakeFunctionCall:
+    """Duck-types google.genai FunctionCall for the bits voice_ws reads."""
+
+    def __init__(self, name: str, args: dict, fc_id: str | None = None):
+        self.name = name
+        self.args = args
+        self.id = fc_id
+
+
+class _FakeToolCallEvent:
+    """Duck-types tool_call event with .function_calls."""
+
+    def __init__(self, calls):
+        self.function_calls = calls
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_passes_tool_list_to_live_session(patched_ws):
+    """LiveSession is constructed with extra_tools=[sentinel] from to_gemini_tool."""
+    ws = FakeWebSocket()
+    await ws.finish()
+    await patched_ws.ws_mod.voice_ws(ws)
+
+    sess = FakeLiveSession.instances[0]
+    assert sess.extra_tools == [patched_ws.sentinel_tool]
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_dispatches_tool_call_and_replies(patched_ws, monkeypatch):
+    """A tool_call from Live triggers dispatch_tool + send_tool_response."""
+    # Patch the lazy genai import inside the on_tool_call handler so it
+    # doesn't try to load the real SDK during the test.
+    fake_genai_types = types.SimpleNamespace(
+        FunctionResponse=lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    fake_genai_pkg = types.SimpleNamespace(types=fake_genai_types)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai_pkg)
+    monkeypatch.setitem(sys.modules, "google", types.SimpleNamespace(genai=fake_genai_pkg))
+
+    ws = FakeWebSocket()
+    # Push one inbound byte so the session_id is created. NOTE: do NOT
+    # finish() yet — that would queue the disconnect, which the receive
+    # loop would process and trigger the close path before the test
+    # can fire on_tool_call. We keep the queue blocking so live_session_box
+    # stays populated while we drive the callback.
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+
+    # Wait for the LiveSession instance to materialize.
+    for _ in range(50):
+        if FakeLiveSession.instances:
+            break
+        await asyncio.sleep(0.01)
+    sess = FakeLiveSession.instances[0]
+    # Wait for the byte forward so ensure_session_id ran.
+    for _ in range(50):
+        if sess.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    # Fire the on_tool_call callback manually with a fake FunctionCall.
+    fake_event = _FakeToolCallEvent([
+        _FakeFunctionCall(
+            name="think_deep",
+            args={"prompt": "walk me through the migration"},
+            fc_id="fc-1",
+        )
+    ])
+    await sess.on_tool_call(fake_event)
+    # Now finish so voice_ws drains and exits its finally block.
+    await ws.finish()
+    await task
+
+    # dispatch_tool was called once with the right args.
+    assert len(patched_ws.dispatch_calls) == 1
+    call = patched_ws.dispatch_calls[0]
+    assert call["name"] == "think_deep"
+    assert call["args"]["prompt"] == "walk me through the migration"
+    assert call["scope"] == "Chief Command"
+    assert call["subject"] == "owner"
+
+    # send_tool_response was called with one FunctionResponse.
+    assert len(sess.tool_responses) == 1
+    fr_list = sess.tool_responses[0]
+    assert len(fr_list) == 1
+    fr = fr_list[0]
+    assert fr.id == "fc-1"
+    assert fr.name == "think_deep"
+    assert fr.response["output"] == "<think_deep ran>"
+    assert fr.response["error"] is False
+
+    # FE saw running + complete tool_call frames.
+    tool_frames = [f for f in ws.outbound_json if f.get("type") == "tool_call"]
+    statuses = [f.get("status") for f in tool_frames]
+    assert "running" in statuses
+    assert "complete" in statuses
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_tool_call_error_emits_error_chip(patched_ws, monkeypatch):
+    """A tool that errors emits a status=error chip and a FunctionResponse with error=True."""
+    fake_genai_types = types.SimpleNamespace(
+        FunctionResponse=lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    fake_genai_pkg = types.SimpleNamespace(types=fake_genai_types)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai_pkg)
+    monkeypatch.setitem(sys.modules, "google", types.SimpleNamespace(genai=fake_genai_pkg))
+
+    # Override dispatch_tool to return an error.
+    async def errored_dispatch(name, args, *, cwd, subject, scope, system_prompt_append):
+        from services.agent_tools import ToolResult
+        return ToolResult(output="error: boom", error=True)
+    monkeypatch.setattr(patched_ws.ws_mod, "dispatch_tool", errored_dispatch)
+
+    ws = FakeWebSocket()
+    # Don't finish yet — keep the receive loop blocked so live_session_box
+    # stays populated while we drive the on_tool_call callback.
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+    for _ in range(50):
+        if FakeLiveSession.instances:
+            break
+        await asyncio.sleep(0.01)
+    sess = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if sess.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    await sess.on_tool_call(_FakeToolCallEvent([
+        _FakeFunctionCall(name="Read", args={"path": "missing.py"}, fc_id="fc-2"),
+    ]))
+    await ws.finish()
+    await task
+
+    statuses = [
+        f.get("status") for f in ws.outbound_json if f.get("type") == "tool_call"
+    ]
+    assert "error" in statuses
+    fr = sess.tool_responses[0][0]
+    assert fr.response["error"] is True
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_refuses_when_daily_cap_exceeded(patched_ws, monkeypatch):
+    """check_daily_cap returns over → WS closes with 4003 + quota_exceeded."""
+    async def over_cap(subject="owner"):
+        return True, 17.50
+    monkeypatch.setattr(patched_ws.ws_mod, "check_daily_cap", over_cap)
+
+    ws = FakeWebSocket()
+    await ws.finish()
+    await patched_ws.ws_mod.voice_ws(ws)
+
+    # No LiveSession opened.
+    assert FakeLiveSession.instances == []
+    # Quota frame emitted, WS closed with 4003.
+    quota_frames = [f for f in ws.outbound_json if f.get("type") == "quota_exceeded"]
+    assert len(quota_frames) == 1
+    assert quota_frames[0]["current_today_dollars"] == 17.5
+    assert ws.closed_with == 4003
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_audio_tokens_flow_through_to_record_turn(patched_ws):
+    """on_turn_complete with audio tokens passes them through to record_turn."""
+    ws = FakeWebSocket()
+    # Don't finish yet — receive loop must stay blocked while we drive
+    # the callback.
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+    for _ in range(50):
+        if FakeLiveSession.instances:
+            break
+        await asyncio.sleep(0.01)
+    sess = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if sess.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    await sess.on_input_transcript("hey", True)
+    await sess.on_output_transcript("hi", True)
+    await sess.on_turn_complete({
+        "prompt_token_count": 6000,    # 1000 text + 5000 audio
+        "response_token_count": 3200,  # 200 text + 3000 audio
+        "cached_content_token_count": 0,
+        "audio_input_tokens": 5000,
+        "audio_output_tokens": 3000,
+        "text_input_tokens": 1000,
+        "text_output_tokens": 200,
+    })
+    await ws.finish()
+    await task
+
+    assert len(patched_ws.record_turn_calls) == 1
+    usage_dict = patched_ws.record_turn_calls[0]["usage_dict"]
+    # Stage 3: audio tokens land as separate kwargs; text tokens are
+    # the modality-broken-out values.
+    assert usage_dict["audio_input_tokens"] == 5000
+    assert usage_dict["audio_output_tokens"] == 3000
+    assert usage_dict["input_tokens"] == 1000
+    assert usage_dict["output_tokens"] == 200
 
 
 @pytest.mark.asyncio

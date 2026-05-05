@@ -40,6 +40,7 @@ from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav, get_audio_duration
 from services import cc_session
+from services.agent_tools import dispatch_tool, to_gemini_tool
 from services.chief_context import build_chief_system, build_chief_system_string
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
 from services.gemini_brain import GEMINI_MODEL
@@ -60,6 +61,7 @@ from services.router import (
     random_voice_bridge_phrase,
 )
 from services.usage_tracker import (
+    check_daily_cap,
     close_session,
     create_session,
     get_session_totals,
@@ -230,6 +232,32 @@ async def voice_ws(ws: WebSocket) -> None:
         await ws.close(code=4001)
         return
 
+    # Stage 3 daily cap. Check at WS open and refuse if today's spend has
+    # already hit the cap — opening a new Live session burns ~$3-5/hour
+    # in audio + escalation cost, so a hot WS in a runaway loop must not
+    # be allowed to start. Re-checked periodically inside the receive
+    # loop too (see DAILY_CAP_RECHECK_INTERVAL_S below).
+    try:
+        over_cap, current_today = await check_daily_cap(client_id)
+    except Exception as exc:
+        # Fail open — better to allow voice than to brick on a sqlite
+        # hiccup. The cap will catch up on the next per-turn recheck.
+        logger.warning("voice_ws daily cap precheck failed: %s", exc)
+        over_cap, current_today = False, 0.0
+    if over_cap:
+        from services.usage_tracker import _daily_cost_cap_dollars
+        await ws_send_json(ws, {
+            "type": "quota_exceeded",
+            "current_today_dollars": round(current_today, 4),
+            "cap_dollars": _daily_cost_cap_dollars(),
+        })
+        await ws.close(code=4003)
+        logger.warning(
+            "voice_ws refused — daily cap exceeded subject=%s today=$%.4f",
+            client_id, current_today,
+        )
+        return
+
     session_id: Optional[str] = None
     history: list[dict] = []
     # Phase 3: rolling cross-session memory. Loaded alongside ``history`` at
@@ -293,6 +321,20 @@ async def voice_ws(ws: WebSocket) -> None:
             )
         return session_id
 
+    # ----- Stage 3: tool list (constructed once per WS connection) -----
+    # ``to_gemini_tool()`` walks ``agent_tools.ALL_TOOLS`` and returns a
+    # single Gemini ``Tool`` carrying every function declaration. Built
+    # once here (not per-LiveSession) because the schemas don't change
+    # mid-connection — only the system prompt does on a scope flip, and
+    # that's already handled by close-and-reopen of the LiveSession.
+    try:
+        live_tool_list: list = [to_gemini_tool()]
+    except Exception as exc:
+        # If tool construction fails (SDK import error in a degraded env),
+        # fall back to no-tools so voice still works in chat-only mode.
+        logger.warning("voice_ws tool list build failed: %s", exc)
+        live_tool_list = []
+
     # ----- LiveSession callbacks -----
     # Each callback funnels its event onto a WS frame (or accumulates state)
     # and is registered by reference at session-open time. We wrap WS sends
@@ -349,6 +391,200 @@ async def voice_ws(ws: WebSocket) -> None:
             await ws_send_json(ws, {"type": "go_away", "time_left": time_left})
         except Exception as exc:
             logger.debug("voice_ws (Live) go_away send failed: %s", exc)
+
+    async def _on_tool_call(tool_call_event: any) -> None:
+        """Stage 3: execute Live's tool calls and reply via send_tool_response.
+
+        Live emits a single ``tool_call`` server event carrying one or
+        more ``FunctionCall`` parts. We:
+          1. Resolve cwd/scope/subject from the WS connection's state.
+          2. For each FunctionCall: emit a ``tool_call`` WS frame with
+             ``status: "running"`` so the FE chip lights up.
+          3. Dispatch via ``agent_tools.dispatch_tool``.
+          4. Emit a terminal ``tool_call`` WS frame
+             (status complete | error | cancelled).
+          5. Build a ``FunctionResponse`` per call and reply via
+             ``LiveSession.send_tool_response`` so the model can
+             continue the turn with the tool output in context.
+          6. Append a synthetic ``[tool: ...]`` note to history so cross-
+             reconnect tool memory survives — same shape as the text-mode
+             gemini_brain path.
+
+        Cancellation: if the receive pump is being torn down (close on WS
+        drop / scope flip), individual dispatches may raise
+        CancelledError mid-flight. We catch it per-call so one cancel
+        doesn't silence the rest of the round, then ALWAYS attempt a
+        send_tool_response — Live's protocol requires a response for
+        every call ID; a missing response wedges the model on the
+        server side until the session times out.
+        """
+        # Read the live session reference at handler entry. We don't
+        # early-return if it's None — the callback can fire during the
+        # close-and-reopen window of a scope flip, and we still want to
+        # execute the tool (so the model can see its result on the new
+        # session) even if we can't send a tool_response on the closed
+        # session. The send_tool_response call below is wrapped in
+        # try/except for that case.
+        sess = live_session_box[0]
+        fcalls = getattr(tool_call_event, "function_calls", None) or []
+        if not fcalls:
+            return
+        logger.info("voice_ws tool_call: dispatching %d call(s)", len(fcalls))
+
+        # Resolve sandbox parameters from the active scope. ``get_repo_path``
+        # returns None for scopes without a repo (e.g. PA before Phase 0
+        # foundation); ``dispatch_tool`` then refuses Read/Bash/Grep/dispatch
+        # but allows think_deep through (see agent_tools.dispatch_tool).
+        from pathlib import Path
+        repo_cwd = get_repo_path(current_project)
+        cwd = repo_cwd if repo_cwd is not None else Path.home()
+
+        # Lazy SDK import for FunctionResponse construction.
+        try:
+            from google.genai import types
+        except Exception as exc:
+            logger.warning("voice_ws tool_call: genai import failed: %s", exc)
+            return
+
+        function_responses: list = []
+        for fc in fcalls:
+            tool_name = getattr(fc, "name", "") or ""
+            raw_args = getattr(fc, "args", None) or {}
+            try:
+                args_dict = dict(raw_args)
+            except Exception:
+                args_dict = {}
+
+            # Args summary (truncated) for the WS frame so the chip doesn't
+            # carry a 20KB Bash command verbatim. Same shape gemini_brain
+            # emits to keep the FE renderer single-purpose.
+            args_summary: dict = {}
+            for k, v in args_dict.items():
+                if isinstance(v, str) and len(v) > 200:
+                    args_summary[k] = v[:200] + "...<truncated>"
+                else:
+                    args_summary[k] = v
+
+            # Emit the "running" chip frame.
+            try:
+                await ws_send_json(ws, {
+                    "type": "tool_call",
+                    "name": tool_name,
+                    "args": args_summary,
+                    "status": "running",
+                })
+            except Exception as exc:
+                logger.debug("voice_ws tool_call running emit failed: %s", exc)
+
+            import time as _time
+            started = _time.monotonic()
+            cancelled_in_tool = False
+            result = None
+            try:
+                result = await dispatch_tool(
+                    tool_name,
+                    args_dict,
+                    cwd=cwd,
+                    subject=client_id,
+                    scope=current_project,
+                    system_prompt_append="",
+                )
+            except asyncio.CancelledError:
+                cancelled_in_tool = True
+                # Don't re-raise — we still need to flush a function_response
+                # for THIS call (Live wedges otherwise). Mark a synthetic
+                # error result so the model sees the cancel as a recoverable
+                # tool failure instead of a missing response.
+                from services.agent_tools import ToolResult
+                result = ToolResult(output="error: tool cancelled", error=True)
+            except Exception as exc:
+                # Don't leak raw exception text to the model (or by
+                # extension, the user's voice). Detail stays in the log.
+                logger.exception(
+                    "voice_ws tool_call: %r raised: %s", tool_name, exc,
+                )
+                from services.agent_tools import ToolResult
+                result = ToolResult(output="error: tool execution failed", error=True)
+
+            # Terminal chip frame.
+            try:
+                duration_ms = int((_time.monotonic() - started) * 1000)
+                if cancelled_in_tool:
+                    status = "cancelled"
+                elif getattr(result, "error", False):
+                    status = "error"
+                else:
+                    status = "complete"
+                preview_text = getattr(result, "output", "") or ""
+                if isinstance(preview_text, str) and len(preview_text) > 240:
+                    preview_text = preview_text[:240] + "..."
+                await ws_send_json(ws, {
+                    "type": "tool_call",
+                    "name": tool_name,
+                    "args": args_summary,
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "preview": preview_text,
+                })
+            except Exception as exc:
+                logger.debug("voice_ws tool_call terminal emit failed: %s", exc)
+
+            # Build the FunctionResponse for Live. ``id`` matches the
+            # FunctionCall's id so Live correlates response → call when
+            # parallel calls of the same name happen in one round.
+            response_payload = {
+                "output": getattr(result, "output", "") or "",
+                "error": bool(getattr(result, "error", False)),
+            }
+            try:
+                fr = types.FunctionResponse(
+                    id=getattr(fc, "id", None),
+                    name=tool_name,
+                    response=response_payload,
+                )
+                function_responses.append(fr)
+            except Exception as exc:
+                logger.warning(
+                    "voice_ws tool_call: FunctionResponse build failed: %s", exc,
+                )
+
+            # Synthetic tool note for cross-session memory. Same builder
+            # the text-mode path uses; the WS layer's history-append path
+            # is the dedupe of `on_tool_round_complete` from gemini_brain.
+            try:
+                from services.gemini_brain import _build_tool_note
+                note = _build_tool_note(
+                    tool_name=tool_name,
+                    args=args_dict,
+                    output=getattr(result, "output", "") or "",
+                    error=bool(getattr(result, "error", False)),
+                )
+                if note:
+                    history.append({"role": "assistant", "content": note})
+                    sid = await ensure_session_id()
+                    try:
+                        await append_turn(sid, current_project, "assistant", note)
+                    except Exception as exc:
+                        logger.warning(
+                            "voice_ws tool note persist failed: %s", exc,
+                        )
+            except Exception as exc:
+                logger.debug("voice_ws tool note build failed: %s", exc)
+
+        # Reply to Live with all function_responses in one call. The
+        # protocol expects a single send_tool_response per server
+        # tool_call event — sending one per FunctionResponse would be a
+        # protocol error.
+        if function_responses and sess is not None:
+            try:
+                await sess.send_tool_response(function_responses=function_responses)
+            except Exception as exc:
+                logger.warning("voice_ws send_tool_response failed: %s", exc)
+        elif function_responses:
+            logger.warning(
+                "voice_ws tool_call: session closed before send_tool_response "
+                "(scope flip / WS drop mid-tool); responses dropped",
+            )
 
     async def _on_turn_complete(usage: dict) -> None:
         """Persist the just-finished turn + record billing.
@@ -411,16 +647,44 @@ async def voice_ws(ws: WebSocket) -> None:
                 )
 
         # Record billing. Map Live's usage_metadata into the shape
-        # ``record_turn`` expects. Audio token counts go into the
-        # standard input/output buckets too so non-Stage-3 readers (rollup
-        # queries, dashboard) see SOMETHING for spend instead of zero —
-        # Stage 3 will refine when the audio-aware cost path lands.
+        # ``record_turn`` expects. Stage 3 plumbs audio_input_tokens /
+        # audio_output_tokens through so ``compute_cost_cents`` bills
+        # them at the Live native-audio rates ($3/M in, $12/M out)
+        # instead of dropping them on the floor.
         try:
+            audio_in = int(usage.get("audio_input_tokens", 0) or 0)
+            audio_out = int(usage.get("audio_output_tokens", 0) or 0)
+            # Live's prompt_token_count is the SUM of audio + text input
+            # tokens. To bill text-input at $0.50/M (vs audio at $3/M)
+            # without double-counting, use ``text_input_tokens`` if the
+            # session pump captured it; otherwise back it out from the
+            # total. Same logic for output. ``LiveSession._accumulate_usage``
+            # populates these fields when modality breakdowns arrive.
+            text_in = int(usage.get("text_input_tokens", 0) or 0)
+            text_out = int(usage.get("text_output_tokens", 0) or 0)
+            if text_in == 0 and audio_in > 0:
+                # Modality breakdown didn't land — back it out from the
+                # cumulative total so we don't double-bill audio at the
+                # text rate.
+                total_in = int(usage.get("prompt_token_count", 0) or 0)
+                text_in = max(0, total_in - audio_in)
+            if text_out == 0 and audio_out > 0:
+                total_out = int(usage.get("response_token_count", 0) or 0)
+                text_out = max(0, total_out - audio_out)
+            # When audio counts are zero (e.g. a typed-only turn), fall
+            # back to the cumulative scalars so text-only turns continue
+            # to bill exactly as before.
+            if audio_in == 0 and text_in == 0:
+                text_in = int(usage.get("prompt_token_count", 0) or 0)
+            if audio_out == 0 and text_out == 0:
+                text_out = int(usage.get("response_token_count", 0) or 0)
             usage_dict = {
-                "input_tokens": int(usage.get("prompt_token_count", 0) or 0),
-                "output_tokens": int(usage.get("response_token_count", 0) or 0),
+                "input_tokens": text_in,
+                "output_tokens": text_out,
                 "cache_read_input_tokens": int(usage.get("cached_content_token_count", 0) or 0),
                 "cache_creation_input_tokens": 0,
+                "audio_input_tokens": audio_in,
+                "audio_output_tokens": audio_out,
             }
             turn = await record_turn(
                 session_id=sid,
@@ -455,6 +719,40 @@ async def voice_ws(ws: WebSocket) -> None:
         except Exception as exc:
             logger.debug("voice_ws (Live) generation_complete send failed: %s", exc)
 
+        # Stage 3 daily cap recheck after each turn. We do this here
+        # (rather than on a fixed timer) because turn boundaries are the
+        # natural granularity for "is this session getting expensive" —
+        # a single Live turn can run $0.30+ on a long reply, so checking
+        # post-turn means we close before the NEXT turn begins instead of
+        # mid-utterance. The close path emits ``quota_exceeded`` with the
+        # current spend so the FE can render an explanation.
+        try:
+            over_cap_post, current_post = await check_daily_cap(client_id)
+        except Exception as exc:
+            logger.warning("voice_ws daily cap recheck failed: %s", exc)
+            over_cap_post = False
+            current_post = 0.0
+        if over_cap_post:
+            from services.usage_tracker import _daily_cost_cap_dollars
+            try:
+                await ws_send_json(ws, {
+                    "type": "quota_exceeded",
+                    "current_today_dollars": round(current_post, 4),
+                    "cap_dollars": _daily_cost_cap_dollars(),
+                })
+            except Exception as exc:
+                logger.debug(
+                    "voice_ws quota_exceeded emit failed: %s", exc,
+                )
+            logger.warning(
+                "voice_ws closing — daily cap exceeded subject=%s today=$%.4f",
+                client_id, current_post,
+            )
+            try:
+                await ws.close(code=4003)
+            except Exception:
+                pass
+
     # ----- LiveSession lifecycle helpers -----
     async def _open_live_session() -> LiveSession:
         """Build + open a LiveSession with the current scope's system prompt."""
@@ -469,8 +767,10 @@ async def voice_ws(ws: WebSocket) -> None:
             on_output_transcript=_on_output_transcript,
             on_interrupted=_on_interrupted,
             on_turn_complete=_on_turn_complete,
+            on_tool_call=_on_tool_call,
             on_session_resumed=_on_session_resumed,
             on_go_away=_on_go_away,
+            extra_tools=live_tool_list if live_tool_list else None,
         )
         await sess.open()
         live_session_box[0] = sess

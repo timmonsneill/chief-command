@@ -260,10 +260,17 @@ class LiveSession:
         on_session_resumed: Optional[SessionResumedCb] = None,
         on_go_away: Optional[GoAwayCb] = None,
         resumption_handle: Optional[str] = None,
+        extra_tools: Optional[list[Any]] = None,
     ) -> None:
         # Required identity
         self.model = model
         self.system_prompt = system_prompt
+        # Stage 3: tool list forwarded to LiveConnectConfig at open() time.
+        # Caller (websockets layer) constructs this once via
+        # ``agent_tools.to_gemini_tool()`` and passes in. Stored on the
+        # instance because open() may be called more than once if the
+        # lifecycle ever grows a re-open path (Stage 4 reconnect).
+        self.extra_tools = extra_tools
 
         # Callbacks — all stored even if None. The pump tests for None
         # before invoking each one.
@@ -322,6 +329,7 @@ class LiveSession:
         config = _build_live_config(
             system_prompt=self.system_prompt,
             resumption_handle=self.resumption_handle,
+            extra_tools=self.extra_tools,
         )
 
         # ``client.aio.live.connect`` returns an async context manager.
@@ -570,13 +578,17 @@ class LiveSession:
                 tag="on_go_away",
             )
 
-        # ----- tool_call (Stage 3 will wire) -----
+        # ----- tool_call -----
+        # Stage 3: caller's on_tool_call handler is responsible for
+        # executing each FunctionCall via agent_tools.dispatch_tool, then
+        # calling self.send_tool_response(...) with the FunctionResponse
+        # list. The pump just routes the event — actual dispatch lives in
+        # the WS layer where cwd/subject/scope are known.
         tc = getattr(response, "tool_call", None)
         if tc is not None:
             fcalls = getattr(tc, "function_calls", None) or []
-            logger.warning(
-                "gemini_live: tool_call received (Stage 3 not wired) — "
-                "%d function call(s); names=%s",
+            logger.info(
+                "gemini_live: tool_call received — %d function call(s); names=%s",
                 len(fcalls),
                 [getattr(fc, "name", "?") for fc in fcalls],
             )

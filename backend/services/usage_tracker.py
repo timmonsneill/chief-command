@@ -9,14 +9,68 @@ Voice costs are stored in USD (float) rather than cents (int) because Google's
 per-second / per-character rates produce sub-cent per-turn costs that would
 lose precision if rounded to cents on write. Rollup endpoints convert to
 whatever unit the frontend wants.
+
+Stage 3 of the Live pivot adds:
+  * audio token billing on Live native-audio (audio_in/audio_out rates)
+  * think_deep escalation cost (Sonnet/Opus via direct Anthropic API)
+  * daily cost cap ($15/day default) checked at WS open + during sessions
 """
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from db import get_db
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Daily cost cap (Stage 3 of Live pivot)
+# ---------------------------------------------------------------------------
+# Hard ceiling on per-day spend. Live native-audio runs ~$0.18/minute at
+# typical voice usage; a $15/day cap = ~80 minutes of conversation, which
+# is comfortably above the owner's normal usage but stops a runaway loop
+# from posting four-figure bills. Override via env var if circumstances
+# change (e.g. a heavy Forge testing day).
+_DAILY_COST_CAP_DEFAULT_DOLLARS: float = 15.00
+
+
+def _daily_cost_cap_dollars() -> float:
+    """Resolve the daily cap from env at call time.
+
+    Read at call site (not import time) so a test or operator override via
+    ``DAILY_COST_CAP_DOLLARS`` env var doesn't require a module reload.
+    Falls back to the default on missing / unparseable input.
+    """
+    raw = os.environ.get("DAILY_COST_CAP_DOLLARS")
+    if not raw:
+        return _DAILY_COST_CAP_DEFAULT_DOLLARS
+    try:
+        v = float(raw)
+    except ValueError:
+        logger.warning(
+            "DAILY_COST_CAP_DOLLARS=%r is not a number; using default %.2f",
+            raw, _DAILY_COST_CAP_DEFAULT_DOLLARS,
+        )
+        return _DAILY_COST_CAP_DEFAULT_DOLLARS
+    # Reject non-finite values; same logic as ``db.get_setting_float``
+    # rejects inf/nan to keep JSON serialization clean.
+    if v != v or v in (float("inf"), float("-inf")):
+        return _DAILY_COST_CAP_DEFAULT_DOLLARS
+    if v <= 0:
+        # Treat 0 / negative as "use default" rather than effectively
+        # disabling voice — a misconfigured 0 should NOT silently turn the
+        # cap off.
+        logger.warning(
+            "DAILY_COST_CAP_DOLLARS=%r <= 0; using default %.2f",
+            v, _DAILY_COST_CAP_DEFAULT_DOLLARS,
+        )
+        return _DAILY_COST_CAP_DEFAULT_DOLLARS
+    return v
+
+
+DAILY_COST_CAP_DOLLARS: float = _daily_cost_cap_dollars()
 
 PRICING_PER_MTOK = {
     "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "cached_in": 0.1},
@@ -105,7 +159,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def compute_cost_cents(model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_creation_tokens: int) -> int:
+def compute_cost_cents(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+    *,
+    audio_input_tokens: int = 0,
+    audio_output_tokens: int = 0,
+) -> int:
+    """Compute USD-cents cost for one turn given the token mix and model.
+
+    Stage 3 (Live API): Live's native-audio model bills text and audio
+    tokens at separate rates. Pricing rows that declare ``audio_in`` /
+    ``audio_out`` get those token streams added on top of the text input/
+    output bill; rows without those keys (every Claude model + text-only
+    Gemini) ignore the audio inputs entirely.
+
+    Behaviour for non-Live callers is unchanged — ``audio_input_tokens``
+    and ``audio_output_tokens`` default to 0, so any caller that wasn't
+    updated still gets the same cents back.
+    """
     # Synthetic narration turn rows carry no LLM tokens — they're just an
     # audit anchor for the per-narration TTS char bill. Short-circuit to 0
     # so a future refactor that accidentally passes nonzero tokens here
@@ -121,6 +196,16 @@ def compute_cost_cents(model: str, input_tokens: int, output_tokens: int, cache_
         + (cache_read_tokens / 1_000_000) * rates["cached_in"]
         + (cache_creation_tokens / 1_000_000) * rates["in"]
     )
+    # Audio leg — only billed when the model's pricing row declares
+    # ``audio_in`` / ``audio_out`` rates (currently just the Live native-
+    # audio entry). Defensive ``>0`` guard so a stale 0-default in a non-
+    # Live row can't accidentally double-charge a $0 leg.
+    audio_in_rate = rates.get("audio_in")
+    if audio_in_rate is not None and audio_input_tokens > 0:
+        cost_dollars += (audio_input_tokens / 1_000_000) * audio_in_rate
+    audio_out_rate = rates.get("audio_out")
+    if audio_out_rate is not None and audio_output_tokens > 0:
+        cost_dollars += (audio_output_tokens / 1_000_000) * audio_out_rate
     return round(cost_dollars * 100)
 
 
@@ -155,7 +240,22 @@ async def record_turn(
     output_tokens = usage_dict.get("output_tokens", 0)
     cache_read_tokens = usage_dict.get("cache_read_input_tokens", 0)
     cache_creation_tokens = usage_dict.get("cache_creation_input_tokens", 0)
-    cost_cents = compute_cost_cents(model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+    # Stage 3: audio token counts on Live native-audio. ``record_turn``
+    # callers that haven't been updated still pass them as 0 (default),
+    # and ``compute_cost_cents`` only bills audio when the pricing row
+    # has ``audio_in``/``audio_out`` rates — so existing callers see no
+    # behavior change.
+    audio_input_tokens = int(usage_dict.get("audio_input_tokens", 0) or 0)
+    audio_output_tokens = int(usage_dict.get("audio_output_tokens", 0) or 0)
+    cost_cents = compute_cost_cents(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        audio_input_tokens=audio_input_tokens,
+        audio_output_tokens=audio_output_tokens,
+    )
 
     async with get_db() as db:
         cursor = await db.execute(
@@ -191,6 +291,129 @@ async def record_turn(
         "cache_creation_tokens": cache_creation_tokens,
         "cost_cents": cost_cents,
     }
+
+
+async def record_think_deep_cost(
+    *,
+    model: str,
+    scope: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    prompt: str = "",
+    assistant_text: str = "",
+) -> dict:
+    """Persist a think_deep escalation as a standalone turn row.
+
+    think_deep fires from inside the Live brain's tool-call loop; the WS
+    layer's main turn-recording path bills the Live native-audio cost,
+    not the Sonnet/Opus side-call. Without a separate write the daily
+    cap math under-counts escalation spend — same vector as the audio-
+    token gap Stage 2 had with Live tokens.
+
+    The row uses a synthetic ``think-deep`` session so it shows up in
+    daily/weekly rollups without polluting any voice session's token
+    accounting (which would falsely tag Sonnet input on a row whose model
+    column says ``gemini-live-2.5-flash-native-audio``). The synthetic
+    session is created lazily and reused day-over-day.
+
+    Best-effort: any error is logged + swallowed so a billing failure
+    can't break the user-facing reply.
+    """
+    sid = "think-deep-bookkeeping"
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT id FROM sessions WHERE id = ?", (sid,))
+            row = await cur.fetchone()
+            if row is None:
+                await db.execute(
+                    """INSERT INTO sessions
+                       (id, user_id, started_at, total_cost_cents, turn_count, project)
+                       VALUES (?, ?, ?, 0, 0, ?)""",
+                    (sid, "owner", _now_iso(), scope),
+                )
+                await db.commit()
+    except Exception as exc:
+        logger.warning("record_think_deep_cost: session bootstrap failed: %s", exc)
+        return {"cost_cents": 0}
+
+    # Reuse the standard record_turn so cost computation, session totals,
+    # and the dashboard breakdown all behave the same as an ordinary turn.
+    usage = {
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "cache_read_input_tokens": int(cache_read_tokens or 0),
+        "cache_creation_input_tokens": int(cache_creation_tokens or 0),
+    }
+    try:
+        turn = await record_turn(
+            session_id=sid,
+            model=model,
+            usage_dict=usage,
+            user_text=prompt[:2000],          # truncate so the rolling
+            assistant_text=assistant_text[:4000],  # log doesn't bloat
+        )
+        logger.info(
+            "think_deep cost recorded model=%s scope=%s in=%d out=%d cents=%d",
+            model, scope, usage["input_tokens"], usage["output_tokens"],
+            turn.get("cost_cents", 0),
+        )
+        return turn
+    except Exception as exc:
+        logger.warning("record_think_deep_cost: record_turn failed: %s", exc)
+        return {"cost_cents": 0}
+
+
+async def check_daily_cap(subject: str = "owner") -> tuple[bool, float]:
+    """Return ``(over_cap, current_today_dollars)`` for the given subject.
+
+    Sums:
+      * ``turns.cost_cents`` (Claude / Gemini text + Live audio + think_deep)
+      * ``turns.stt_cost_usd``
+      * ``turns.tts_cost_usd``
+    across every turn whose session was owned by ``subject`` (default
+    ``owner`` — single-user CC) and whose ``created_at`` falls inside
+    today UTC. Bucketing by ``turns.created_at`` matches the rest of the
+    rollup machinery (a session that straddles midnight attributes the
+    spend per-turn, not per-session).
+
+    Cap value comes from the env-overridable
+    ``DAILY_COST_CAP_DOLLARS`` (default $15.00). Caller decides what to
+    do — voice WS handler closes the connection with code 4003 +
+    ``quota_exceeded`` frame; other callers may just want the dollar
+    number for a dashboard chip.
+    """
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    cap_dollars = _daily_cost_cap_dollars()
+
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                """SELECT
+                       COALESCE(SUM(t.cost_cents), 0)    AS cost_cents,
+                       COALESCE(SUM(t.stt_cost_usd), 0.0) AS stt_cost_usd,
+                       COALESCE(SUM(t.tts_cost_usd), 0.0) AS tts_cost_usd
+                   FROM turns t
+                   INNER JOIN sessions s ON s.id = t.session_id
+                   WHERE t.created_at >= ? AND s.user_id = ?""",
+                (today_start, subject),
+            )
+            row = await cur.fetchone()
+    except Exception as exc:
+        # Failing closed (over_cap=False) keeps voice usable when the DB is
+        # transiently unhappy — better to overshoot a few cents than to
+        # brick the WS handler on a sqlite hiccup. The error is logged so
+        # we can find it later if the cap is actually being hit.
+        logger.warning("check_daily_cap: query failed: %s", exc)
+        return False, 0.0
+
+    cents = int(row["cost_cents"]) if row else 0
+    stt = float(row["stt_cost_usd"]) if row else 0.0
+    tts = float(row["tts_cost_usd"]) if row else 0.0
+    current_dollars = (cents / 100.0) + stt + tts
+    return (current_dollars >= cap_dollars), current_dollars
 
 
 async def record_stt_usage(turn_id: int, provider: str, audio_seconds: float) -> dict:

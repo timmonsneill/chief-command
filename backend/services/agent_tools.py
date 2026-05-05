@@ -52,6 +52,33 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# think_deep — direct Anthropic API escalation (Stage 3 of Live pivot)
+# ---------------------------------------------------------------------------
+# When the owner asks for spec walkthrough, planning, tradeoff analysis, or
+# "think this through carefully," the Live brain (Flash native-audio, fast
+# but conversational) escalates to Sonnet (or Opus for the hardest asks)
+# via the direct Anthropic API. Forge measured Sonnet TTFT ~0.56s and Opus
+# ~0.79s on the prior Anthropic-streamed pipeline — meaningfully faster
+# than Pro on Vertex (1-3s warm, 12-14s cold).
+#
+# Pricing rows already exist in usage_tracker.PRICING_PER_MTOK for both
+# Sonnet and Opus; the executor records the turn so the dashboard sees
+# escalation cost alongside Live audio cost.
+THINK_DEEP_DEFAULT_MODEL: str = "claude-sonnet-4-6"
+THINK_DEEP_OPUS_MODEL: str = "claude-opus-4-7"
+THINK_DEEP_MAX_TOKENS: int = 2048
+THINK_DEEP_TIMEOUT_S: float = 30.0
+# Allowlist guards against the Live brain emitting an arbitrary string —
+# the schema's enum prevents it server-side, but a defense-in-depth check
+# in the executor stops a misbehaving model from spending against an
+# unintended pricing row.
+_THINK_DEEP_ALLOWED_MODELS: frozenset[str] = frozenset({
+    THINK_DEEP_DEFAULT_MODEL,
+    THINK_DEEP_OPUS_MODEL,
+})
+
+
+# ---------------------------------------------------------------------------
 # Limits
 # ---------------------------------------------------------------------------
 READ_MAX_BYTES: int = 200 * 1024            # 200KB cap on file content returned
@@ -145,6 +172,41 @@ GREP_TOOL = ToolSchema(
 )
 
 
+THINK_DEEP_TOOL = ToolSchema(
+    name="think_deep",
+    description=(
+        "Escalate to a deeper thinking model when the user asks for spec "
+        "walkthrough, planning, tradeoff analysis, architecture, or 'think "
+        "this through.' Use this when the user wants careful reasoning, "
+        "NOT for quick chat. The output is read back to the user as Chief's "
+        "reply. Sonnet is the default (faster); pick Opus only for the "
+        "hardest asks. While this runs (~1-2s), say something brief like "
+        "'thinking on it' so the silence isn't dead."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "The full question or spec text to think about. Pass "
+                    "the owner's words verbatim — don't paraphrase down."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "enum": [THINK_DEEP_DEFAULT_MODEL, THINK_DEEP_OPUS_MODEL],
+                "description": (
+                    "Sonnet for most asks (faster); Opus for the hardest "
+                    "ones (architecture choices, tradeoff tournaments)."
+                ),
+            },
+        },
+        "required": ["prompt"],
+    },
+)
+
+
 DISPATCH_AGENT_TOOL = ToolSchema(
     name="dispatch_agent",
     description=(
@@ -179,6 +241,7 @@ ALL_TOOLS: tuple[ToolSchema, ...] = (
     BASH_TOOL,
     GREP_TOOL,
     DISPATCH_AGENT_TOOL,
+    THINK_DEEP_TOOL,
 )
 
 
@@ -427,6 +490,178 @@ async def execute_grep(pattern: str, cwd: Path, path: str = ".") -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# think_deep — direct Anthropic API escalation
+# ---------------------------------------------------------------------------
+async def execute_think_deep(
+    prompt: str,
+    *,
+    scope: str,
+    model: str = THINK_DEEP_DEFAULT_MODEL,
+) -> ToolResult:
+    """Escalate a hard question to Sonnet/Opus via the direct Anthropic API.
+
+    Returns a ``ToolResult`` whose ``output`` is the assistant's reply text
+    (the Live brain reads it back to the owner as Chief's spoken reply).
+    Never raises — sandbox/auth/timeout errors come back as ``error=True``
+    on the ToolResult so the brain can react in a human voice instead of
+    crashing the turn.
+
+    The Chief system prompt for the active scope is injected so escalation
+    answers stay in-persona (no "I'm Claude" fourth-wall break). We use the
+    flat-string variant (``build_chief_system_string``) because the
+    Anthropic single-message API takes one ``system`` string, not the cached
+    block list — this call is a one-shot, not a streaming conversation, so
+    the cache_control optimization wouldn't fire anyway.
+
+    Cost: ``usage_tracker.record_turn`` is invoked with the active session's
+    id when ``session_id`` is plumbed by the caller (websockets layer). For
+    the unit-test path where no session is open, the executor still returns
+    the right output but skips the billing write — escalations only count
+    against the daily cap when they happen in a real WS session.
+
+    Cancellation: ``asyncio.timeout(30s)`` caps the wall-clock; outer
+    CancelledError (e.g. from a barge-in) propagates without retry.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        return ToolResult(output="error: prompt is required", error=True)
+
+    chosen_model = model if model in _THINK_DEEP_ALLOWED_MODELS else THINK_DEEP_DEFAULT_MODEL
+    if chosen_model != model:
+        logger.warning(
+            "think_deep: requested model=%r not in allowlist; falling back to %s",
+            model, chosen_model,
+        )
+
+    # Load the API key from settings — pydantic Settings reads it from .env
+    # at startup. Failing closed here (rather than raising) keeps a missing
+    # key from spilling into the user's voice as a stack trace.
+    from config.settings import settings
+    api_key = settings.ANTHROPIC_API_KEY
+    if not api_key:
+        logger.warning(
+            "think_deep: ANTHROPIC_API_KEY not configured; refusing escalation"
+        )
+        return ToolResult(
+            output="error: think_deep unavailable (no Anthropic API key)",
+            error=True,
+        )
+
+    # Build the Chief system prompt for the active scope. Same builder the
+    # Live brain uses, so escalations stay in voice.
+    try:
+        from services.chief_context import build_chief_system_string
+        system_prompt = build_chief_system_string(scope)
+    except Exception as exc:
+        # Fall back to a minimal Chief-shaped system if the memory load
+        # blows up — better to ship an in-character reply than to refuse.
+        logger.warning(
+            "think_deep: chief_context build failed for scope=%s: %s",
+            scope, exc,
+        )
+        system_prompt = (
+            "You are Chief, the owner's AI orchestrator. Be concise, "
+            "direct, and useful. The user is escalating to you for "
+            "careful reasoning."
+        )
+
+    # Lazy SDK import — keeps the module import-safe in environments
+    # without ``anthropic`` installed (e.g. unit tests that stub the
+    # executor out before it's reached).
+    try:
+        from anthropic import AsyncAnthropic
+    except ImportError as exc:
+        logger.exception("think_deep: anthropic SDK import failed: %s", exc)
+        return ToolResult(
+            output="error: think_deep unavailable (anthropic SDK missing)",
+            error=True,
+        )
+
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(THINK_DEEP_TIMEOUT_S):
+            client = AsyncAnthropic(api_key=api_key)
+            response = await client.messages.create(
+                model=chosen_model,
+                max_tokens=THINK_DEEP_MAX_TOKENS,
+                system=system_prompt,
+                messages=[{"role": "user", "content": prompt}],
+            )
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - started
+        logger.warning(
+            "think_deep: timed out after %.1fs (model=%s prompt_len=%d)",
+            elapsed, chosen_model, len(prompt),
+        )
+        return ToolResult(
+            output=f"error: think_deep timed out after {elapsed:.0f}s",
+            error=True,
+        )
+    except asyncio.CancelledError:
+        # Outer turn cancelled (barge-in). Don't try to clean up the inflight
+        # request — the SDK handles its own teardown via the timeout context
+        # manager; just propagate.
+        raise
+    except Exception as exc:
+        # Authentication / rate-limit / 5xx all funnel here. Detail in the
+        # log; user-facing text is generic so we don't leak provider error
+        # internals into the voice channel.
+        logger.exception("think_deep: anthropic call failed: %s", exc)
+        return ToolResult(
+            output="error: think_deep failed",
+            error=True,
+        )
+
+    # Pull the text content out of the response. Anthropic 0.39+ returns
+    # ``Message.content`` as a list of blocks; the first ``TextBlock``
+    # carries the answer for non-streaming single-turn calls.
+    text_out = ""
+    try:
+        for block in response.content:
+            block_text = getattr(block, "text", None)
+            if isinstance(block_text, str) and block_text:
+                text_out = block_text
+                break
+    except Exception as exc:
+        logger.warning("think_deep: response parsing failed: %s", exc)
+
+    if not text_out.strip():
+        return ToolResult(
+            output="error: think_deep returned empty text",
+            error=True,
+        )
+
+    # Record the escalation cost so it lands in the daily cap + dashboard.
+    # Best-effort: record_turn requires an active session_id, which we
+    # don't have in the executor's local frame. The caller (websockets
+    # tool-call dispatch) is responsible for surfacing the cost via the
+    # standard turn-recording path; here we ALSO write a standalone
+    # bookkeeping row tagged with a synthetic session derived from the
+    # subject so daily-cap math sums it. If the import / write fails we
+    # log + continue — the user-facing reply is the priority.
+    try:
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        from services.usage_tracker import record_think_deep_cost
+        await record_think_deep_cost(
+            model=chosen_model,
+            scope=scope,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
+            prompt=prompt,
+            assistant_text=text_out,
+        )
+    except Exception as exc:
+        logger.warning("think_deep: cost recording failed: %s", exc)
+
+    return ToolResult(output=text_out)
+
+
+# ---------------------------------------------------------------------------
 # dispatch_agent — async CC subprocess spawn via cc_session pool
 # ---------------------------------------------------------------------------
 async def execute_dispatch_agent(
@@ -560,8 +795,14 @@ async def dispatch_tool(
     anchored on cwd would otherwise treat anything under $HOME as in-scope —
     far too permissive. The brain still answers from memory; tools are
     simply unavailable until a real repo is wired into the active scope.
+
+    ``think_deep`` is exempt from the cwd guard: it never touches the
+    filesystem, only the Anthropic API + the system-prompt builder. A
+    scope without a repo can still escalate to Sonnet for spec-walkthrough
+    work (which is exactly when the owner needs it most — in early
+    project-bootstrap, before a repo is even wired in).
     """
-    if _cwd_is_unsafe_fallback(cwd):
+    if name != "think_deep" and _cwd_is_unsafe_fallback(cwd):
         logger.warning(
             "agent_tools: tool dispatch refused — cwd is $HOME fallback "
             "(name=%s subject=%s scope=%s)",
@@ -594,6 +835,17 @@ async def dispatch_tool(
             subject=subject,
             scope=scope,
             system_prompt_append=system_prompt_append,
+        )
+    if name == "think_deep":
+        # think_deep doesn't touch the filesystem so cwd containment isn't
+        # relevant — but scope IS, because the Chief system prompt loaded
+        # for the escalation must match the active scope or the answer
+        # comes back in the wrong voice. Caller-supplied scope is
+        # authoritative for the same sandbox-bypass reason as dispatch_agent.
+        return await execute_think_deep(
+            prompt=args.get("prompt") or "",
+            scope=scope,
+            model=args.get("model") or THINK_DEEP_DEFAULT_MODEL,
         )
     return ToolResult(output=f"error: unknown tool {name!r}", error=True)
 
@@ -669,6 +921,10 @@ __all__ = [
     "DISPATCH_AGENT_TOOL",
     "GREP_TOOL",
     "READ_TOOL",
+    "THINK_DEEP_TOOL",
+    "THINK_DEEP_DEFAULT_MODEL",
+    "THINK_DEEP_OPUS_MODEL",
+    "THINK_DEEP_TIMEOUT_S",
     "ToolResult",
     "ToolSchema",
     "dispatch_tool",
@@ -676,6 +932,7 @@ __all__ = [
     "execute_dispatch_agent",
     "execute_grep",
     "execute_read",
+    "execute_think_deep",
     "to_gemini_declarations",
     "to_gemini_tool",
 ]
