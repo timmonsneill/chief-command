@@ -738,6 +738,70 @@ class TestCancellation:
         # First token landed; subsequent chunks must NOT have been emitted.
         assert tokens == ["first. "]
 
+    @pytest.mark.asyncio
+    async def test_cancel_during_running_chip_send_emits_cancelled_frame(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """Regression: if CancelledError lands on the ``status: running``
+        send (or between that send and the dispatch_tool entry), the
+        terminal ``cancelled`` chip frame must still be emitted so the
+        frontend can transition the chip out of running state.
+
+        Pre-fix the running send happened OUTSIDE the try/finally, so a
+        cancel here would skip the terminal frame and leave a stuck
+        spinner on the UI.
+        """
+        # Round 1 yields a function call; we never reach round 2 because
+        # the running-chip send raises CancelledError.
+        rounds = [
+            [_make_fcall_chunk("Bash", {"command": "pwd"}, fc_id="c1")],
+        ]
+        client = FakeClient(rounds)
+        monkeypatch.setattr(gemini_brain, "_client", client)
+
+        dispatched = []
+
+        async def fake_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            return ToolResult(output="ok", error=False)
+
+        monkeypatch.setattr(gemini_brain, "dispatch_tool", fake_dispatch)
+
+        frames: list[dict] = []
+
+        async def send_tool_call(payload):
+            frames.append(payload)
+            # First send is the "running" chip. Simulate a barge-in
+            # cancelling the task right as the chip ships.
+            if payload.get("status") == "running":
+                raise asyncio.CancelledError()
+
+        async def noop(*a, **kw):
+            pass
+
+        with pytest.raises(asyncio.CancelledError):
+            await gemini_brain.stream(
+                history=[],
+                user_text="where am i",
+                system_prompt="sys",
+                send_token=noop,
+                send_tts_sentence=noop,
+                send_tool_call=send_tool_call,
+                cwd=tmp_path,
+                subject="owner",
+                scope="Chief Command",
+                system_prompt_append="",
+            )
+
+        # Dispatch never ran — cancel landed first.
+        assert dispatched == []
+        # Two frames: the "running" we bailed from, and the terminal
+        # "cancelled" emitted by the finally block.
+        assert len(frames) == 2
+        assert frames[0]["status"] == "running"
+        assert frames[1]["status"] == "cancelled"
+        assert "duration_ms" in frames[1]
+
 
 # ---------------------------------------------------------------------------
 # Auth-path selection in _get_client

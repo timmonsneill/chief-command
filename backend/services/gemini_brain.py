@@ -486,21 +486,32 @@ async def stream(
                 except Exception:
                     args_dict = {}
 
-                if send_tool_call is not None:
-                    try:
-                        await send_tool_call({
-                            "name": tool_name,
-                            "args": _summarize_args(args_dict),
-                            "status": "running",
-                        })
-                    except Exception as exc:
-                        logger.warning(
-                            "gemini_brain: send_tool_call(start) raised: %s", exc
-                        )
-
                 start = time.monotonic()
                 cancelled_in_tool = False
+                result = None
                 try:
+                    # Emit the running chip INSIDE the try so a CancelledError
+                    # landing on this send (or between this send and the
+                    # dispatch_tool below) still routes through the finally
+                    # block and produces a terminal "cancelled" chip. Without
+                    # this, a cancel during the running send would leave the
+                    # UI with a stuck spinner.
+                    if send_tool_call is not None:
+                        try:
+                            await send_tool_call({
+                                "name": tool_name,
+                                "args": _summarize_args(args_dict),
+                                "status": "running",
+                            })
+                        except asyncio.CancelledError:
+                            cancelled = True
+                            cancelled_in_tool = True
+                            raise
+                        except Exception as exc:
+                            logger.warning(
+                                "gemini_brain: send_tool_call(start) raised: %s", exc
+                            )
+
                     try:
                         result = await dispatch_tool(
                             tool_name,
@@ -550,7 +561,7 @@ async def stream(
                                     "gemini_brain: send_tool_call(cancel) raised: %s",
                                     exc,
                                 )
-                        else:
+                        elif result is not None:
                             try:
                                 await send_tool_call({
                                     "name": tool_name,
