@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # iOS use. Flash measures ~1-2s TTFT for the same prompts and the routing
 # quality is good enough for the rule-#9-shaped dispatch surface. Pricing
 # entry already in usage_tracker.PRICING_PER_MTOK.
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = "gemini-2.5-pro"
 
 # Same sentence-flush regex the legacy llm.py used. Mirrors ``\s+`` after
 # sentence-ending punctuation.
@@ -305,7 +305,7 @@ async def stream(
     Returns:
       UsageRecord with the same keys legacy callers expect plus ``model``
       pinned to whatever ``GEMINI_MODEL`` is set to (currently
-      ``gemini-2.5-flash`` after the 2026-05-05 Pro->Flash flip).
+      ``gemini-2.5-pro``).
     """
     from google.genai import types
 

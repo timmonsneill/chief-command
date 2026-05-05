@@ -95,7 +95,7 @@ async def test_normal_stream_returns_usage_dict(monkeypatch):
             "output_tokens": 5,
             "cache_read_input_tokens": 0,
             "cache_creation_input_tokens": 0,
-            "model": "gemini-2.5-flash",
+            "model": "gemini-2.5-pro",
             "stop_reason": "stop",
             "assistant_text": "Done.",
             "cost_cents": 1,
@@ -120,7 +120,7 @@ async def test_normal_stream_returns_usage_dict(monkeypatch):
         system_blocks=[{"type": "text", "text": "sys"}],
     )
     assert usage["assistant_text"] == "Done."
-    assert usage["model"] == "gemini-2.5-flash"
+    assert usage["model"] == "gemini-2.5-pro"
     assert seen_tokens == ["Done."]
     assert seen_sentences == ["Done."]
 
@@ -139,7 +139,7 @@ async def test_wrapper_pops_user_turn_from_history(monkeypatch):
         return {
             "input_tokens": 0, "output_tokens": 0,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
-            "model": "gemini-2.5-flash", "stop_reason": "stop",
+            "model": "gemini-2.5-pro", "stop_reason": "stop",
             "assistant_text": "", "cost_cents": 0,
         }
 
@@ -173,7 +173,7 @@ async def test_wrapper_flattens_system_blocks(monkeypatch):
         return {
             "input_tokens": 0, "output_tokens": 0,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
-            "model": "gemini-2.5-flash", "stop_reason": "stop",
+            "model": "gemini-2.5-pro", "stop_reason": "stop",
             "assistant_text": "", "cost_cents": 0,
         }
 
