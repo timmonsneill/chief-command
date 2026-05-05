@@ -20,6 +20,7 @@ from services.chief_context import build_chief_system
 # We keep the dispatcher import below for the manual cancel button (the
 # task chip's red X still calls _route_cancel directly).
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
+from services.gemini_brain import GEMINI_MODEL
 from services.history_store import append_turn, load_recent_for_project
 from services.llm import stream_turn
 from services.project_context import (
@@ -171,11 +172,14 @@ async def voice_ws(ws: WebSocket) -> None:
     Outbound frames:
       {"type": "transcript", "content": "..."}       — STT result
       {"type": "active_model", "model": "...", "is_deep": bool} — routing decision
-      {"type": "bridge_phrase", "text": "..."}        — spoken while Opus thinks
+      {"type": "bridge_phrase", "text": "..."}        — spoken while the brain
+                                                       formulates a deeper reply
       {"type": "token", "text": "..."}                — streaming token
       {"type": "tts_start"}                           — TTS about to begin
       binary                                          — WAV audio chunk
       {"type": "tts_end"}                             — TTS done
+      {"type": "tool_call", "name": "...", "status": "running|complete|error|cancelled",
+       ...}                                            — tool-chip state for UI
       {"type": "message_done"}                        — full turn complete
       {"type": "usage", ...}                          — token/cost summary
       {"type": "context_switched", "project": "..."}  — owner switched scope
@@ -480,6 +484,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     sid=sid,
                     text_content=text_content,
                     speed=current_speed,
+                    cid=client_id,
                 ) -> None:
                     await _await_context_gate()
                     scope = current_project  # re-read AFTER gate opens
@@ -487,7 +492,10 @@ async def voice_ws(ws: WebSocket) -> None:
                         "Voice WS handling text turn session=%s len=%d scope=%s",
                         sid, len(text_content), scope,
                     )
-                    await _route_user_turn(ws, sid, history, text_content, scope, speed)
+                    await _route_user_turn(
+                        ws, sid, history, text_content, scope, speed,
+                        subject=cid,
+                    )
                 current_turn_task = asyncio.create_task(_gated_text_turn())
 
             elif "bytes" in message:
@@ -540,6 +548,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     transcript=transcript,
                     speed=current_speed,
                     stt_seconds=stt_seconds,
+                    cid=client_id,
                 ) -> None:
                     await _await_context_gate()
                     scope = current_project  # re-read AFTER gate opens
@@ -550,6 +559,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     await _route_user_turn(
                         ws, sid, history, transcript, scope, speed,
                         stt_seconds=stt_seconds,
+                        subject=cid,
                     )
                 current_turn_task = asyncio.create_task(_gated_audio_turn())
 
@@ -590,6 +600,8 @@ async def _run_llm_turn(
     project_scope: str,
     current_speed: float = 1.0,
     stt_seconds: float = 0.0,
+    *,
+    subject: str = "owner",
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record.
 
@@ -608,14 +620,15 @@ async def _run_llm_turn(
     a final usage block we never received on cancel; STT/TTS legs are
     populated normally so the dashboard reflects what Google actually billed.
     """
-    # Phase 2: Gemini 2.5 Pro is the only brain. The router's "deep"
-    # signal still fires the bridge-phrase TTS hint for thinkier prompts so
-    # the user gets immediate feedback while Gemini formulates a longer
-    # reply, but the Anthropic model id it returns is no longer used for
-    # routing. The cost row carries whatever ``gemini_brain.stream`` reports
-    # in its usage_dict (currently "gemini-2.5-pro").
+    # Phase 2: Gemini is the only brain. The router's "deep" signal still
+    # fires the bridge-phrase TTS hint for thinkier prompts so the user gets
+    # immediate feedback while Gemini formulates a longer reply, but the
+    # Anthropic model id it returns is no longer used for routing. The cost
+    # row carries whatever ``gemini_brain.stream`` reports in its
+    # usage_dict — see ``services.gemini_brain.GEMINI_MODEL`` for the
+    # canonical id.
     _legacy_model, is_deep = classify_and_route(user_text)
-    model = "gemini-2.5-pro"
+    model = GEMINI_MODEL
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
@@ -734,23 +747,25 @@ async def _run_llm_turn(
     tts_task = asyncio.create_task(tts_worker())
 
     # Build Chief system prompt blocks — identity + memory + roster + project scope.
-    # Deterministic for (scope, file-contents) so Anthropic prompt caching works.
-    # File reads are blocking I/O — wrap in to_thread to avoid stalling the loop.
+    # Deterministic for (scope, file-contents) so the Gemini ``system_instruction``
+    # bytes stay stable across turns. File reads are blocking I/O — wrap in
+    # to_thread to avoid stalling the loop.
     system_blocks = await asyncio.to_thread(build_chief_system, project_scope)
 
     try:
         # Resolve the active scope's repo path so tool calls (Read/Bash/
         # Grep/dispatch_agent) have a sandboxed cwd. None on a scope without
-        # a repo configured — gemini_brain falls back to a deny-by-default
-        # cwd (the path-fence rejects everything), so the brain still
-        # answers from memory but tools are unusable.
-        from services.repo_map import get_repo_path
+        # a repo configured — agent_tools.dispatch_tool then refuses
+        # tool dispatch (cwd would fall back to $HOME, which the
+        # path-fence machinery would treat as unsafe). The brain still
+        # answers from memory; tools are simply unavailable.
         repo_cwd = get_repo_path(project_scope)
-        # Subject identifies the JWT owner; used as the dispatch_agent CC
-        # pool key so different tabs / devices don't share session state.
-        # session_id is per-WS-connection (also fine as a pool key); we use
-        # session_id here because owner is single-user and session is the
-        # finer-grained boundary.
+        # Subject identifies the JWT owner — used as the dispatch_agent CC
+        # pool key (along with scope). Passing session_id (per-WS-connection
+        # UUID) here defeats warm-pool reuse and breaks teardown_other_scopes
+        # (which keys on subject), since each new WS connection looks like a
+        # different "user" to the pool. session_id is still the right key
+        # for usage-tracker rows below (one cost row per session).
         usage = await stream_turn(
             history=history,
             model=model,
@@ -760,22 +775,30 @@ async def _run_llm_turn(
             system_blocks=system_blocks,
             send_tool_call=send_tool_call,
             cwd=repo_cwd,
-            subject=session_id,
+            subject=subject,
         )
 
         await tts_queue.put(None)
         await tts_task
 
         assistant_text = usage.get("assistant_text", "")
-        history.append({"role": "assistant", "content": assistant_text})
-        # Persist the assistant reply so resume rebuilds both sides of the
-        # turn. Best-effort: if the DB write fails we still finish the turn.
-        try:
-            await append_turn(session_id, project_scope, "assistant", assistant_text)
-        except Exception as exc:
-            logger.warning(
-                "history persist (assistant) failed session=%s: %s", session_id, exc
-            )
+        # Only append a non-empty assistant turn to the in-memory history.
+        # An empty entry (e.g. on a barge-in that landed before any tokens
+        # streamed) gets filtered out by ``_history_to_gemini_contents`` on
+        # the next round, leaving consecutive user-role entries — which
+        # corrupts the role alternation Gemini expects. Persisted history
+        # gets the same treatment so a reload doesn't replay the bad shape.
+        if assistant_text:
+            history.append({"role": "assistant", "content": assistant_text})
+            # Persist the assistant reply so resume rebuilds both sides of
+            # the turn. Best-effort: if the DB write fails we still finish
+            # the turn.
+            try:
+                await append_turn(session_id, project_scope, "assistant", assistant_text)
+            except Exception as exc:
+                logger.warning(
+                    "history persist (assistant) failed session=%s: %s", session_id, exc
+                )
 
         await ws_send_json(ws, {"type": "message_done"})
 
@@ -880,9 +903,9 @@ async def _run_llm_turn(
         if not persisted and (stt_seconds > 0 or tts_char_total > 0):
             try:
                 # Build a usage_dict that records 0 LLM tokens — we never got
-                # a final usage block, and undercounting LLM cost is the
-                # correct behaviour (Anthropic doesn't bill cancelled streams
-                # for output tokens we never received).
+                # a final usage block on this cancelled turn, so we record
+                # the partial-bill row at $0 LLM cost. The voice legs below
+                # carry the actual Google STT + TTS bill that DID happen.
                 partial_usage = {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -936,20 +959,31 @@ async def _handle_text_turn(
     project_scope: str,
     current_speed: float = 1.0,
     stt_seconds: float = 0.0,
+    *,
+    subject: str = "owner",
 ) -> None:
     try:
         await _run_llm_turn(
             ws, session_id, history, text, project_scope, current_speed,
             stt_seconds=stt_seconds,
+            subject=subject,
         )
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
         # error. The caller already sent turn_cancelled.
         raise
     except Exception as exc:
+        # The exception text can include model IDs, region info, file paths,
+        # or other internal detail we shouldn't echo to the client. Keep
+        # full detail in the log via logger.exception; the WS frame gets a
+        # generic message so users see "something broke" without the
+        # plumbing.
         logger.exception("Error processing text turn session=%s: %s", session_id, exc)
         try:
-            await ws_send_json(ws, {"type": "error", "message": str(exc)})
+            await ws_send_json(ws, {
+                "type": "error",
+                "message": "Chief had an internal error",
+            })
         except Exception:
             pass
 
@@ -968,6 +1002,8 @@ async def _route_user_turn(
     current_project: str,
     current_speed: float = 1.0,
     stt_seconds: float = 0.0,
+    *,
+    subject: str = "owner",
 ) -> None:
     """Single entry point — Phase 2: every turn goes to the Gemini brain.
 
@@ -984,10 +1020,15 @@ async def _route_user_turn(
     `stt_seconds` is the duration of audio transcribed to produce `user_text`.
     Zero for pure text-mode turns. Recorded against the turn row by the
     chat path's billing leg.
+
+    `subject` is the JWT subject (typically "owner"); threaded through to
+    the brain so the dispatch_agent CC pool can key on (subject, scope) and
+    reuse warm subprocesses across WS reconnects.
     """
     await _handle_text_turn(
         ws, session_id, history, user_text, current_project, current_speed,
         stt_seconds=stt_seconds,
+        subject=subject,
     )
 
 

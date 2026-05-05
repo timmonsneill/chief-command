@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import types
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,22 +27,6 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-
-
-def _install_anthropic_stub():
-    if "anthropic" in sys.modules:
-        return
-    mod = types.ModuleType("anthropic")
-
-    class _FakeAsyncAnthropic:
-        def __init__(self, **kwargs):
-            self.messages = MagicMock()
-
-    mod.AsyncAnthropic = _FakeAsyncAnthropic
-    sys.modules["anthropic"] = mod
-
-
-_install_anthropic_stub()
 
 
 from services import gemini_brain, llm  # noqa: E402

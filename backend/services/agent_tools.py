@@ -35,24 +35,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shlex
 import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 from services.cc_session import (
-    _BASH_ALLOWED_LEADING,
-    _BASH_FORBIDDEN_CHARS,
-    _BASH_PATH_VALIDATING_LEADERS,
-    _FORBIDDEN_PATH_RE,
-    _GIT_READ_ONLY_VERBS,
     _bash_segment_ok,
     _bash_split_segments,
     _path_forbidden,
     _path_inside_cwd,
-    _validate_bash_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,18 +156,17 @@ DISPATCH_AGENT_TOOL = ToolSchema(
         "reads or simple greps, use the direct tools instead."
     ),
     parameters={
+        # ``scope`` is intentionally NOT exposed to the model. Cwd resolution
+        # for the dispatched CC happens at the caller (the Chief WS handler)
+        # using the active scope's repo path; if the model could pick a
+        # different scope, the cwd → scope pairing would desync and the
+        # dispatched CC would land in the wrong sandbox. Caller-provided
+        # scope is authoritative.
         "type": "object",
         "properties": {
             "spec": {
                 "type": "string",
                 "description": "Plain-English description of what the agent should do.",
-            },
-            "scope": {
-                "type": "string",
-                "description": (
-                    "Optional project scope to dispatch into. Defaults to "
-                    "the current Chief scope."
-                ),
             },
         },
         "required": ["spec"],
@@ -321,11 +313,18 @@ async def execute_bash(command: str, cwd: Path) -> ToolResult:
             error=True,
         )
     except asyncio.CancelledError:
-        # Outer turn was cancelled (barge-in). Kill the child fast and
-        # propagate so the outer task tears down cleanly.
+        # Outer turn was cancelled (barge-in). Kill the child fast, then
+        # best-effort wait so the OS can reap the process — bounded so a
+        # stuck child can't hold the cancel path. Wrapped in shield so
+        # cancellation propagating into wait_for() can't leave the kill
+        # mid-flight.
         try:
             proc.kill()
         except ProcessLookupError:
+            pass
+        try:
+            await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=0.5))
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
         raise
 
@@ -403,9 +402,15 @@ async def execute_grep(pattern: str, cwd: Path, path: str = ".") -> ToolResult:
             error=True,
         )
     except asyncio.CancelledError:
+        # Same shape as Bash cancel: kill the child, wait briefly so the
+        # OS can reap, never let the cleanup outlast the cancel path.
         try:
             proc.kill()
         except ProcessLookupError:
+            pass
+        try:
+            await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=0.5))
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
         raise
 
@@ -547,7 +552,26 @@ async def dispatch_tool(
     system_prompt_append: str,
 ) -> ToolResult:
     """Dispatch a tool by name. Returns ToolResult; never raises (except
-    asyncio.CancelledError, which propagates per cancellation contract)."""
+    asyncio.CancelledError, which propagates per cancellation contract).
+
+    Deny-by-default scope guard: if ``cwd`` resolves to the user's $HOME
+    (the fallback ``llm._resolve_cwd`` returns when no scope-repo is
+    configured), refuse tool dispatch entirely. The path-fence machinery
+    anchored on cwd would otherwise treat anything under $HOME as in-scope —
+    far too permissive. The brain still answers from memory; tools are
+    simply unavailable until a real repo is wired into the active scope.
+    """
+    if _cwd_is_unsafe_fallback(cwd):
+        logger.warning(
+            "agent_tools: tool dispatch refused — cwd is $HOME fallback "
+            "(name=%s subject=%s scope=%s)",
+            name, subject, scope,
+        )
+        return ToolResult(
+            output="error: no project scope set; tool dispatch refused",
+            error=True,
+        )
+
     if name == "Read":
         return await execute_read(args.get("path") or args.get("file_path") or "", cwd)
     if name == "Bash":
@@ -559,19 +583,36 @@ async def dispatch_tool(
             path=args.get("path") or ".",
         )
     if name == "dispatch_agent":
-        # Allow per-call scope override but require it to be string-typed and
-        # non-empty; fall back to the calling Chief scope otherwise.
-        target_scope = args.get("scope")
-        if not isinstance(target_scope, str) or not target_scope.strip():
-            target_scope = scope
+        # ``scope`` is intentionally not on the schema (see DISPATCH_AGENT_TOOL).
+        # If a future model still emits it we ignore the arg — the caller's
+        # scope/cwd pairing is authoritative; letting the model pick scope
+        # while cwd stays pinned to the current repo is a sandbox-bypass
+        # vector.
         return await execute_dispatch_agent(
             spec=args.get("spec") or "",
             cwd=cwd,
             subject=subject,
-            scope=target_scope,
+            scope=scope,
             system_prompt_append=system_prompt_append,
         )
     return ToolResult(output=f"error: unknown tool {name!r}", error=True)
+
+
+def _cwd_is_unsafe_fallback(cwd: Path) -> bool:
+    """True when ``cwd`` is the user's $HOME — the unsafe deny-by-default
+    fallback used by ``llm._resolve_cwd`` when no scope repo is configured.
+
+    Compared on resolved paths so a relative ``Path.home()`` and an absolute
+    ``/Users/foo`` both match. The check is conservative: we treat any
+    cwd that resolves to exactly $HOME as the fallback. Any actual scope
+    repo lives at ``$HOME/Desktop/<project>`` or similar, which is strictly
+    deeper than $HOME and passes through.
+    """
+    try:
+        return cwd.resolve() == Path.home().resolve()
+    except (OSError, RuntimeError):
+        # If resolve fails (e.g. cwd doesn't exist), fail safe — deny.
+        return True
 
 
 # ---------------------------------------------------------------------------

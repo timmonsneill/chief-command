@@ -37,7 +37,6 @@ the SDK is imported lazily inside ``stream``.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -64,6 +63,16 @@ SENTENCE_FLUSH_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
 # producing a final text reply, we break the loop and surface the partial
 # state. Real-world usage sits at 1-3 rounds; 16 is conservative.
 MAX_TOOL_ROUNDS: int = 16
+
+# Per-turn output ceiling — Gemini's ``max_output_tokens`` config knob.
+DEFAULT_MAX_OUTPUT_TOKENS: int = 1024
+
+# Truncation caps on tool-call WS frames. Args summaries get truncated at
+# ARG_SUMMARY_MAX_CHARS so a "command" string of 20KB doesn't blow up the
+# tool-chip frame; tool output previews get TOOL_PREVIEW_MAX_CHARS so the chip
+# carries a useful snippet without dragging the whole 50KB stdout to the WS.
+ARG_SUMMARY_MAX_CHARS: int = 200
+TOOL_PREVIEW_MAX_CHARS: int = 240
 
 
 UsageRecord = dict
@@ -132,34 +141,12 @@ def _get_client() -> Any:
     )
 
 
-def _compute_cost_cents(usage_meta: Any) -> int:
-    """Compute Gemini 2.5 Pro cost in cents from a usage_metadata block.
-
-    Pricing per 1M tokens (Vertex AI, ≤200k context window, May 2026):
-        text/image/video input         $1.25
-        cached text/image/video input  $0.31
-        text output                    $10.00
-
-    We treat any ``cached_content_token_count`` as the cached-input slice and
-    bill the remaining input at the full input rate.
-    """
-    if usage_meta is None:
-        return 0
-    input_tokens = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
-    output_tokens = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
-    cached_tokens = int(getattr(usage_meta, "cached_content_token_count", 0) or 0)
-
-    rates_in = 1.25
-    rates_cached = 0.31
-    rates_out = 10.00
-
-    billable_input = max(0, input_tokens - cached_tokens)
-    cost_dollars = (
-        (billable_input / 1_000_000) * rates_in
-        + (cached_tokens / 1_000_000) * rates_cached
-        + (output_tokens / 1_000_000) * rates_out
-    )
-    return round(cost_dollars * 100)
+# NOTE: Cost computation lives in ``services.usage_tracker.compute_cost_cents``
+# — single source of truth. Earlier revisions of this module computed Gemini
+# 2.5 Pro cost here and stuffed it onto ``usage_dict["cost_cents"]``, but
+# ``usage_tracker.record_turn`` always recomputes from token counts using
+# ``PRICING_PER_MTOK[model]`` and silently discarded the brain's value.
+# Keeping a second pricing table here was just a drift hazard.
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +199,14 @@ def _build_tool_response_content(
     """Build a 'tool' (user-role function_response) Content for the next turn.
 
     Per Gemini's protocol, function responses are sent back as a single
-    ``user``-role Content whose parts are ``Part.from_function_response(...)``.
-    The names + ids on the response parts must match the function_call parts
-    we're answering — we pair them up by index so order matches the calls
-    we just executed.
+    ``user``-role Content whose parts are ``FunctionResponse`` objects. The
+    ``name`` AND ``id`` on each response part must match the corresponding
+    ``function_call`` part we're answering — for parallel tool calls of the
+    SAME name, Gemini correlates request → response by ``id``, not name.
+    Dropping the id silently breaks parallel-tool-call ordering.
+
+    We pair calls and results by index so order matches the execution we
+    just did.
     """
     from google.genai import types
     parts = []
@@ -230,12 +221,18 @@ def _build_tool_response_content(
         }
         if getattr(result, "truncated", False):
             response_payload["truncated"] = True
-        parts.append(
-            types.Part.from_function_response(
-                name=fc.name,
-                response=response_payload,
-            )
+        # Build the FunctionResponse directly (rather than via
+        # ``Part.from_function_response``) so we can plumb ``id`` through.
+        # ``fc.id`` is None for single-tool-call rounds where the SDK didn't
+        # mint one; passing None is fine — the SDK omits the field on the
+        # wire and the call/response pairing falls back to name+order, which
+        # IS unique when there's only one call per name.
+        fr = types.FunctionResponse(
+            id=getattr(fc, "id", None),
+            name=fc.name,
+            response=response_payload,
         )
+        parts.append(types.Part(function_response=fr))
     return types.Content(role="user", parts=parts)
 
 
@@ -254,7 +251,7 @@ async def stream(
     subject: str,
     scope: str,
     system_prompt_append: str,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     cancel_event: Optional[asyncio.Event] = None,
 ) -> UsageRecord:
     """Run one Gemini turn and stream tokens / TTS sentences / tool-call frames.
@@ -325,7 +322,7 @@ async def stream(
     )
 
     try:
-        for round_idx in range(MAX_TOOL_ROUNDS):
+        for _ in range(MAX_TOOL_ROUNDS):
             pending_function_calls: list[Any] = []
 
             # ----- one streaming round (text + maybe function_call(s)) -----
@@ -334,6 +331,16 @@ async def stream(
                 contents=contents,
                 config=config,
             )
+
+            # Per-round usage. Vertex emits usage_metadata on the LAST chunk
+            # of each round and the counts are PER-REQUEST (not cumulative
+            # across the multi-round turn). We capture the last seen value
+            # this round and += it into the cumulative totals when the round
+            # closes — using max() across rounds silently drops earlier
+            # rounds when round 2's prompt is longer than round 1's was.
+            round_input_tokens = 0
+            round_output_tokens = 0
+            round_cached_tokens = 0
 
             try:
                 async for chunk in stream_iter:
@@ -348,25 +355,21 @@ async def stream(
                         cancelled = True
                         break
 
-                    # Accumulate usage metadata across rounds. Gemini emits
-                    # usage on the LAST chunk of each round; later rounds add
-                    # to the totals so the final cost reflects the full turn.
+                    # Snapshot this chunk's usage. Gemini emits the same
+                    # totals on every chunk that carries usage_metadata; we
+                    # overwrite (not add) within a round so we don't
+                    # double-count when the SDK emits usage on more than
+                    # one chunk in a round.
                     um = getattr(chunk, "usage_metadata", None)
                     if um is not None:
-                        cumulative_input_tokens = max(
-                            cumulative_input_tokens,
-                            int(getattr(um, "prompt_token_count", 0) or 0),
+                        round_input_tokens = int(
+                            getattr(um, "prompt_token_count", 0) or 0
                         )
-                        cumulative_output_tokens = max(
-                            cumulative_output_tokens,
-                            int(getattr(um, "candidates_token_count", 0) or 0),
+                        round_output_tokens = int(
+                            getattr(um, "candidates_token_count", 0) or 0
                         )
-                        cumulative_cached_tokens = max(
-                            cumulative_cached_tokens,
-                            int(
-                                getattr(um, "cached_content_token_count", 0)
-                                or 0
-                            ),
+                        round_cached_tokens = int(
+                            getattr(um, "cached_content_token_count", 0) or 0
                         )
 
                     # Walk all parts on this chunk's first candidate. A chunk
@@ -392,6 +395,16 @@ async def stream(
                         continue
                     parts = getattr(content, "parts", None) or []
                     for part in parts:
+                        # Skip "thought" parts. When ``thinking_config`` has
+                        # ``include_thoughts=True`` the SDK streams internal
+                        # reasoning back as parts with ``thought=True``.
+                        # Surfacing those to the user (via send_token / TTS)
+                        # would leak chain-of-thought to the audio output.
+                        # We currently do NOT enable include_thoughts, but
+                        # this guard keeps a future config flip from
+                        # accidentally broadcasting reasoning.
+                        if getattr(part, "thought", False) is True:
+                            continue
                         text_piece = getattr(part, "text", None)
                         fcall = getattr(part, "function_call", None)
                         if text_piece:
@@ -438,6 +451,17 @@ async def stream(
                     except Exception:
                         pass
 
+            # Roll this round's per-request usage into the cumulative turn
+            # totals. Each generate_content_stream call bills independently,
+            # so a multi-round tool-using turn must SUM the rounds — using
+            # max() across rounds would silently drop earlier rounds' input
+            # bills (e.g. round 1 sent the full system prompt, round 2's
+            # contents added the function_response → both rounds billed
+            # separately, both must be counted).
+            cumulative_input_tokens += round_input_tokens
+            cumulative_output_tokens += round_output_tokens
+            cumulative_cached_tokens += round_cached_tokens
+
             if cancelled:
                 break
 
@@ -475,44 +499,73 @@ async def stream(
                         )
 
                 start = time.monotonic()
+                cancelled_in_tool = False
                 try:
-                    result = await dispatch_tool(
-                        tool_name,
-                        args_dict,
-                        cwd=cwd,
-                        subject=subject,
-                        scope=scope,
-                        system_prompt_append=system_prompt_append,
-                    )
-                except asyncio.CancelledError:
-                    cancelled = True
-                    raise
-                except Exception as exc:
-                    logger.exception(
-                        "gemini_brain: tool %r raised: %s", tool_name, exc
-                    )
-                    from services.agent_tools import ToolResult
-                    result = ToolResult(
-                        output=f"error: tool execution failed: {exc}",
-                        error=True,
-                    )
-                tool_results.append(result)
-
-                if send_tool_call is not None:
                     try:
-                        await send_tool_call({
-                            "name": tool_name,
-                            "args": _summarize_args(args_dict),
-                            "status": "error" if result.error else "complete",
-                            "duration_ms": int(
-                                (time.monotonic() - start) * 1000
-                            ),
-                            "preview": _preview(result.output),
-                        })
-                    except Exception as exc:
-                        logger.warning(
-                            "gemini_brain: send_tool_call(end) raised: %s", exc
+                        result = await dispatch_tool(
+                            tool_name,
+                            args_dict,
+                            cwd=cwd,
+                            subject=subject,
+                            scope=scope,
+                            system_prompt_append=system_prompt_append,
                         )
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        cancelled_in_tool = True
+                        raise
+                    except Exception as exc:
+                        # Don't feed raw exception text back to the model
+                        # (or via the brain's reply, to the user) — it can
+                        # leak file paths, model IDs, internal stack hints,
+                        # etc. The model still sees ``error=True`` so it
+                        # can react / reroute. Detail stays in the log.
+                        logger.exception(
+                            "gemini_brain: tool %r raised: %s", tool_name, exc
+                        )
+                        from services.agent_tools import ToolResult
+                        result = ToolResult(
+                            output="error: tool execution failed",
+                            error=True,
+                        )
+                    tool_results.append(result)
+                finally:
+                    # Always emit a terminal tool-chip frame so the frontend
+                    # can transition the chip out of "running" state. The
+                    # cancel path used to skip this and leave a stuck spinner
+                    # on the UI when a barge-in landed mid-tool.
+                    if send_tool_call is not None:
+                        if cancelled_in_tool:
+                            try:
+                                await send_tool_call({
+                                    "name": tool_name,
+                                    "args": _summarize_args(args_dict),
+                                    "status": "cancelled",
+                                    "duration_ms": int(
+                                        (time.monotonic() - start) * 1000
+                                    ),
+                                })
+                            except Exception as exc:
+                                logger.warning(
+                                    "gemini_brain: send_tool_call(cancel) raised: %s",
+                                    exc,
+                                )
+                        else:
+                            try:
+                                await send_tool_call({
+                                    "name": tool_name,
+                                    "args": _summarize_args(args_dict),
+                                    "status": "error" if result.error else "complete",
+                                    "duration_ms": int(
+                                        (time.monotonic() - start) * 1000
+                                    ),
+                                    "preview": _preview(result.output),
+                                })
+                            except Exception as exc:
+                                logger.warning(
+                                    "gemini_brain: send_tool_call(end) raised: %s",
+                                    exc,
+                                )
 
             # Append both the model's tool-call turn AND our function_response
             # turn to the conversation. Gemini's protocol requires both.
@@ -548,7 +601,9 @@ async def stream(
             "stop_reason": stop_reason,
             "assistant_text": "".join(full_text),
         }
-        usage_dict["cost_cents"] = _compute_cost_cents_from_dict(usage_dict)
+        # NOTE: ``cost_cents`` is intentionally NOT populated here. The
+        # caller's ``usage_tracker.record_turn`` recomputes it from the
+        # token counts above using ``PRICING_PER_MTOK[GEMINI_MODEL]``.
         logger.info(
             "gemini_brain: turn complete model=%s input=%d output=%d cached=%d",
             GEMINI_MODEL,
@@ -564,30 +619,12 @@ async def stream(
         raise
 
 
-def _compute_cost_cents_from_dict(usage_dict: dict) -> int:
-    """Re-compute cost from a usage_dict (used after _compute_cost_cents that
-    takes the SDK metadata object)."""
-    rates_in = 1.25
-    rates_cached = 0.31
-    rates_out = 10.00
-    cached = usage_dict.get("cache_read_input_tokens", 0) or 0
-    inp = usage_dict.get("input_tokens", 0) or 0
-    out = usage_dict.get("output_tokens", 0) or 0
-    billable_input = max(0, inp - cached)
-    cost_dollars = (
-        (billable_input / 1_000_000) * rates_in
-        + (cached / 1_000_000) * rates_cached
-        + (out / 1_000_000) * rates_out
-    )
-    return round(cost_dollars * 100)
-
-
 def _summarize_args(args: dict[str, Any]) -> dict[str, Any]:
     """Truncate long string fields in an args dict for WS / log readability."""
     out: dict[str, Any] = {}
     for k, v in args.items():
-        if isinstance(v, str) and len(v) > 200:
-            out[k] = v[:200] + "...<truncated>"
+        if isinstance(v, str) and len(v) > ARG_SUMMARY_MAX_CHARS:
+            out[k] = v[:ARG_SUMMARY_MAX_CHARS] + "...<truncated>"
         else:
             out[k] = v
     return out
@@ -597,9 +634,9 @@ def _preview(output: str) -> str:
     """Return a short preview of tool output for the WS chip frame."""
     if not isinstance(output, str):
         return ""
-    if len(output) <= 240:
+    if len(output) <= TOOL_PREVIEW_MAX_CHARS:
         return output
-    return output[:240] + "..."
+    return output[:TOOL_PREVIEW_MAX_CHARS] + "..."
 
 
 __all__ = [

@@ -18,7 +18,7 @@ from slowapi.util import get_remote_address
 from app.websockets import router as ws_router
 from config.settings import settings
 from db import get_setting_float, init_db
-from services import stt_service, tts_service
+from services import gemini_brain, stt_service, tts_service
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
 from services.project_context import get_context, set_context
@@ -158,7 +158,7 @@ async def verify_auth(subject: str = Depends(require_auth)) -> dict[str, str]:
 @app.get("/api/status")
 async def get_status(subject: str = Depends(require_auth)) -> dict:
     return {
-        "api": "anthropic",
+        "api": gemini_brain.GEMINI_MODEL,
         "projects_dir": settings.PROJECTS_DIR,
         "tunnel_url": settings.TUNNEL_URL,
     }
@@ -484,9 +484,29 @@ async def on_startup() -> None:
         except Exception as exc:
             logger.warning("Kokoro warm-up failed (first turn will pay cold-start): %s", exc)
 
-    # Both run concurrently in the background.
+    async def _warm_gemini() -> None:
+        # First call to _get_client() does the genai SDK's HTTP discovery
+        # plus credential resolution. Doing that on the first user turn adds
+        # ~300-800ms latency before the model even starts thinking. We do it
+        # here in the background so a connecting client almost always lands
+        # on a warm client. Best-effort: a missing key shouldn't crash the
+        # server (the brain will surface the same RuntimeError on first
+        # turn, where it's recoverable).
+        try:
+            logger.info("Warming google-genai client in background...")
+            await asyncio.to_thread(gemini_brain._get_client)
+            logger.info("Gemini client warmed (model=%s)", gemini_brain.GEMINI_MODEL)
+        except Exception as exc:
+            logger.warning(
+                "Gemini client warm-up failed (first turn will pay cold-start "
+                "or surface a config error): %s",
+                exc,
+            )
+
+    # All three run concurrently in the background.
     asyncio.create_task(_warm_stt())
     asyncio.create_task(_warm_tts())
+    asyncio.create_task(_warm_gemini())
 
 
 @app.on_event("shutdown")

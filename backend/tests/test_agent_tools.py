@@ -22,10 +22,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import textwrap
-import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -33,24 +31,6 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-
-
-def _install_anthropic_stub():
-    """cc_session imports anthropic transitively in some environments —
-    stub it so the agent_tools import doesn't depend on the real SDK."""
-    if "anthropic" in sys.modules:
-        return
-    mod = types.ModuleType("anthropic")
-
-    class _FakeAsyncAnthropic:
-        def __init__(self, **kwargs):
-            self.messages = MagicMock()
-
-    mod.AsyncAnthropic = _FakeAsyncAnthropic
-    sys.modules["anthropic"] = mod
-
-
-_install_anthropic_stub()
 
 
 from services import agent_tools  # noqa: E402
@@ -294,6 +274,48 @@ class TestDispatchToolRouter:
         assert "unknown tool" in result.output
 
     @pytest.mark.asyncio
+    async def test_dispatch_refused_when_cwd_is_home(self):
+        """When ``llm._resolve_cwd`` couldn't find a scope repo, it falls back
+        to Path.home(). The path-fence machinery anchored on cwd would then
+        treat ANY path under $HOME as in-scope — far too permissive. This
+        test verifies dispatch_tool refuses every tool in that fallback."""
+        for name, args in (
+            ("Read", {"path": "x.txt"}),
+            ("Bash", {"command": "ls"}),
+            ("Grep", {"pattern": "foo"}),
+            ("dispatch_agent", {"spec": "do something"}),
+        ):
+            result = await dispatch_tool(
+                name,
+                args,
+                cwd=Path.home(),
+                subject="owner",
+                scope="Chief Command",
+                system_prompt_append="",
+            )
+            assert result.error is True, f"{name} was not refused"
+            assert "no project scope set" in result.output, (
+                f"{name}: unexpected error message: {result.output!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_allowed_when_cwd_is_real_subdir(self, tmp_path: Path):
+        """Sanity check: a real per-scope cwd (NOT the $HOME fallback) routes
+        through to the executor. The Read happens with a real subdir."""
+        f = tmp_path / "ok.txt"
+        f.write_text("contents")
+        result = await dispatch_tool(
+            "Read",
+            {"path": "ok.txt"},
+            cwd=tmp_path,
+            subject="owner",
+            scope="Chief Command",
+            system_prompt_append="",
+        )
+        assert result.error is False
+        assert "contents" in result.output
+
+    @pytest.mark.asyncio
     async def test_routes_read_to_executor(self, tmp_path: Path):
         f = tmp_path / "x.txt"
         f.write_text("hello")
@@ -495,3 +517,81 @@ class TestGeminiAdapter:
         schema = read_decl.parameters_json_schema
         assert "path" in schema["properties"]
         assert "path" in schema["required"]
+
+    def test_dispatch_agent_does_not_expose_scope_param(self):
+        """``scope`` was removed from the dispatch_agent schema — letting the
+        model pick a scope while cwd stays pinned to the calling Chief's repo
+        is a sandbox-bypass vector. Caller-provided scope is authoritative."""
+        decls = to_gemini_declarations()
+        dispatch_decl = next(d for d in decls if d.name == "dispatch_agent")
+        schema = dispatch_decl.parameters_json_schema
+        assert "scope" not in schema["properties"]
+        assert "spec" in schema["properties"]
+        assert "spec" in schema["required"]
+
+
+# ---------------------------------------------------------------------------
+# Forbidden-path coverage — verify each newly-added pattern is blocked
+# (cc_session._FORBIDDEN_PATH_RE extension, sweep finding 2026-05-04).
+# ---------------------------------------------------------------------------
+class TestForbiddenPathPatterns:
+    """Sweep finding 2026-05-04: the original regex caught .env / credentials /
+    *.key / secret. These cases were silently allowed:
+      *.pem, *.p12, *.crt, *.pfx, *.cer, *.jks
+      id_rsa, id_ed25519, id_ecdsa, id_dsa
+      .npmrc, .netrc, .pgpass, .pypirc
+      oauth_token*, service-account*.json
+    Each must now be rejected by execute_read (which calls _path_forbidden
+    via the cc_session helper)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("filename", [
+        "server.pem",
+        "client.p12",
+        "cert.crt",
+        "store.pfx",
+        "ca.cer",
+        "keystore.jks",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "id_rsa.pub",
+        ".npmrc",
+        ".netrc",
+        ".pgpass",
+        ".pypirc",
+        "oauth_token.json",
+        "oauth-token.txt",
+        "service-account.json",
+        "service-account-prod.json",
+        "service_account_creds.json",
+        "gcloud-key.json",
+        "gcloud_key.json",
+    ])
+    async def test_each_pattern_blocked(self, tmp_path: Path, filename: str):
+        f = tmp_path / filename
+        f.write_text("sensitive", encoding="utf-8")
+        result = await execute_read(filename, tmp_path)
+        assert result.error is True, (
+            f"Expected {filename!r} to be rejected by the forbidden-path "
+            f"regex, got result.error={result.error}"
+        )
+        # Either "forbidden" wording fires (the executor's deny message) or
+        # the secrets-substring path catches it. Be permissive about the
+        # exact message — the contract is "rejected", not "rejected with
+        # exact phrase X".
+        assert (
+            "forbidden" in result.output.lower()
+            or "rejected" in result.output.lower()
+        ), f"{filename}: unexpected output: {result.output!r}"
+
+    @pytest.mark.asyncio
+    async def test_innocuous_filename_still_allowed(self, tmp_path: Path):
+        """Sanity: a plain text file isn't accidentally caught by the
+        broadened pattern."""
+        f = tmp_path / "notes.md"
+        f.write_text("hello", encoding="utf-8")
+        result = await execute_read("notes.md", tmp_path)
+        assert result.error is False
+        assert "hello" in result.output

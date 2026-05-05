@@ -213,13 +213,32 @@ def _clean_env() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 # Path patterns that must be denied even when resolved INSIDE cwd (secrets,
-# env files). Match against ``Path.name`` AND the path-string with a
-# fnmatch-style glob test.
+# env files, private keys, package-manager credential stores, OAuth tokens,
+# service-account JSONs). Match against the resolved path string —
+# case-insensitive — so any extension/variant of these names is blocked
+# regardless of how the model phrases the request.
+#
+# Coverage rationale (2026-05-04 sweep):
+#   * .env*           — config secrets
+#   * credentials*    — generic JSON / file dumps
+#   * secret          — any name containing "secret"
+#   * *.key|*.pem|*.p12|*.crt|*.pfx|*.cer|*.jks — private keys + certs
+#   * id_rsa | id_ed25519 | id_ecdsa | id_dsa — SSH private keys (and .pub
+#     companions that often leak the key path even though they're public)
+#   * .npmrc | .netrc | .pgpass | .pypirc — package-manager / DB / pypi
+#     credential stores
+#   * oauth_token* | service-account*.json | gcloud-key*.json — Google +
+#     OAuth credential dumps
 _FORBIDDEN_PATH_RE = re.compile(
-    r"(^|/)\.env($|\.|/)|"           # .env, .env.local, .env/, etc
-    r"(^|/)credentials(\.|$|/)|"     # credentials, credentials.json
-    r"\.key($|/)|"                   # *.key
-    r"secret",                        # any "secret" substring
+    r"(^|/)\.env($|\.|/)|"                              # .env, .env.local, .env/, etc
+    r"(^|/)credentials(\.|$|/)|"                        # credentials, credentials.json
+    r"\.(key|pem|p12|pfx|crt|cer|jks)($|/)|"            # private-key & cert files
+    r"(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?($|/)|"   # SSH private keys + .pub
+    r"(^|/)\.(npmrc|netrc|pgpass|pypirc)($|/)|"         # package-mgr / DB / PyPI creds
+    r"(^|/)oauth[_-]?token[^/]*|"                       # oauth_token, oauth-token*
+    r"(^|/)service[_-]account[^/]*\.json($|/)|"         # service-account*.json
+    r"(^|/)gcloud[_-]?key[^/]*\.json($|/)|"             # gcloud-key*.json
+    r"secret",                                            # any "secret" substring
     re.IGNORECASE,
 )
 
