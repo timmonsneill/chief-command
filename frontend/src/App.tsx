@@ -12,6 +12,7 @@ import TeamPage from './pages/TeamPage'
 import MemoryPage from './pages/MemoryPage'
 import LoginPage from './pages/LoginPage'
 import SharePage from './pages/SharePage'
+import LiveAudioTestPage from './pages/LiveAudioTestPage'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import { ProjectContextProvider } from './contexts/ProjectContextProvider'
 
@@ -42,6 +43,8 @@ function ProtectedRoutes() {
         <Route path="/projects/:slug" element={<ErrorBoundary label="Project dashboard"><ProjectDashboard /></ErrorBoundary>} />
         <Route path="/memory" element={<ErrorBoundary label="Memory page"><MemoryPage /></ErrorBoundary>} />
         <Route path="/usage" element={<ErrorBoundary label="Usage page"><UsagePage /></ErrorBoundary>} />
+        {/* Stage 1 dev-only smoke for useLiveAudio. Not linked from sidebar. */}
+        <Route path="/live-audio-test" element={<ErrorBoundary label="Live audio test"><LiveAudioTestPage /></ErrorBoundary>} />
         <Route path="/sessions" element={<Navigate to="/usage" replace />} />
         <Route path="*" element={<Navigate to="/voice" replace />} />
       </Routes>
