@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,41 @@ from typing import Optional
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Poisoned-history filter — assistant-only.
+# ---------------------------------------------------------------------------
+# Pax traced Arch's amnesia loop (2026-05-04) to scoped-memory blindness
+# RECURSIVELY confirmed by Chief's own prior "I don't have X loaded" replies
+# replayed as context every turn. Once a scope went amnesiac, every subsequent
+# turn pulled the leaky reply back into history and re-confirmed amnesia.
+#
+# We don't delete from the DB — those rows are still part of the audit trail —
+# we just filter them out of the rehydration boundary so they don't poison the
+# next turn's context. User turns are NEVER filtered: the owner's words always
+# replay verbatim. The whole list is assistant-side architectural-leak
+# patterns; they should never have been said and shouldn't be replayed.
+_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"I don't have .* loaded", re.IGNORECASE),
+    re.compile(r"never talked about", re.IGNORECASE),
+    re.compile(r"I'm scoped to", re.IGNORECASE),
+    re.compile(r"I'm not in .* right now", re.IGNORECASE),
+    re.compile(r"don't have access to", re.IGNORECASE),
+    re.compile(r"I don't have a clock", re.IGNORECASE),
+)
+
+
+def _is_leaky(role: str, content: str) -> bool:
+    """Return True if an assistant turn matches a known architectural-leak
+    pattern and should be omitted from rehydrated history.
+
+    User turns are never leaky by definition — we always replay what the
+    owner said.
+    """
+    if role != "assistant" or not content:
+        return False
+    return any(p.search(content) for p in _LEAK_PATTERNS)
 
 
 def _resolve_db_path() -> Path:
@@ -371,6 +407,10 @@ async def load_recent_for_project(
          while the live scope is Arch).
       2. Ghost-session cost-tracking drift (reusing a session_id that
          has no matching ``sessions`` row in the usage tracker).
+
+    Assistant turns matching ``_LEAK_PATTERNS`` are dropped at this
+    boundary — they're persisted for audit but never replayed as
+    context. See ``_is_leaky`` for the rationale.
     """
     if limit <= 0:
         return []
@@ -386,4 +426,20 @@ async def load_recent_for_project(
         rows = await cur.fetchall()
     finally:
         await db.close()
-    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    filtered: list[dict] = []
+    leak_count = 0
+    for r in reversed(rows):
+        role = r["role"]
+        content = r["content"]
+        if _is_leaky(role, content):
+            leak_count += 1
+            continue
+        filtered.append({"role": role, "content": content})
+    if leak_count:
+        logger.info(
+            "history_store: filtered %d poisoned assistant turn(s) from "
+            "rehydration project=%s",
+            leak_count,
+            project,
+        )
+    return filtered

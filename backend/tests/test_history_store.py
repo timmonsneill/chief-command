@@ -350,3 +350,155 @@ def test_concurrent_summary_appends_dont_double_write(tmp_path):
     assert last["summary_text"] in {"s1", "s2", "s3"}
     assert last["covers_through_turn_id"] in {1, 2, 3}
     assert last["model"] == "m"
+
+
+# ---------------------------------------------------------------------------
+# Poisoned-history leak filter (Pax fix, 2026-05-04)
+# ---------------------------------------------------------------------------
+# load_recent_for_project must drop assistant turns matching the architectural-
+# leak patterns so they stop recursively confirming amnesia in the next turn.
+# User turns are never filtered.
+
+
+def test_leak_filter_drops_dont_have_loaded(tmp_path):
+    """The exact poisoning shape: 'I don't have X loaded'."""
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    async def run():
+        await store.append_turn("sess-1", "Arch", "user", "what's going on with arch?")
+        await store.append_turn(
+            "sess-1", "Arch", "assistant",
+            "I don't have Arch's project memory loaded right now.",
+        )
+        await store.append_turn("sess-1", "Arch", "user", "ok how about now?")
+        await store.append_turn("sess-1", "Arch", "assistant", "Yeah, I'm in.")
+        return await store.load_recent_for_project("Arch", limit=10)
+
+    history = asyncio.run(run())
+    contents = [h["content"] for h in history]
+    assert "what's going on with arch?" in contents
+    assert "ok how about now?" in contents
+    assert "Yeah, I'm in." in contents
+    # Leaky reply must be filtered.
+    assert all("loaded" not in c for c in contents)
+
+
+def test_leak_filter_drops_never_talked_about(tmp_path):
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    async def run():
+        await store.append_turn("sess-1", "Arch", "user", "what was the plan?")
+        await store.append_turn(
+            "sess-1", "Arch", "assistant",
+            "We've never talked about that before.",
+        )
+        return await store.load_recent_for_project("Arch", limit=10)
+
+    history = asyncio.run(run())
+    contents = [h["content"] for h in history]
+    assert "what was the plan?" in contents
+    assert all("never talked about" not in c.lower() for c in contents)
+
+
+def test_leak_filter_drops_im_scoped_to(tmp_path):
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    async def run():
+        await store.append_turn(
+            "sess-1", "Arch", "assistant",
+            "I'm scoped to Chief Command, not Arch.",
+        )
+        await store.append_turn("sess-1", "Arch", "user", "still there?")
+        return await store.load_recent_for_project("Arch", limit=10)
+
+    history = asyncio.run(run())
+    contents = [h["content"] for h in history]
+    assert "still there?" in contents
+    assert all("scoped to" not in c.lower() for c in contents)
+
+
+def test_leak_filter_drops_dont_have_clock(tmp_path):
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    async def run():
+        await store.append_turn("sess-1", "Arch", "user", "what time is it?")
+        await store.append_turn(
+            "sess-1", "Arch", "assistant",
+            "I don't have a clock.",
+        )
+        return await store.load_recent_for_project("Arch", limit=10)
+
+    history = asyncio.run(run())
+    contents = [h["content"] for h in history]
+    assert "what time is it?" in contents
+    assert all("clock" not in c.lower() for c in contents)
+
+
+def test_leak_filter_never_drops_user_turns(tmp_path):
+    """Even if a user message contains a leak phrase verbatim, it MUST replay.
+    The filter is assistant-only — owner's words are sacred."""
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    async def run():
+        # Owner says the trigger phrase himself — must NOT be filtered.
+        await store.append_turn(
+            "sess-1", "Arch", "user",
+            "you keep saying 'I don't have X loaded' — knock it off",
+        )
+        await store.append_turn("sess-1", "Arch", "assistant", "Got it.")
+        return await store.load_recent_for_project("Arch", limit=10)
+
+    history = asyncio.run(run())
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert "loaded" in history[0]["content"]
+    assert history[1] == {"role": "assistant", "content": "Got it."}
+
+
+def test_leak_filter_passes_legitimate_assistant_turns(tmp_path):
+    """Healthy assistant replies must pass through unchanged."""
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    legit_replies = [
+        "Yeah, I'm in — Arch scope, ready to dispatch.",
+        "Kicking Riggs on that backend fix now.",
+        "Pax flagged a regression in voice — want the report?",
+        "Done. SHA abc123, 4 tests green.",
+    ]
+
+    async def run():
+        for i, reply in enumerate(legit_replies):
+            await store.append_turn("sess-1", "Arch", "user", f"q{i}")
+            await store.append_turn("sess-1", "Arch", "assistant", reply)
+        return await store.load_recent_for_project("Arch", limit=20)
+
+    history = asyncio.run(run())
+    assistant_contents = [h["content"] for h in history if h["role"] == "assistant"]
+    assert assistant_contents == legit_replies
+
+
+def test_leak_filter_is_unit_testable_directly(tmp_path):
+    """Direct unit on _is_leaky — pin the role/content matrix."""
+    _point_db_at_tmp(tmp_path)
+    import services.history_store as store
+
+    # User turns: never leaky.
+    assert store._is_leaky("user", "I don't have X loaded") is False
+    # Empty content: never leaky.
+    assert store._is_leaky("assistant", "") is False
+    # Assistant + match: leaky.
+    assert store._is_leaky("assistant", "I don't have Arch loaded") is True
+    assert store._is_leaky("assistant", "we never talked about that") is True
+    assert store._is_leaky("assistant", "I'm scoped to Chief Command") is True
+    assert store._is_leaky("assistant", "I'm not in Arch right now") is True
+    assert store._is_leaky("assistant", "I don't have access to that file") is True
+    assert store._is_leaky("assistant", "I don't have a clock") is True
+    # Assistant + healthy reply: not leaky.
+    assert store._is_leaky("assistant", "Yeah, I'm in.") is False
+    assert store._is_leaky("assistant", "Done — SHA abc123.") is False

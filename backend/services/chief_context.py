@@ -23,7 +23,7 @@ from typing import Final
 from services.memory_paths import (
     AGENT_MEMORY_DIR,
     GLOBAL_EXCLUDE,
-    PROJECT_DIR_PREFIX,
+    PROJECT_DIR_PREFIXES,
     PROJECTS_ROOT,
     USER_MEMORY_DIR,
     safe_md_files,
@@ -45,9 +45,10 @@ _MAX_PROMPT_TOKENS: Final[int] = 40_000
 # ---------------------------------------------------------------------------
 # Canonical project-name mapping (project dir slug -> Chief scope name)
 # ---------------------------------------------------------------------------
-# Maps the exact dir-slug (after ``PROJECT_DIR_PREFIX``) to the canonical project
-# scope name used in ``AVAILABLE_PROJECTS``. Directories whose slug isn't in this
-# map are labelled as "Other — <slug>" and never count as a match for ``scope``.
+# Maps the exact dir-slug (after the matching ``PROJECT_DIR_PREFIXES`` entry) to
+# the canonical project scope name used in ``AVAILABLE_PROJECTS``. Directories
+# whose slug isn't in this map are labelled "Other — <slug>" and never count as
+# a match for ``scope``.
 _SLUG_TO_CANONICAL: Final[dict[str, str]] = {
     "chief-command": "Chief Command",
     "chief-command-backend": "Chief Command",
@@ -273,7 +274,8 @@ def _build_user_project_notes() -> str:
 # Per-project memory (scoped)
 # ---------------------------------------------------------------------------
 def _project_dirs() -> list[Path]:
-    """Return per-project memory dirs that match ``PROJECT_DIR_PREFIX``.
+    """Return per-project memory dirs whose name starts with any
+    ``PROJECT_DIR_PREFIXES`` entry.
 
     Skips symlinked children + symlinked memory subdirs so a malicious
     symlink inside ~/.claude/projects can't redirect us at arbitrary paths.
@@ -286,7 +288,7 @@ def _project_dirs() -> list[Path]:
             continue
         if not child.is_dir():
             continue
-        if not child.name.startswith(PROJECT_DIR_PREFIX):
+        if not any(child.name.startswith(p) for p in PROJECT_DIR_PREFIXES):
             continue
         mem = child / "memory"
         if mem.is_symlink():
@@ -297,10 +299,17 @@ def _project_dirs() -> list[Path]:
 
 
 def _slug_from_dir(memory_dir: Path) -> str:
-    """Extract the slug portion of the project dir, sans prefix."""
-    parent_name = memory_dir.parent.name  # e.g. "-Users-user-Desktop-chief-command"
-    if parent_name.startswith(PROJECT_DIR_PREFIX):
-        return parent_name[len(PROJECT_DIR_PREFIX):]
+    """Extract the slug portion of the project dir, sans whichever prefix matched.
+
+    Examples:
+        ``-Users-user-Desktop-chief-command``           -> ``chief-command``
+        ``-Users-user-Documents-GitHub-arch-to-freedom-emr``
+                                                        -> ``arch-to-freedom-emr``
+    """
+    parent_name = memory_dir.parent.name
+    for prefix in PROJECT_DIR_PREFIXES:
+        if parent_name.startswith(prefix):
+            return parent_name[len(prefix):]
     return parent_name
 
 

@@ -19,9 +19,23 @@ PROJECTS_ROOT: Final[Path] = CLAUDE_HOME / "projects"
 AUDIT_LOG_PATH: Final[Path] = USER_MEMORY_DIR / "audit_log.md"
 
 # Per-project memory dirs live under
-#   PROJECTS_ROOT / <PROJECT_DIR_PREFIX>-<slug> / memory
-# Project dirs that do not have this prefix are skipped by Chief context.
-PROJECT_DIR_PREFIX: Final[str] = "-Users-user-Desktop-"
+#   PROJECTS_ROOT / <prefix>-<slug> / memory
+# Project dirs that do not start with one of these prefixes are skipped by
+# Chief context. Owner repos live in two places — ~/Desktop/* (Chief Command,
+# Personal Assist, etc.) and ~/Documents/GitHub/* (Arch). Claude Code mangles
+# the absolute path into a slug by replacing "/" with "-", so each repo root
+# yields a different prefix here. Both must be supported or scoped projects in
+# the second tree go INVISIBLE to Chief and feel amnesiac (regression that bit
+# Arch, 2026-05-04).
+PROJECT_DIR_PREFIXES: Final[tuple[str, ...]] = (
+    "-Users-user-Desktop-",
+    "-Users-user-Documents-GitHub-",
+)
+
+# Backwards-compat alias for callers that still import the singular name.
+# Always equals ``PROJECT_DIR_PREFIXES[0]``. Prefer the tuple at new call sites
+# so we scan every supported tree.
+PROJECT_DIR_PREFIX: Final[str] = PROJECT_DIR_PREFIXES[0]
 
 # Files that are not real memory content (indexes, JSON manifests, logs).
 GLOBAL_EXCLUDE: Final[frozenset[str]] = frozenset(
