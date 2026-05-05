@@ -11,12 +11,14 @@ interface UsageMeterProps {
 }
 
 const MODEL_LABELS: Record<ActiveModel, string> = {
+  'gemini-2.5-pro': 'Gemini Pro',
   'claude-haiku-4-5': 'Haiku',
   'claude-sonnet-4-6': 'Sonnet',
   'claude-opus-4-7': 'Opus',
 }
 
 const MODEL_COLORS: Record<ActiveModel, string> = {
+  'gemini-2.5-pro': 'bg-amber-500/20 text-amber-600 border-amber-500/30',
   'claude-haiku-4-5': 'bg-emerald-500/20 text-emerald-600 border-emerald-500/30',
   'claude-sonnet-4-6': 'bg-blue-500/20 text-blue-600 border-blue-500/30',
   'claude-opus-4-7': 'bg-purple-500/20 text-purple-600 border-purple-500/30',

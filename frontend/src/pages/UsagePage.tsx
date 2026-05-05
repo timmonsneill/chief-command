@@ -90,12 +90,14 @@ function levelFromCents(cents: number): 'none' | 'warning' | 'critical' {
 }
 
 const MODEL_COLORS: Record<string, string> = {
+  'gemini-2.5-pro': 'bg-amber-500',
   'claude-haiku-4-5': 'bg-chief/50',
   'claude-sonnet-4-6': 'bg-chief',
   'claude-opus-4-7': 'bg-purple-500',
 }
 
 const MODEL_LABELS: Record<string, string> = {
+  'gemini-2.5-pro': 'Gemini Pro',
   'claude-haiku-4-5': 'Haiku',
   'claude-sonnet-4-6': 'Sonnet',
   'claude-opus-4-7': 'Opus',

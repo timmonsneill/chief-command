@@ -381,6 +381,12 @@ export default function VoicePage() {
           speechStartedDuringTtsRef.current = false
           ttsActiveRef.current = false
           setVoiceState(conversationActive ? 'listening' : 'idle')
+          // Race guard: backend may not emit a terminal tool_call frame for an
+          // in-flight chip when the turn is cancelled. Flip any still-running
+          // chips to 'cancelled' so the UI doesn't spin forever.
+          setToolCalls((prev) =>
+            prev.map((tc) => (tc.status === 'running' ? { ...tc, status: 'cancelled' } : tc))
+          )
         }
 
         if (parsed.type === 'usage') {

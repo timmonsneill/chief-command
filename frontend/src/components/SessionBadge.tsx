@@ -9,6 +9,7 @@ interface SessionBadgeProps {
 }
 
 const MODEL_DOT: Record<ActiveModel, string> = {
+  'gemini-2.5-pro': 'bg-amber-400',
   'claude-haiku-4-5': 'bg-emerald-400',
   'claude-sonnet-4-6': 'bg-blue-400',
   'claude-opus-4-7': 'bg-purple-400',

@@ -229,7 +229,7 @@ export interface VoiceMessage {
   timestamp: string
 }
 
-export type ActiveModel = 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'
+export type ActiveModel = 'gemini-2.5-pro' | 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'
 
 export interface WsTranscriptEvent {
   type: 'transcript'
