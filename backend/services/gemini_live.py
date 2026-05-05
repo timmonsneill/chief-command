@@ -23,6 +23,7 @@ Architecture:
                                                            on_tool_call
                                                            on_session_resumed
                                                            on_go_away
+                                                           on_pump_crash
 
 Audio formats (per Live API contract):
   * Input:  16 kHz mono 16-bit little-endian PCM, mime_type
@@ -101,6 +102,11 @@ TurnCompleteCb = Callable[[dict], Awaitable[None]]
 ToolCallCb = Callable[[Any], Awaitable[Any]]
 SessionResumedCb = Callable[[str], Awaitable[None]]
 GoAwayCb = Callable[[float], Awaitable[None]]
+# Stage 4: dedicated callback for pump exits caused by an exception (not
+# user-driven barge-in). The WS layer uses this signal to drive its
+# session-resumption reconnect loop. Receives the exception instance so
+# callers can decide retry vs. give-up based on the error type.
+PumpCrashCb = Callable[[BaseException], Awaitable[None]]
 
 
 _client: Optional[Any] = None
@@ -259,6 +265,7 @@ class LiveSession:
         on_tool_call: Optional[ToolCallCb] = None,
         on_session_resumed: Optional[SessionResumedCb] = None,
         on_go_away: Optional[GoAwayCb] = None,
+        on_pump_crash: Optional[PumpCrashCb] = None,
         resumption_handle: Optional[str] = None,
         extra_tools: Optional[list[Any]] = None,
     ) -> None:
@@ -282,11 +289,17 @@ class LiveSession:
         self.on_tool_call = on_tool_call
         self.on_session_resumed = on_session_resumed
         self.on_go_away = on_go_away
+        self.on_pump_crash = on_pump_crash
 
         # Resumption — we keep the latest handle on the instance so a
         # caller can checkpoint it (for cross-reconnect resumption) by
-        # reading ``self.resumption_handle`` whenever convenient.
+        # reading ``self.resumption_handle`` whenever convenient. Stage 4
+        # also stamps a monotonic timestamp at update time so the WS layer
+        # can drop a handle that's older than the Live API's 2-hour TTL.
         self.resumption_handle: Optional[str] = resumption_handle
+        self.resumption_handle_updated_at: float = (
+            time.monotonic() if resumption_handle is not None else 0.0
+        )
 
         # Internal SDK handles. Created in open(); cleared in close().
         self._cm: Optional[Any] = None         # connect() async context mgr
@@ -524,12 +537,24 @@ class LiveSession:
                 await self._dispatch(response)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("gemini_live: receive pump crashed")
+            # Local flush — same as a barge-in — so the FE drops any audio
+            # queued for the now-dead session.
             await self._safe_invoke(
                 self.on_interrupted,
                 None,  # no arg
                 tag="on_interrupted (pump-crash)",
+            )
+            # Stage 4: dedicated pump-crash signal so the WS layer can
+            # rebuild a LiveSession with the cached resumption handle.
+            # Distinct from on_interrupted (which also fires on user-driven
+            # barge-in) so the caller can distinguish "user spoke over
+            # Chief" from "transport died".
+            await self._safe_invoke(
+                self.on_pump_crash,
+                exc,
+                tag="on_pump_crash",
             )
 
     async def _dispatch(self, response: Any) -> None:
@@ -561,6 +586,7 @@ class LiveSession:
             resumable = getattr(sru, "resumable", None)
             if new_handle and resumable is not False:
                 self.resumption_handle = new_handle
+                self.resumption_handle_updated_at = time.monotonic()
                 await self._safe_invoke(
                     self.on_session_resumed,
                     new_handle,

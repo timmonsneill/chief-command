@@ -84,6 +84,29 @@ class Settings(BaseSettings):
     # results flicker before settling into a final).
     GOOGLE_STT_SILENCE_TIMEOUT_MS: int = 500
 
+    # ------------------------------------------------------------------ #
+    # Stage 4 — Live API resilience knobs
+    # ------------------------------------------------------------------ #
+    # Daily hard cap (USD) checked at WS open + after each turn. Mirrors the
+    # ``DAILY_COST_CAP_DOLLARS`` env var read inside ``services.usage_tracker``;
+    # surfaced here so the value is visible in the settings inspector. Source
+    # of truth on read remains the env var so a runtime override doesn't need
+    # a settings reload.
+    DAILY_COST_CAP_DOLLARS: float = 15.00
+
+    # How many times the voice WS will rebuild a LiveSession (using the
+    # cached session resumption handle) on a receive-pump exception before
+    # giving up and emitting an error frame. 2 covers transient Vertex
+    # hiccups + the 10-min server-side rotation; a 3rd drop in one WS
+    # connection implies a real problem and is not worth retrying.
+    LIVE_RECONNECT_MAX_RETRIES: int = 2
+
+    # Session resumption handles are valid for 2 hours per Live API spec.
+    # Past that we drop the cached handle and the WS must rebuild a fresh
+    # session (losing server-side context). Stored as seconds for direct
+    # comparison against monotonic timestamps.
+    LIVE_RESUMPTION_HANDLE_MAX_AGE_S: int = 7200
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

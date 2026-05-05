@@ -1,7 +1,7 @@
 """WebSocket endpoints for voice and terminal streaming.
 
-Stage 2 of the Gemini Live pivot (2026-05-05). Voice WS replaces the
-prior STT → text-LLM → TTS pipeline with native Live API audio I/O:
+Stage 4 of the Gemini Live pivot (2026-05-05). Voice WS uses native
+Live API audio I/O end-to-end:
 
   Browser ──16kHz Int16 PCM──► voice_ws ──► LiveSession.send_audio
   Browser ◄──24kHz Int16 PCM── voice_ws ◄── on_audio_chunk
@@ -9,15 +9,20 @@ prior STT → text-LLM → TTS pipeline with native Live API audio I/O:
                                             on_interrupted /
                                             on_turn_complete / etc.
 
-Server-side VAD on the Live API handles barge-in so the prior manual
-TTS-cancel-event / drain-queue machinery is gone. The manual UI
-cancel button still triggers ``LiveSession.cancel_current_turn`` for
-the case where the user presses cancel without speaking; the FE's
-playback worklet flushes on the resulting ``interrupted`` frame.
+Stage 4 hardening over Stages 1-3:
+  * Receive-pump crash → rebuild the LiveSession with the cached
+    session-resumption handle (≤2hr per Live API spec). Capped at
+    ``LIVE_RECONNECT_MAX_RETRIES`` retries per WS connection.
+  * GoAway → proactive parallel reconnect before the underlying
+    transport closes (~10min cap). Old session is closed only after
+    the new one is open and receiving.
+  * Mid-turn scope flip → cancel the in-flight turn before
+    close-and-reopen, so the new scope starts clean.
+  * Soft cost cap → emit ``cost_warning`` once per WS connection
+    when daily spend crosses 80% of the hard cap.
 
-Tools, reconnect-on-drop, and Pro-deep "think_deep" handoff are NOT
-wired in Stage 2 — those land in Stage 3 / Stage 4. The legacy
-``stt_google``/``tts_google`` modules stay in the tree as fallback.
+Server-side VAD on the Live API handles barge-in; the manual UI cancel
+button still triggers ``LiveSession.cancel_current_turn``.
 """
 
 import asyncio
@@ -25,50 +30,33 @@ import json
 import logging
 import signal
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.auth import verify_token
-# Legacy STT/TTS imports kept for the orphaned text-LLM path below
-# (``_run_llm_turn`` / ``_narrate`` / ``_route_task`` / ``_route_status``
-# / ``_route_cancel``). Stage 2 voice WS no longer drives that pipeline,
-# but the existing test_dispatch_glue + test_*_voice suites still
-# exercise those helpers as a regression net while the FE rewire lands.
-# Stage 3 cleanup will remove the helpers + these imports together.
-from services import stt_service, tts_service
-from services.audio_utils import convert_webm_to_wav, get_audio_duration
 from services import cc_session
 from services.agent_tools import dispatch_tool, to_gemini_tool
-from services.chief_context import build_chief_system, build_chief_system_string
-from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
-from services.gemini_brain import GEMINI_MODEL
+from services.chief_context import build_chief_system_string
+from services.dispatcher import TaskDispatcher
 from services.gemini_live import LIVE_MODEL, LiveSession
 from services.history_store import append_turn
-from services.llm import stream_turn
 from services.memory_rollup import load_persistent_memory, maybe_rollup
 from services.project_context import (
     AVAILABLE_PROJECTS,
     DEFAULT_PROJECT,
     _context_store,
-    detect_project_switch,
 )
 from services.repo_map import get_repo_path
-from services.router import (
-    classify_and_route,
-    random_thinking_phrase,
-    random_voice_bridge_phrase,
-)
 from services.usage_tracker import (
     check_daily_cap,
+    check_soft_cap,
     close_session,
     create_session,
     get_session_totals,
-    record_stt_usage,
-    record_tts_usage,
     record_turn,
 )
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +97,12 @@ def _migrate_dissolved_scope(value: Optional[str]) -> Optional[str]:
 # Serialized WS send helpers (Hawke CRITICAL — concurrent WS writes)
 #
 # Starlette's WebSocket.send_{json,bytes} is NOT guaranteed to serialize
-# concurrent writes from separate tasks. In the dispatch-glue world the
-# voice WS has several concurrent producers:
-#   - main receive loop (sends transcript / token / etc.)
-#   - turn task (_run_llm_turn) streaming tokens + TTS bytes
-#   - dispatcher stdout pump (_route_task on_output)
-#   - dispatcher completion callback (_route_task on_complete)
-#   - narration (_narrate) emitting tts_start / bytes / tts_end / message_done
+# concurrent writes from separate tasks. In the Live world the voice WS
+# has several concurrent producers:
+#   - main receive loop (forwarding mic frames to LiveSession.send_audio)
+#   - LiveSession callbacks (audio chunks, transcripts, tool calls)
+#   - dispatcher stdout pump (task_output frames)
+#   - dispatcher completion callback (task_complete frames)
 #
 # Without explicit serialization two of these can interleave mid-frame on
 # the underlying transport and corrupt bytes on the wire. Per-connection
@@ -141,24 +128,6 @@ async def ws_send_json(ws: WebSocket, payload: dict) -> None:
 async def ws_send_bytes(ws: WebSocket, data: bytes) -> None:
     async with _get_send_lock(ws):
         await ws.send_bytes(data)
-
-
-def _drain_queue(queue: asyncio.Queue) -> int:
-    """Empty an asyncio.Queue synchronously. Returns the count drained.
-
-    Track B #6: before cancelling a tts worker, drain anything buffered so
-    the next ``queue.get()`` after the cancel flag can't pull one more
-    sentence and synthesize it before the flag is seen. Ordering matters:
-    drain first, THEN cancel the task.
-    """
-    drained = 0
-    while not queue.empty():
-        try:
-            queue.get_nowait()
-            drained += 1
-        except asyncio.QueueEmpty:
-            break
-    return drained
 
 
 async def _authenticate_ws(ws: WebSocket) -> Optional[str]:
@@ -212,18 +181,18 @@ async def voice_ws(ws: WebSocket) -> None:
       text    {"type":"error","message":"..."}
       text    {"type":"session_resumed","handle":"..."}
       text    {"type":"go_away","time_left":N}
+      text    {"type":"reconnecting"}                — Stage 4 swap start
+      text    {"type":"reconnected"}                 — Stage 4 swap done
+      text    {"type":"cost_warning","current_today":N,"cap":15}
+      text    {"type":"quota_exceeded", ...}
       text    {"type":"speed", ...}                  — speed echo (no-op)
-      text    {"type":"tool_call", ...}              — Stage 3 reserve
+      text    {"type":"tool_call", ...}
 
-    Stage 2 contract drops: ``transcript``, ``token``, ``tts_start``,
-    ``tts_end``, ``message_done``, ``turn_cancelled``, ``active_model``,
-    ``bridge_phrase``. Replacements:
-      transcript        -> output_transcript / input_transcript
-      message_done      -> generation_complete
-      turn_cancelled    -> interrupted
-
-    Tools (Stage 3) and reconnect-on-drop (Stage 4) are intentionally not
-    wired here — fall-through behaviour is to surface the error and close.
+    Stage 4: a receive-pump crash triggers a session-resumption rebuild
+    (cap LIVE_RECONNECT_MAX_RETRIES per WS). A GoAway frame triggers a
+    proactive parallel reconnect before the underlying transport closes.
+    A 3rd consecutive failure or a reconnect that itself fails surfaces
+    an error frame and closes the WS.
     """
     await ws.accept()
     client_id = await _authenticate_ws(ws)
@@ -309,6 +278,31 @@ async def voice_ws(ws: WebSocket) -> None:
     # ``live_session`` indirectly through this slot inside callbacks.
     live_session_box: list[Optional[LiveSession]] = [None]
 
+    # ----- Stage 4: reconnect / GoAway / soft-cap state -----
+    # Cached resumption handle survives across LiveSession instances within
+    # the same WS connection. Updated on every ``session_resumption_update``
+    # frame (LiveSession writes self.resumption_handle); we mirror it onto
+    # this local so the reconnect path can read it after the old session
+    # is torn down. Stamped with a monotonic timestamp so we can drop a
+    # stale handle older than ``LIVE_RESUMPTION_HANDLE_MAX_AGE_S``.
+    cached_resumption_handle: list[Optional[str]] = [None]
+    cached_resumption_handle_at: list[float] = [0.0]
+
+    # Reconnect attempt counter for THIS WS connection. Reset to 0 on a
+    # successful turn-complete (so a single rocky stretch followed by
+    # recovery doesn't push the counter to the cap). Capped at
+    # ``settings.LIVE_RECONNECT_MAX_RETRIES`` — past that we surface an
+    # error and close cleanly.
+    reconnect_attempts: list[int] = [0]
+    # Latch so a reconnect attempt already in flight isn't restarted by a
+    # second pump-crash callback firing before the first reconnect lands.
+    reconnect_in_progress: list[bool] = [False]
+
+    # Soft-cost warning fires once per WS connection. Multi-fire would just
+    # spam the FE; the threshold is a "heads-up" signal, not a continuous
+    # update.
+    soft_cap_warned: list[bool] = [False]
+
     async def ensure_session_id() -> str:
         """Lazy-create the usage-tracker session row on first turn."""
         nonlocal session_id
@@ -377,8 +371,16 @@ async def voice_ws(ws: WebSocket) -> None:
             logger.debug("voice_ws (Live) interrupted send failed: %s", exc)
 
     async def _on_session_resumed(handle: str) -> None:
-        # Stage 4 will reuse the handle on reconnect; Stage 2 just logs +
-        # echoes so the FE can debug-display it without acting on it.
+        """Cache the resumption handle for cross-reconnect rebuilds.
+
+        Stage 4 actively uses the cached handle on pump-crash and GoAway
+        reconnects (see ``_reconnect_with_handle`` + ``_handle_go_away``).
+        Echoing the frame to the FE keeps the existing debug surface so
+        owner can see "session resumed" pings in the Voice page console.
+        """
+        import time
+        cached_resumption_handle[0] = handle
+        cached_resumption_handle_at[0] = time.monotonic()
         logger.info("voice_ws (Live) session_resumed handle=%s", handle[:24])
         try:
             await ws_send_json(ws, {"type": "session_resumed", "handle": handle})
@@ -386,11 +388,71 @@ async def voice_ws(ws: WebSocket) -> None:
             logger.debug("voice_ws (Live) session_resumed send failed: %s", exc)
 
     async def _on_go_away(time_left: float) -> None:
+        """Server is closing the underlying transport — rebuild proactively.
+
+        Live API sends GoAway ~30s before forced disconnect (typically at
+        the ~10min mark). We use the time_left window to spin up a parallel
+        LiveSession with the cached resumption handle and swap once it's
+        open, so the user's audio gap is sub-second (vs. ~5-10s if we
+        waited for the inevitable transport close + pump-crash retry).
+
+        Latch set SYNCHRONOUSLY here too — a GoAway followed quickly by a
+        crash (or vice-versa) shouldn't spawn two parallel rebuilds.
+        """
         logger.info("voice_ws (Live) go_away time_left=%.2f", time_left)
         try:
             await ws_send_json(ws, {"type": "go_away", "time_left": time_left})
         except Exception as exc:
             logger.debug("voice_ws (Live) go_away send failed: %s", exc)
+        # Kick off proactive reconnect — schedule rather than await so the
+        # callback returns to the receive pump quickly and doesn't block
+        # other server messages riding on the same dispatch.
+        if reconnect_in_progress[0]:
+            logger.info(
+                "voice_ws (Live) reconnect already in progress — "
+                "GoAway will ride on the in-flight rebuild",
+            )
+            return
+        reconnect_in_progress[0] = True
+        try:
+            asyncio.create_task(_handle_go_away_reconnect())
+        except Exception as exc:
+            reconnect_in_progress[0] = False
+            logger.warning("voice_ws (Live) go_away reconnect spawn failed: %s", exc)
+
+    async def _on_pump_crash(exc: BaseException) -> None:
+        """Receive-pump exited on an exception — drive a resumption rebuild.
+
+        Distinct from ``_on_interrupted`` (which fires on user-driven
+        barge-in too). When the SDK's WS transport drops mid-session, the
+        pump catches the exception, signals on_interrupted (so any queued
+        playback flushes locally) AND fires this callback. We use the
+        cached resumption handle to rebuild a new LiveSession server-side
+        with full context preserved.
+
+        Latch set SYNCHRONOUSLY before ``create_task`` so a second crash
+        callback firing in the same loop tick doesn't slip past the check
+        inside ``_reconnect_after_crash`` and spawn a parallel rebuild.
+        """
+        logger.warning(
+            "voice_ws (Live) pump crashed: %s — attempting resumption rebuild",
+            exc,
+        )
+        if reconnect_in_progress[0]:
+            logger.info(
+                "voice_ws (Live) reconnect already in progress — "
+                "ignoring duplicate pump-crash signal",
+            )
+            return
+        reconnect_in_progress[0] = True
+        try:
+            asyncio.create_task(_reconnect_after_crash())
+        except Exception as spawn_exc:
+            # Release the latch so a follow-up crash can try again.
+            reconnect_in_progress[0] = False
+            logger.warning(
+                "voice_ws (Live) reconnect spawn failed: %s", spawn_exc,
+            )
 
     async def _on_tool_call(tool_call_event: any) -> None:
         """Stage 3: execute Live's tool calls and reply via send_tool_response.
@@ -719,6 +781,16 @@ async def voice_ws(ws: WebSocket) -> None:
         except Exception as exc:
             logger.debug("voice_ws (Live) generation_complete send failed: %s", exc)
 
+        # Stage 4: clear the reconnect-attempt counter on any clean turn
+        # completion. A single rocky stretch followed by a healthy turn
+        # shouldn't permanently consume the WS's retry budget.
+        if reconnect_attempts[0] > 0:
+            logger.info(
+                "voice_ws (Live) clearing reconnect attempts (was %d) — turn ok",
+                reconnect_attempts[0],
+            )
+            reconnect_attempts[0] = 0
+
         # Stage 3 daily cap recheck after each turn. We do this here
         # (rather than on a fixed timer) because turn boundaries are the
         # natural granularity for "is this session getting expensive" —
@@ -752,14 +824,47 @@ async def voice_ws(ws: WebSocket) -> None:
                 await ws.close(code=4003)
             except Exception:
                 pass
+            return
+
+        # Stage 4 soft-cost warning: emit ``cost_warning`` ONCE per WS
+        # connection when daily spend crosses 80% of the hard cap. Owner
+        # then sees a subtle banner before the hard close lands. We skip
+        # this when the hard cap has already fired (would be redundant
+        # after ``quota_exceeded`` and the WS is closing anyway).
+        if not soft_cap_warned[0]:
+            try:
+                over_soft, current_soft = await check_soft_cap(client_id)
+            except Exception as exc:
+                logger.warning("voice_ws soft cap recheck failed: %s", exc)
+                over_soft = False
+                current_soft = 0.0
+            if over_soft:
+                from services.usage_tracker import _daily_cost_cap_dollars
+                soft_cap_warned[0] = True
+                try:
+                    await ws_send_json(ws, {
+                        "type": "cost_warning",
+                        "current_today": round(current_soft, 4),
+                        "cap": _daily_cost_cap_dollars(),
+                    })
+                except Exception as exc:
+                    logger.debug(
+                        "voice_ws cost_warning emit failed: %s", exc,
+                    )
 
     # ----- LiveSession lifecycle helpers -----
-    async def _open_live_session() -> LiveSession:
-        """Build + open a LiveSession with the current scope's system prompt."""
+    def _build_live_session(*, resumption_handle: Optional[str] = None) -> LiveSession:
+        """Construct a LiveSession against the current scope.
+
+        Pure constructor — no async work. ``open()`` happens at the call
+        site so reconnect paths can drive open + swap atomically (or
+        backstop a failed open without leaving a half-built instance in
+        the slot).
+        """
         system_prompt = build_chief_system_string(
             current_project, prior_summary=current_summary,
         )
-        sess = LiveSession(
+        return LiveSession(
             model=LIVE_MODEL,
             system_prompt=system_prompt,
             on_audio_chunk=_on_audio_chunk,
@@ -770,8 +875,19 @@ async def voice_ws(ws: WebSocket) -> None:
             on_tool_call=_on_tool_call,
             on_session_resumed=_on_session_resumed,
             on_go_away=_on_go_away,
+            on_pump_crash=_on_pump_crash,
             extra_tools=live_tool_list if live_tool_list else None,
+            resumption_handle=resumption_handle,
         )
+
+    async def _open_live_session() -> LiveSession:
+        """Build + open a LiveSession with the current scope's system prompt.
+
+        Initial open path. Reconnect paths use ``_build_live_session`` +
+        ``open()`` directly so they can stage a parallel session before
+        swapping the slot.
+        """
+        sess = _build_live_session()
         await sess.open()
         live_session_box[0] = sess
         logger.info(
@@ -791,25 +907,222 @@ async def voice_ws(ws: WebSocket) -> None:
         except Exception as exc:
             logger.warning("voice_ws (Live) close failed: %s", exc)
 
+    def _resumption_handle_if_fresh() -> Optional[str]:
+        """Return the cached handle iff it's within the 2hr TTL, else None.
+
+        Live API handles are documented as valid for 2hr from issue. Past
+        that the server rejects the handle and we'd have to rebuild from
+        scratch anyway — surface ``None`` here so the caller can fall back
+        to a fresh session without paying the round-trip on a guaranteed
+        rejection.
+        """
+        import time
+        handle = cached_resumption_handle[0]
+        if not handle:
+            return None
+        age = time.monotonic() - cached_resumption_handle_at[0]
+        if age >= settings.LIVE_RESUMPTION_HANDLE_MAX_AGE_S:
+            logger.info(
+                "voice_ws (Live) resumption handle expired (age=%.1fs); "
+                "dropping and rebuilding fresh",
+                age,
+            )
+            cached_resumption_handle[0] = None
+            cached_resumption_handle_at[0] = 0.0
+            return None
+        return handle
+
+    async def _reconnect_after_crash() -> None:
+        """Rebuild the LiveSession after a receive-pump crash.
+
+        Caller (``_on_pump_crash``) has already set ``reconnect_in_progress``
+        synchronously. We just need to clear it on exit. Bumped attempt
+        counter is checked against ``settings.LIVE_RECONNECT_MAX_RETRIES``;
+        past the cap we surface an error frame and leave the WS for the
+        FE to close.
+        """
+        try:
+            attempt = reconnect_attempts[0] + 1
+            if attempt > settings.LIVE_RECONNECT_MAX_RETRIES:
+                logger.warning(
+                    "voice_ws (Live) reconnect cap reached (%d) — giving up",
+                    settings.LIVE_RECONNECT_MAX_RETRIES,
+                )
+                try:
+                    await ws_send_json(ws, {
+                        "type": "error",
+                        "message": "voice connection lost — please refresh",
+                    })
+                except Exception:
+                    pass
+                # Don't proactively close the WS — receive loop will exit
+                # next time the FE sends a frame and saw no live session.
+                return
+            reconnect_attempts[0] = attempt
+            handle = _resumption_handle_if_fresh()
+            await _swap_to_new_session(
+                resumption_handle=handle,
+                reason=f"pump-crash-retry-{attempt}",
+            )
+        finally:
+            reconnect_in_progress[0] = False
+
+    async def _handle_go_away_reconnect() -> None:
+        """Proactive reconnect triggered by a server-side GoAway notice.
+
+        Live emits GoAway ~30s before the underlying transport closes
+        (typically at the ~10min cap). We open a fresh LiveSession with
+        the cached handle in parallel and atomically swap the slot once
+        the new one is ready, so the audio gap is bounded by the swap
+        time (sub-second) rather than the time it takes to detect the
+        forced close (multi-second).
+
+        Doesn't bump ``reconnect_attempts`` — GoAway is a healthy server
+        rotation, not a fault. We DON'T want owner's 11th proactive
+        rotation to fail just because they had two crashes earlier.
+
+        Caller (``_on_go_away``) has already set ``reconnect_in_progress``
+        synchronously. We just need to clear it on exit.
+        """
+        try:
+            handle = _resumption_handle_if_fresh()
+            await _swap_to_new_session(
+                resumption_handle=handle,
+                reason="go-away-rotation",
+            )
+        finally:
+            reconnect_in_progress[0] = False
+
+    async def _swap_to_new_session(
+        *,
+        resumption_handle: Optional[str],
+        reason: str,
+    ) -> None:
+        """Open a new LiveSession and atomically swap it into the slot.
+
+        Old session is closed only AFTER the new one is open so the user
+        experience is bounded by the open latency (typically <500ms),
+        not the close latency. If the new open fails, the old session
+        stays in place (it's already dead post-pump-crash, but at least
+        the receive loop won't be sending audio to None).
+        """
+        try:
+            new_sess = _build_live_session(resumption_handle=resumption_handle)
+        except Exception as exc:
+            logger.exception(
+                "voice_ws (Live) reconnect build failed reason=%s: %s",
+                reason, exc,
+            )
+            try:
+                await ws_send_json(ws, {
+                    "type": "error",
+                    "message": "voice connection failed to rebuild",
+                })
+            except Exception:
+                pass
+            return
+
+        # Tell the FE we're swapping BEFORE we touch the slot so a
+        # subtle "reconnecting" indicator can render. The FE clears it
+        # on the matching ``reconnected`` frame.
+        try:
+            await ws_send_json(ws, {"type": "reconnecting", "reason": reason})
+        except Exception:
+            pass
+
+        try:
+            await new_sess.open()
+        except Exception as exc:
+            logger.exception(
+                "voice_ws (Live) reconnect open failed reason=%s: %s",
+                reason, exc,
+            )
+            # Clean up the half-built session so we don't leak its async
+            # context manager. ``close()`` is a safe no-op if open never
+            # actually attached the AsyncSession.
+            try:
+                await new_sess.close()
+            except Exception:
+                pass
+            try:
+                await ws_send_json(ws, {
+                    "type": "error",
+                    "message": "voice connection failed to rebuild",
+                })
+            except Exception:
+                pass
+            return
+
+        # Swap into the slot. The old session is closed AFTER the swap so
+        # any callbacks already queued for the old pump (which is dead)
+        # find a None reference and skip cleanly.
+        old_sess = live_session_box[0]
+        live_session_box[0] = new_sess
+        if old_sess is not None:
+            try:
+                await old_sess.close()
+            except Exception as exc:
+                logger.debug(
+                    "voice_ws (Live) old session close on swap failed: %s", exc,
+                )
+        # Clear in-flight transcript accumulators — server-side context is
+        # preserved by the resumption handle, but the IN-FLIGHT turn (if
+        # any) was lost when the pump died, so any partial transcript we
+        # had cached belongs to nothing.
+        input_transcript_buf.clear()
+        output_transcript_buf.clear()
+        logger.info(
+            "voice_ws (Live) reconnected reason=%s handle=%s",
+            reason, "yes" if resumption_handle else "no",
+        )
+        try:
+            await ws_send_json(ws, {"type": "reconnected", "reason": reason})
+        except Exception:
+            pass
+
     async def _handle_scope_flip(old_project: str, new_project: str) -> None:
-        """Close + reopen the LiveSession against the new scope.
+        """Cancel any in-flight turn, close, and reopen against the new scope.
 
         Different scope means a different system prompt (different Chief
         identity, different project memory, different repo binding). We
         do NOT hot-swap — closed-and-reopen is the only honest way to
-        get a fresh ``system_instruction`` into Live. The transcript
-        buffers also get cleared because the in-flight turn (if any) is
-        owned by the old scope and shouldn't bleed into the new one.
+        get a fresh ``system_instruction`` into Live.
+
+        Stage 4 (mid-turn responsiveness): if a turn is in flight we cancel
+        it BEFORE closing the session. Owner pressing the scope switcher
+        mid-utterance expects the new scope NOW, not after the half-formed
+        reply finishes. Cost is the in-flight reply (already partially
+        billed); benefit is responsive scope switching.
 
         Steps:
-          1. Tear down CC pool entries for *other* scopes (frees memory,
+          1. Cancel any in-flight turn so the FE flushes pending audio.
+          2. Tear down CC pool entries for *other* scopes (frees memory,
              drops crash-loop state). Best-effort.
-          2. Close the current LiveSession.
-          3. Reload persistent memory for the new scope so the new
+          3. Drop the cached resumption handle — it's bound to the OLD
+             scope's system prompt, so reusing it on the new scope would
+             rehydrate Chief with the wrong identity.
+          4. Reset reconnect attempt counter — new scope, fresh budget.
+          5. Close the current LiveSession.
+          6. Reload persistent memory for the new scope so the new
              system prompt carries the right rolling summary.
-          4. Open a new LiveSession against the new scope.
+          7. Open a new LiveSession against the new scope (with fresh
+             tools — see below).
         """
         nonlocal current_summary
+
+        # (1) Mid-turn cancel. Cheap if no turn is in flight (cancel_current_turn
+        # is idempotent + safe on a closed session). Synthesizes an
+        # ``interrupted`` frame so the FE flushes any audio queued for
+        # the old scope's reply.
+        old_sess = live_session_box[0]
+        if old_sess is not None:
+            try:
+                await old_sess.cancel_current_turn()
+            except Exception as exc:
+                logger.debug(
+                    "voice_ws (Live) scope-flip pre-cancel failed: %s", exc,
+                )
+
         try:
             await cc_session.get_pool().teardown_other_scopes(
                 subject=client_id,
@@ -827,6 +1140,14 @@ async def voice_ws(ws: WebSocket) -> None:
         # not bleed into the new scope's first turn.
         input_transcript_buf.clear()
         output_transcript_buf.clear()
+
+        # The cached resumption handle is bound to the old scope's
+        # system_instruction. Reusing it on the new scope rehydrates Chief
+        # with the wrong identity, so drop it. Reconnect-attempt counter
+        # also resets so the new scope gets a clean retry budget.
+        cached_resumption_handle[0] = None
+        cached_resumption_handle_at[0] = 0.0
+        reconnect_attempts[0] = 0
 
         await _close_live_session()
 
@@ -1027,905 +1348,6 @@ async def voice_ws(ws: WebSocket) -> None:
                 await close_session(session_id)
             except Exception as exc:
                 logger.warning("voice_ws (Live) close_session failed: %s", exc)
-
-
-async def _run_llm_turn(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    user_text: str,
-    project_scope: str,
-    current_speed: float = 1.25,
-    stt_seconds: float = 0.0,
-    *,
-    subject: str = "owner",
-    prior_summary: Optional[str] = None,
-) -> None:
-    """Core LLM streaming loop: route → stream tokens → TTS → record.
-
-    `stt_seconds` is the duration of audio transcribed to produce `user_text`
-    (zero for text-mode turns). Recorded against the turn row alongside the
-    Claude token cost and the total characters sent to TTS (tallied below
-    as sentences are queued).
-
-    Cancel-path billing (Riggs CRITICAL 2026-04-24): barge-in / supersede /
-    task-cancel raise CancelledError before the success-path persistence
-    runs. Google has already billed for the audio seconds we sent to STT and
-    the chars we sent to TTS — we MUST mirror that on disk or rolling totals
-    silently under-count. The ``finally`` block writes a partial-turn row
-    when nothing was persisted on the success path AND there was real
-    voice activity. ``cost_cents=0`` because LLM-token billing depends on
-    a final usage block we never received on cancel; STT/TTS legs are
-    populated normally so the dashboard reflects what Google actually billed.
-    """
-    # Phase 4 defensive assert: catch upstream scope plumbing regressions at
-    # the entry point of every turn so an empty/whitespace scope can't reach
-    # ``build_chief_system`` (which would silently fall back to DEFAULT_SCOPE
-    # — see chief_context._build_chief_system). Logged turn scope helps
-    # forensics when a wrong-scope reply is reported.
-    assert project_scope and project_scope.strip(), (
-        f"_run_llm_turn invoked with empty scope: "
-        f"client_id={subject}, session_id={session_id}"
-    )
-    logger.info(
-        "Voice WS turn scope=%s session=%s subject=%s",
-        project_scope, session_id, subject,
-    )
-
-    # Phase 2: Gemini is the only brain. The router's "deep" signal still
-    # fires the bridge-phrase TTS hint for thinkier prompts so the user gets
-    # immediate feedback while Gemini formulates a longer reply, but the
-    # Anthropic model id it returns is no longer used for routing. The cost
-    # row carries whatever ``gemini_brain.stream`` reports in its
-    # usage_dict — see ``services.gemini_brain.GEMINI_MODEL`` for the
-    # canonical id.
-    _legacy_model, is_deep = classify_and_route(user_text)
-    model = GEMINI_MODEL
-    await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
-
-    tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
-    # Total chars sent to the TTS backend for this turn. Every sentence queued
-    # counts (including the bridge "thinking" phrase when routing deep), since
-    # Google bills the full input text per synthesize call.
-    tts_char_total = 0
-    # Tokens we've emitted to the client so far. Used on the cancel path to
-    # persist a partial assistant_text on the turn row — easier debugging than
-    # a blank assistant column on a partial turn.
-    streamed_tokens: list[str] = []
-    # Flipped to True after the success path writes the turn row + voice
-    # usage. The cancel/finally guard checks this so we don't double-record.
-    persisted = False
-    # Per-turn TTS cancellation event (Track B #5/#6). Passed into
-    # synthesize_stream so the TTS worker stops emitting audio bytes at the
-    # next chunk boundary when cancel_current_turn flips it. Storing on the
-    # current task lets the outer cancel path find it without a third callback
-    # parameter.
-    tts_cancel_event = asyncio.Event()
-    current_task = asyncio.current_task()
-    if current_task is not None:
-        # Attach to the task so cancel_current_turn (which has the task handle
-        # but not this local) can drain+cancel cleanly. getattr/setattr is the
-        # canonical way to pin arbitrary state on a Task — no class gymnastics.
-        current_task._tts_cancel_event = tts_cancel_event  # type: ignore[attr-defined]
-        current_task._tts_queue = tts_queue  # type: ignore[attr-defined]
-
-    # 2026-05-05 deferred-bridge revision: 2026-05-05 morning fired the
-    # bridge phrase on EVERY turn (commit d586a37). Owner reaction was
-    # "saying give me a sec on every single response is fucking annoying
-    # and also not needed" — fast Pro replies (1-2s TTFT) didn't need
-    # the filler, only slow ones (5-15s on long prompts) do.
-    #
-    # New behaviour: schedule the bridge as a deferred task. After
-    # ``BRIDGE_PHRASE_DELAY_SECONDS`` of silence (no token from the model),
-    # fire it. If the first token arrives faster than that, ``send_token``
-    # sets ``first_token_event`` and cancels the bridge — owner gets the
-    # real reply with no filler in front of it.
-    BRIDGE_PHRASE_DELAY_SECONDS = 1.8
-    first_token_event = asyncio.Event()
-
-    async def _deferred_bridge_phrase() -> None:
-        try:
-            await asyncio.sleep(BRIDGE_PHRASE_DELAY_SECONDS)
-            # Race guard: if the first token landed during the sleep, the
-            # event will be set. Skip the bridge entirely — the real reply
-            # is already streaming.
-            if first_token_event.is_set():
-                return
-            bridge = random_voice_bridge_phrase()
-            if not bridge:
-                return
-            await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
-            # NOTE: tally happens in tts_worker AFTER synthesize_stream
-            # completes without raising — see the
-            # `tts_char_total += len(sentence)` there. Enqueueing here does
-            # not count a char toward Google's bill; only the actual
-            # synthesize_stream call does.
-            await tts_queue.put(bridge)
-        except asyncio.CancelledError:
-            # Normal path when the first token arrives before the timer
-            # fires (or on barge-in / WS drop). Swallow — nothing to clean.
-            pass
-
-    bridge_task = asyncio.create_task(_deferred_bridge_phrase())
-
-    async def send_token(text: str) -> None:
-        # Mark first-token-received the moment the brain emits its first
-        # streamed chunk. The deferred bridge task watches this event to
-        # decide whether to suppress itself.
-        if not first_token_event.is_set():
-            first_token_event.set()
-            # Cancel the timer cleanly so it doesn't leak past the turn.
-            # If it has already fired we get a no-op cancel — harmless.
-            if not bridge_task.done():
-                bridge_task.cancel()
-        streamed_tokens.append(text)
-        await ws_send_json(ws, {"type": "token", "text": text})
-
-    async def send_tts_sentence(sentence: str) -> None:
-        # Tally is deferred to tts_worker (post-synthesis) so sentences that
-        # synthesize_stream drops (logged as "TTS failed for sentence ...")
-        # don't get counted against the Google TTS character bill.
-        await tts_queue.put(sentence)
-
-    async def send_tool_call(payload: dict) -> None:
-        """Push a tool_call WS frame for the frontend chip component.
-
-        Called twice per tool by gemini_brain — once on start (status=
-        running) and once on end (status=complete|error + duration_ms +
-        preview). Schema matches the legacy tool-call frame so the
-        existing chip renderer doesn't need to change.
-        """
-        await ws_send_json(ws, {"type": "tool_call", **payload})
-
-    async def on_tool_round_complete(note: str) -> None:
-        """Phase 3: persist a synthetic tool note after each tool round.
-
-        ``note`` is a short ``[tool: ...]`` string built by
-        ``gemini_brain._build_tool_note`` capturing the tool name + args
-        snippet + output preview. Appending it to ``history`` (in-memory)
-        AND ``voice_turns`` (persisted) means cross-reconnect tool memory
-        survives — the brain on the next turn / next session sees that
-        ``git log -5`` already ran and what its top commit was, instead
-        of needing to rerun the same tool to remind itself.
-
-        Best-effort: if either write fails we log + drop the note. The
-        live turn already has the tool's actual function_response in its
-        contents list, so a missing note row only affects future turns'
-        ability to remember THIS tool round.
-        """
-        if not note:
-            return
-        history.append({"role": "assistant", "content": note})
-        try:
-            await append_turn(session_id, project_scope, "assistant", note)
-        except Exception as exc:
-            logger.warning(
-                "history persist (tool note) failed session=%s: %s",
-                session_id, exc,
-            )
-
-    async def tts_worker() -> None:
-        nonlocal tts_char_total
-        try:
-            await ws_send_json(ws, {"type": "tts_start"})
-            while True:
-                if tts_cancel_event.is_set():
-                    break
-                sentence = await tts_queue.get()
-                if sentence is None:
-                    break
-                if tts_cancel_event.is_set():
-                    break
-                try:
-                    async for chunk in tts_service.synthesize_stream(
-                        sentence,
-                        speed=current_speed,
-                        cancel_event=tts_cancel_event,
-                    ):
-                        if tts_cancel_event.is_set():
-                            break
-                        await ws_send_bytes(ws, chunk)
-                    # Synthesis completed (or was cancelled mid-stream AFTER
-                    # we handed the full sentence to Google). Either way the
-                    # provider bills for the full input, so tally here.
-                    tts_char_total += len(sentence)
-                except TypeError:
-                    # Fallback for a TTS provider that hasn't been updated
-                    # with the cancel_event kwarg yet. Less responsive, but
-                    # won't kill the turn if a custom provider is slotted in.
-                    async for chunk in tts_service.synthesize_stream(
-                        sentence, speed=current_speed,
-                    ):
-                        if tts_cancel_event.is_set():
-                            break
-                        await ws_send_bytes(ws, chunk)
-                    tts_char_total += len(sentence)
-                except Exception as tts_err:
-                    # Provider raised before/during streaming — sentence was
-                    # never billed, so do NOT tally. (Over-count was the bug
-                    # this tally-at-send move fixes.)
-                    logger.warning("TTS failed for sentence: %s", tts_err)
-        finally:
-            try:
-                await ws_send_json(ws, {"type": "tts_end"})
-            except Exception:
-                # WS may already be torn down on cancel — don't let the
-                # tts_end failure mask the primary cancel.
-                pass
-
-    history.append({"role": "user", "content": user_text})
-    # Persist the user turn before we kick off the LLM stream. If the stream
-    # fails or gets cancelled mid-flight, the user utterance is still on
-    # disk — reconnect will show it in the rehydrated history.
-    try:
-        await append_turn(session_id, project_scope, "user", user_text)
-    except Exception as exc:
-        logger.warning("history persist (user) failed session=%s: %s", session_id, exc)
-
-    tts_task = asyncio.create_task(tts_worker())
-
-    # Build Chief system prompt blocks — identity + memory + roster + project scope.
-    # Deterministic for (scope, file-contents, prior_summary) so the Gemini
-    # ``system_instruction`` bytes stay stable across turns when nothing has
-    # changed. File reads are blocking I/O — wrap in to_thread to avoid
-    # stalling the loop. Phase 3: ``prior_summary`` is the cross-session
-    # rolling summary loaded at WS open (or refreshed after a rollup); when
-    # None, the conversation_so_far block is omitted entirely.
-    system_blocks = await asyncio.to_thread(
-        build_chief_system, project_scope, prior_summary,
-    )
-
-    try:
-        # Resolve the active scope's repo path so tool calls (Read/Bash/
-        # Grep/dispatch_agent) have a sandboxed cwd. None on a scope without
-        # a repo configured — agent_tools.dispatch_tool then refuses
-        # tool dispatch (cwd would fall back to $HOME, which the
-        # path-fence machinery would treat as unsafe). The brain still
-        # answers from memory; tools are simply unavailable.
-        repo_cwd = get_repo_path(project_scope)
-        # Subject identifies the JWT owner — used as the dispatch_agent CC
-        # pool key (along with scope). Passing session_id (per-WS-connection
-        # UUID) here defeats warm-pool reuse and breaks teardown_other_scopes
-        # (which keys on subject), since each new WS connection looks like a
-        # different "user" to the pool. session_id is still the right key
-        # for usage-tracker rows below (one cost row per session).
-        usage = await stream_turn(
-            history=history,
-            model=model,
-            send_token=send_token,
-            send_tts_sentence=send_tts_sentence,
-            project_scope=project_scope,
-            system_blocks=system_blocks,
-            send_tool_call=send_tool_call,
-            on_tool_round_complete=on_tool_round_complete,
-            cwd=repo_cwd,
-            subject=subject,
-        )
-
-        # If the bridge task is still pending (e.g. the brain returned with
-        # zero streamed tokens — a rare empty-reply case where send_token
-        # never fired), cancel + await it before we close the TTS leg so
-        # the timer doesn't outlive the turn.
-        if not bridge_task.done():
-            bridge_task.cancel()
-        try:
-            await bridge_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-        await tts_queue.put(None)
-        await tts_task
-
-        assistant_text = usage.get("assistant_text", "")
-        # Only append a non-empty assistant turn to the in-memory history.
-        # An empty entry (e.g. on a barge-in that landed before any tokens
-        # streamed) gets filtered out by ``_history_to_gemini_contents`` on
-        # the next round, leaving consecutive user-role entries — which
-        # corrupts the role alternation Gemini expects. Persisted history
-        # gets the same treatment so a reload doesn't replay the bad shape.
-        if assistant_text:
-            history.append({"role": "assistant", "content": assistant_text})
-            # Persist the assistant reply so resume rebuilds both sides of
-            # the turn. Best-effort: if the DB write fails we still finish
-            # the turn.
-            try:
-                await append_turn(session_id, project_scope, "assistant", assistant_text)
-            except Exception as exc:
-                logger.warning(
-                    "history persist (assistant) failed session=%s: %s", session_id, exc
-                )
-
-            # Phase 3: fire-and-forget rolling-summary trigger. ``maybe_rollup``
-            # itself checks the threshold + concurrency lock — it's a cheap
-            # noop until enough turns have stacked up. We don't await it: the
-            # turn shouldn't block on a Flash call. Errors are logged inside
-            # the rollup module; we wrap the create_task in try/except as
-            # belt-and-suspenders so a loop-state oddity can't kill the turn.
-            try:
-                asyncio.create_task(maybe_rollup(project_scope))
-            except Exception as exc:
-                logger.warning(
-                    "memory_rollup spawn failed session=%s scope=%s: %s",
-                    session_id, project_scope, exc,
-                )
-
-        await ws_send_json(ws, {"type": "message_done"})
-
-        turn = await record_turn(
-            session_id=session_id,
-            model=model,
-            usage_dict=usage,
-            user_text=user_text,
-            assistant_text=assistant_text,
-        )
-        # CRITICAL — flip ``persisted`` IMMEDIATELY after the turn row exists,
-        # BEFORE the STT/TTS legs (Riggs 2026-04-24 round 2). Semantic is "row
-        # exists", not "fully complete". If a CancelledError lands at the await
-        # between record_turn and record_stt_usage, the success-path leaves
-        # tts_chars=0 / stt_seconds=0 on the row; the finally guard sees
-        # persisted=True and skips its partial-write block — so the cancel
-        # cannot double-write a second turn row + duplicate usage rows. A rare
-        # under-bill on this exact race is acceptable; double-bill is not.
-        persisted = True
-
-        # Record STT + TTS usage against the turn row. Always record both legs
-        # (even when seconds/chars are zero, e.g. text-mode turn or TTS that
-        # was barged before any sentence enqueued) so the schema stays uniform
-        # and rollup queries don't need to distinguish null vs zero. Happens
-        # BEFORE get_session_totals so the returned totals already include
-        # this turn's voice leg.
-        stt_info = await record_stt_usage(
-            turn_id=turn["id"],
-            provider=getattr(stt_service, "provider_name", "local"),
-            audio_seconds=stt_seconds,
-        )
-        tts_info = await record_tts_usage(
-            turn_id=turn["id"],
-            provider=getattr(tts_service, "provider_name", "local"),
-            chars=tts_char_total,
-        )
-
-        totals = await get_session_totals(session_id)
-
-        await ws_send_json(ws, {
-            "type": "usage",
-            "session_id": session_id,
-            "model": model,
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "cached_tokens": usage.get("cache_read_input_tokens", 0),
-            "turn_cost_cents": turn["cost_cents"],
-            "session_total_cents": totals.get("cost_cents", 0),
-            "voice": {
-                "stt": {
-                    "seconds": stt_info["stt_seconds"],
-                    "cost_usd": stt_info["stt_cost_usd"],
-                    "provider": stt_info["stt_provider"],
-                },
-                "tts": {
-                    "chars": tts_info["tts_chars"],
-                    "cost_usd": tts_info["tts_cost_usd"],
-                    "provider": tts_info["tts_provider"],
-                },
-                "turn_total_usd": stt_info["stt_cost_usd"] + tts_info["tts_cost_usd"],
-                "session_total_usd": totals.get("voice", {}).get("total_usd", 0.0),
-            },
-        })
-
-    except (WebSocketDisconnect, asyncio.CancelledError):
-        # Track B #5/#6: signal the TTS worker to stop at the next chunk,
-        # drain any buffered sentences (so the worker doesn't grab one more
-        # before seeing the cancel flag), then cancel and await teardown.
-        tts_cancel_event.set()
-        _drain_queue(tts_queue)
-        tts_task.cancel()
-        try:
-            await tts_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        # Ensure the deferred bridge timer doesn't outlive the turn — if
-        # we cancelled before any token streamed, the task is still in its
-        # sleep. Cancel + drain so it doesn't fire after the WS is gone.
-        if not bridge_task.done():
-            bridge_task.cancel()
-        try:
-            await bridge_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        raise
-    except Exception:
-        # Non-cancel error path: let the worker drain naturally so any
-        # buffered sentences finish speaking before we close out. Keep the
-        # 2s guard so a hung worker can't hold the turn forever.
-        await tts_queue.put(None)
-        try:
-            await asyncio.wait_for(tts_task, timeout=2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            tts_task.cancel()
-        # Same bridge cleanup as the cancel path — don't leak the timer.
-        if not bridge_task.done():
-            bridge_task.cancel()
-        try:
-            await bridge_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        raise
-    finally:
-        # CRITICAL — cancel-path billing.
-        #
-        # If the success path persisted, ``persisted`` is True and we no-op.
-        # Otherwise we MAY have already had real voice spend before the cancel
-        # arrived: STT seconds were billed when ``stt_service.transcribe``
-        # ran (back in the receive loop), and TTS chars were billed each time
-        # ``synthesize_stream`` returned without raising (see tts_worker —
-        # only successful synth bumps ``tts_char_total``). Persist whatever
-        # is real so /api/usage rollups match what Google actually charged.
-        #
-        # We deliberately do NOT call ws_send_json here — the connection is
-        # often already torn down on the cancel path, and the user-visible
-        # frame ``turn_cancelled`` is sent by ``cancel_current_turn``. This
-        # block exists purely to keep the books straight.
-        if not persisted and (stt_seconds > 0 or tts_char_total > 0):
-            try:
-                # Build a usage_dict that records 0 LLM tokens — we never got
-                # a final usage block on this cancelled turn, so we record
-                # the partial-bill row at $0 LLM cost. The voice legs below
-                # carry the actual Google STT + TTS bill that DID happen.
-                partial_usage = {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "assistant_text": "".join(streamed_tokens),
-                }
-                partial_assistant = partial_usage["assistant_text"]
-                # NOTE: cost_cents is computed from the (zero) token counts
-                # so the row reflects $0 LLM spend. The voice legs below
-                # carry the actual Google bill.
-                turn = await record_turn(
-                    session_id=session_id,
-                    model=model,
-                    usage_dict=partial_usage,
-                    user_text=user_text,
-                    assistant_text=partial_assistant,
-                )
-                if stt_seconds > 0:
-                    await record_stt_usage(
-                        turn_id=turn["id"],
-                        provider=getattr(stt_service, "provider_name", "local"),
-                        audio_seconds=stt_seconds,
-                    )
-                if tts_char_total > 0:
-                    await record_tts_usage(
-                        turn_id=turn["id"],
-                        provider=getattr(tts_service, "provider_name", "local"),
-                        chars=tts_char_total,
-                    )
-                logger.info(
-                    "Voice WS persisted partial-turn voice usage on cancel "
-                    "session=%s turn_id=%s stt_seconds=%.2f tts_chars=%d",
-                    session_id, turn["id"], stt_seconds, tts_char_total,
-                )
-            except Exception as exc:
-                # Never let a billing-record failure mask the original cancel/
-                # error — this is a best-effort double-entry guard, not a hard
-                # invariant the caller needs to know about.
-                logger.warning(
-                    "Voice WS partial-turn billing record failed session=%s: %s",
-                    session_id, exc,
-                )
-
-
-async def _handle_text_turn(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    text: str,
-    project_scope: str,
-    current_speed: float = 1.25,
-    stt_seconds: float = 0.0,
-    *,
-    subject: str = "owner",
-    prior_summary: Optional[str] = None,
-) -> None:
-    try:
-        await _run_llm_turn(
-            ws, session_id, history, text, project_scope, current_speed,
-            stt_seconds=stt_seconds,
-            subject=subject,
-            prior_summary=prior_summary,
-        )
-    except asyncio.CancelledError:
-        # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
-        # error. The caller already sent turn_cancelled.
-        raise
-    except Exception as exc:
-        # The exception text can include model IDs, region info, file paths,
-        # or other internal detail we shouldn't echo to the client. Keep
-        # full detail in the log via logger.exception; the WS frame gets a
-        # generic message so users see "something broke" without the
-        # plumbing.
-        logger.exception("Error processing text turn session=%s: %s", session_id, exc)
-        try:
-            await ws_send_json(ws, {
-                "type": "error",
-                "message": "Chief had an internal error",
-            })
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Dispatch bridge glue: classify every user turn, then route to chat / task /
-# status / cancel. See docs/dispatch-bridge-glue-spec.md for the full spec.
-# ---------------------------------------------------------------------------
-
-
-async def _route_user_turn(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    user_text: str,
-    current_project: str,
-    current_speed: float = 1.25,
-    stt_seconds: float = 0.0,
-    *,
-    subject: str = "owner",
-    prior_summary: Optional[str] = None,
-) -> None:
-    """Single entry point — Phase 2: every turn goes to the Gemini brain.
-
-    The classifier preflight (chat / task / status / cancel) was retired
-    because the Gemini brain self-routes via tool use:
-      * Read / Bash / Grep handle "show me the latest commits" / "what's
-        in this file" / "find all callers of X" — formerly the chat path.
-      * dispatch_agent handles "build me X" / "fix the auth bug" — formerly
-        the task path.
-      * Direct UI cancel button (TaskBubble red-X) still hits _route_cancel
-        below; that path is wired straight to the WS frame ``msg_type ==
-        "cancel"`` handler in voice_ws and bypasses this router.
-
-    `stt_seconds` is the duration of audio transcribed to produce `user_text`.
-    Zero for pure text-mode turns. Recorded against the turn row by the
-    chat path's billing leg.
-
-    `subject` is the JWT subject (typically "owner"); threaded through to
-    the brain so the dispatch_agent CC pool can key on (subject, scope) and
-    reuse warm subprocesses across WS reconnects.
-
-    ``prior_summary`` carries the rolling cross-session memory blob for
-    this scope (Phase 3). Optional — when ``None`` the brain is built
-    without a ``conversation_so_far`` block.
-    """
-    await _handle_text_turn(
-        ws, session_id, history, user_text, current_project, current_speed,
-        stt_seconds=stt_seconds,
-        subject=subject,
-        prior_summary=prior_summary,
-    )
-
-
-async def _route_task(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    task_spec: str,
-    current_project: str,
-    current_speed: float = 1.25,
-    *,
-    stt_seconds: float = 0.0,
-) -> None:
-    # Hawke HIGH: wrap the entire body so FileNotFoundError (claude missing
-    # on PATH), OSError (exec failures), ValueError (task_spec length cap),
-    # and anything else that isn't TaskAlreadyRunning surfaces to the user
-    # instead of dying silently in a background task.
-    try:
-        # Defense-in-depth alongside the "--" end-of-options marker in
-        # dispatcher.dispatch(). Even if the downstream CLI argv parser didn't
-        # honor "--", a task_spec whose first non-whitespace char is "-" is
-        # almost never a legitimate Claude Code prompt — it's either a prompt
-        # injection attempt or a classifier misfire. Reject and clarify rather
-        # than spawn. Vera HIGH finding.
-        if task_spec.lstrip().startswith("-"):
-            logger.warning(
-                "route_task: rejecting task_spec with leading dash (session=%s spec=%r)",
-                session_id,
-                task_spec[:120],
-            )
-            await _narrate(
-                ws,
-                "That looks like a command flag, not a task. Can you rephrase what you'd like me to do?",
-                speed=current_speed,
-                session_id=session_id,
-            )
-            return
-
-        repo = get_repo_path(current_project)
-        if repo is None or not repo.exists():
-            # No local repo configured for this scope. The narration IS the
-            # reply — it explains why we couldn't dispatch and the user can
-            # ask a follow-up if they want more.
-            #
-            # Riggs CRITICAL 2026-04-24 round 2: previously this fell through
-            # to ``_handle_text_turn`` AFTER the narration, which produced
-            # two assistant bubbles + two TTS streams for a single user
-            # input (every ``tts_start`` frame is a bubble boundary on the
-            # frontend). Drop the chained text turn — narration is now
-            # terminal AND billed (carries its own narration turn row +
-            # TTS usage write).
-            await _narrate(
-                ws,
-                f"I can't dispatch — no local repo configured for {current_project}.",
-                speed=current_speed,
-                session_id=session_id,
-            )
-            return
-
-        # `task_id` must appear on every task_* frame or the frontend silently
-        # drops them (routes by id, not by most-recently-active ref). The id is
-        # `handle.started_at.isoformat()` which is only set after dispatch
-        # spawns. Use a one-element box so callbacks can close over it and see
-        # the id assigned on the line after dispatch returns.
-        tid_box: list[str] = [""]
-
-        async def on_output(text: str, stream: str) -> None:
-            await ws_send_json(ws, {
-                "type": "task_output",
-                "task_id": tid_box[0],
-                "text": text,
-                "stream": stream,
-            })
-
-        async def on_complete(exit_code: int, summary: str) -> None:
-            await ws_send_json(ws, {
-                "type": "task_complete",
-                "task_id": tid_box[0],
-                "exit_code": exit_code,
-                "duration_seconds": int(
-                    (datetime.now(timezone.utc) - handle.started_at).total_seconds()
-                ),
-                "summary": summary,
-            })
-            # Terminal narration: the conversational unit is fully done.
-            await _narrate(
-                ws,
-                f"Task complete. Exit code {exit_code}. {summary[:160]}",
-                speed=current_speed,
-                session_id=session_id,
-            )
-
-        try:
-            handle = await _dispatcher.dispatch(
-                session_id=session_id,
-                task_spec=task_spec,
-                repo=repo,
-                on_output=on_output,
-                on_complete=on_complete,
-            )
-        except TaskAlreadyRunning:
-            await _narrate(
-                ws,
-                "Still working on the previous task. Say status for an update, or stop to cancel.",
-                speed=current_speed,
-                session_id=session_id,
-            )
-            return
-
-        tid_box[0] = handle.task_id  # closures above now see the real id
-
-        # Initial narration: immediate, deterministic (no LLM call needed).
-        await ws_send_json(ws, {
-            "type": "task_started",
-            "task_id": handle.task_id,
-            "task_spec": task_spec,
-            "repo": str(repo),
-            "started_at": handle.started_at.isoformat(),
-        })
-        # NOT terminal — the task is still running. Hawke HIGH: emitting
-        # message_done here would tell the frontend the assistant is done
-        # speaking before the task actually completes, which races against
-        # the later task_complete + terminal narration.
-        await _narrate(
-            ws,
-            f"Dispatching to Claude Code on your Mac. Working in {current_project}. "
-            "I'll let you know when it's done.",
-            terminal=False,
-            speed=current_speed,
-            session_id=session_id,
-        )
-    except asyncio.CancelledError:
-        # Turn was cancelled (barge-in / superseded) — propagate so the
-        # caller can clean up. Don't emit a user-facing error.
-        raise
-    except Exception as exc:
-        logger.exception(
-            "route_task: dispatch failed session=%s task_spec=%r: %s",
-            session_id,
-            task_spec[:120],
-            exc,
-        )
-        # Riggs CRITICAL 2026-04-24 round 2: previously this narrated the
-        # failure AND chained ``_handle_text_turn`` for the same user input,
-        # producing two assistant bubbles + two TTS streams. The narration
-        # is now the full reply — it tells the user dispatch failed and
-        # they can ask a follow-up. Drop the chained text turn.
-        await _narrate(
-            ws,
-            f"Task dispatch failed: {exc}. Staying on chat.",
-            speed=current_speed,
-            session_id=session_id,
-        )
-
-
-async def _route_status(
-    ws: WebSocket,
-    session_id: str,
-    history: list[dict],
-    current_project: str,
-    current_speed: float = 1.25,
-) -> None:
-    handle = _dispatcher.get_handle(session_id)
-    if handle is None:
-        await _narrate(
-            ws,
-            "No task running right now. Ask me something or give me a build task.",
-            speed=current_speed,
-            session_id=session_id,
-        )
-        return
-
-    # Summarize live stdout via Haiku.
-    tail = _dispatcher.summarize(handle, max_lines=50)
-    summary_prompt = (
-        "You summarize what a coding agent is currently doing in ONE short spoken sentence. "
-        "Input is the last 50 stdout lines. Output the sentence only, no quotes, no preamble."
-    )
-    try:
-        from services.classifier import _get_client  # reuse the Haiku client
-        resp = await _get_client().messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=80,
-            system=[{"type": "text", "text": summary_prompt}],
-            messages=[{"role": "user", "content": tail[-4000:]}],
-        )
-        sentence = "".join(
-            getattr(b, "text", "") for b in resp.content
-            if getattr(b, "type", None) == "text"
-        ).strip() or "Working."
-    except Exception as exc:
-        logger.warning("status summarizer failed: %s", exc)
-        sentence = "Working — no new output to summarize."
-
-    elapsed = int((datetime.now(timezone.utc) - handle.started_at).total_seconds())
-    await _narrate(
-        ws,
-        f"{sentence} Running for {elapsed // 60} minutes {elapsed % 60} seconds.",
-        speed=current_speed,
-        session_id=session_id,
-    )
-
-
-async def _route_cancel(
-    ws: WebSocket,
-    session_id: str,
-    current_speed: float = 1.25,
-) -> None:
-    # Fetch the handle BEFORE cancel so we still have access to task_id for
-    # the frame (cancel() may evict the handle).
-    handle = _dispatcher.get_handle(session_id)
-    killed = await _dispatcher.cancel(session_id)
-    if killed and handle is not None:
-        await ws_send_json(ws, {
-            "type": "task_cancelled",
-            "task_id": handle.task_id,
-            "reason": "owner-requested",
-        })
-        await _narrate(
-            ws, "Cancelled. Task killed.",
-            speed=current_speed, session_id=session_id,
-        )
-    else:
-        await _narrate(
-            ws, "Nothing to cancel — no task running.",
-            speed=current_speed, session_id=session_id,
-        )
-
-
-async def _narrate(
-    ws: WebSocket,
-    text: str,
-    *,
-    terminal: bool = True,
-    speed: float = 1.0,
-    cancel_event: Optional[asyncio.Event] = None,
-    session_id: Optional[str] = None,
-) -> None:
-    """Send a short line of text as a token + trigger TTS.
-
-    ``speed`` matches the chat-path TTS speed (Google's `speaking_rate`).
-    Without this plumbed through, task/status/cancel narrations ignored the
-    owner's speed preference and always played at 1.0x.
-
-    ``cancel_event`` is checked between TTS chunks so a barge-in stops
-    narration at the next chunk boundary instead of waiting for
-    CancelledError to reach the next await point. Defaults to the running
-    task's ``_tts_cancel_event`` attribute if set (same pattern
-    ``_run_llm_turn`` and ``cancel_current_turn`` use).
-
-    ``session_id`` — when provided AND TTS synthesis completes without
-    raising, the chars sent to Google get persisted as a synthetic
-    narration turn row (cost_cents=0, model="narration"). This was a real
-    spend leak: every "task complete", "cancelled", "no task running",
-    dispatch failure narration etc. was a billed Google TTS call that
-    /api/usage saw zero of. Riggs CRITICAL 2026-04-24.
-    """
-    if cancel_event is None:
-        task = asyncio.current_task()
-        if task is not None:
-            cancel_event = getattr(task, "_tts_cancel_event", None)
-    # Track whether at least one chunk made it through synthesize_stream.
-    # Riggs CRITICAL 2026-04-24 round 2: flipping this AFTER the async-for
-    # exits cleanly was wrong because synthesize_stream short-circuits at
-    # entry when cancel_event.is_set() is already True (see tts_google.py
-    # line ~268), yielding zero chunks and never submitting to Google. The
-    # async-for then exits cleanly, tts_billed=True ran, and we wrote a
-    # phantom record_tts_usage(chars=len(text)) for chars Google never saw.
-    # By flipping the flag inside the loop body, we require at least one
-    # chunk to have been yielded — which matches Google's billing model
-    # (input is billed when synthesis actually fires).
-    tts_billed = False
-    try:
-        await ws_send_json(ws, {"type": "token", "text": text + " "})
-        await ws_send_json(ws, {"type": "tts_start"})
-        try:
-            async for chunk in tts_service.synthesize_stream(
-                text, speed=speed, cancel_event=cancel_event,
-            ):
-                # First chunk yielded → Google has billed us; mark before send
-                # so even a downstream ws send failure still bills correctly.
-                tts_billed = True
-                await ws_send_bytes(ws, chunk)
-        except Exception as exc:
-            logger.warning("narration TTS failed: %s", exc)
-        await ws_send_json(ws, {"type": "tts_end"})
-        if terminal:
-            await ws_send_json(ws, {"type": "message_done"})
-    except Exception as exc:
-        # WS may be gone mid-narration — swallow so the caller (callback or
-        # router) doesn't propagate a disconnect as a turn error.
-        logger.warning("narration send failed: %s", exc)
-
-    # Bill the narration. Synthetic turn row: cost_cents=0 (no LLM tokens),
-    # model tagged "narration" so the by_model rollup can distinguish these
-    # from real Chief replies. user_text/assistant_text both reflect the
-    # narration line so the audit log is readable.
-    if tts_billed and session_id is not None and text:
-        try:
-            turn = await record_turn(
-                session_id=session_id,
-                model="narration",
-                usage_dict={
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                },
-                user_text="",
-                assistant_text=text,
-            )
-            await record_tts_usage(
-                turn_id=turn["id"],
-                provider=getattr(tts_service, "provider_name", "local"),
-                chars=len(text),
-            )
-        except Exception as exc:
-            # Never let a billing-record failure surface — narration is
-            # already played at this point, the user shouldn't see a noisy
-            # error because the audit row failed.
-            logger.warning(
-                "narration billing record failed session=%s: %s",
-                session_id, exc,
-            )
 
 
 @router.websocket("/ws/terminal")

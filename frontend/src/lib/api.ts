@@ -231,38 +231,14 @@ export interface VoiceMessage {
 
 export type ActiveModel = 'gemini-2.5-pro' | 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'
 
-export interface WsTranscriptEvent {
-  type: 'transcript'
-  content: string
-  final: boolean
-}
-
-export interface WsActiveModelEvent {
-  type: 'active_model'
-  model: ActiveModel
-}
-
-export interface WsTokenEvent {
-  type: 'token'
-  text: string
-}
-
-export interface WsMessageDoneEvent {
-  type: 'message_done'
-}
-
-export interface WsTtsStartEvent {
-  type: 'tts_start'
-}
-
-export interface WsTtsEndEvent {
-  type: 'tts_end'
-}
-
-export interface WsTurnCancelledEvent {
-  type: 'turn_cancelled'
-  reason: string
-}
+// Stage 4 (2026-05-05) Live pivot: ``token``/``tts_start``/``tts_end``/
+// ``message_done``/``turn_cancelled``/``transcript``/``bridge_phrase``/
+// ``active_model`` are no longer emitted by the voice WS. Replacements:
+//   transcript        → input_transcript / output_transcript
+//   message_done      → generation_complete
+//   turn_cancelled    → interrupted
+// Removed types and their union members live in git history if a future
+// fallback path needs them again.
 
 export interface WsContextSwitchedEvent {
   type: 'context_switched'
@@ -341,14 +317,70 @@ export interface WsToolCallEvent {
   preview?: string                   // first 240 chars of tool output, terminal frames only
 }
 
+// --- Stage 4 Live-pivot frames ---
+// Emitted by services/gemini_live + voice WS handler. The reconnect frames
+// bracket a session-resumption rebuild (pump-crash) or a GoAway-driven
+// rotation; cost_warning fires once per WS at 80% of the daily cap so the
+// FE can render a soft heads-up banner before the hard cap closes the WS.
+
+export interface WsInputTranscriptEvent {
+  type: 'input_transcript'
+  text: string
+  is_final: boolean
+}
+
+export interface WsOutputTranscriptEvent {
+  type: 'output_transcript'
+  text: string
+  is_final: boolean
+}
+
+export interface WsInterruptedEvent {
+  type: 'interrupted'
+}
+
+export interface WsGenerationCompleteEvent {
+  type: 'generation_complete'
+}
+
+export interface WsSessionResumedEvent {
+  type: 'session_resumed'
+  handle: string
+}
+
+export interface WsGoAwayEvent {
+  type: 'go_away'
+  time_left: number
+}
+
+export interface WsReconnectingEvent {
+  type: 'reconnecting'
+  reason?: string
+}
+
+export interface WsReconnectedEvent {
+  type: 'reconnected'
+  reason?: string
+}
+
+export interface WsCostWarningEvent {
+  type: 'cost_warning'
+  current_today: number
+  cap: number
+}
+
+export interface WsQuotaExceededEvent {
+  type: 'quota_exceeded'
+  current_today_dollars: number
+  cap_dollars: number
+}
+
+export interface WsErrorEvent {
+  type: 'error'
+  message: string
+}
+
 export type WsEvent =
-  | WsTranscriptEvent
-  | WsActiveModelEvent
-  | WsTokenEvent
-  | WsMessageDoneEvent
-  | WsTtsStartEvent
-  | WsTtsEndEvent
-  | WsTurnCancelledEvent
   | WsContextSwitchedEvent
   | WsUsageEvent
   | WsAgentStatusEvent
@@ -357,6 +389,17 @@ export type WsEvent =
   | WsTaskCompleteEvent
   | WsTaskCancelledEvent
   | WsToolCallEvent
+  | WsInputTranscriptEvent
+  | WsOutputTranscriptEvent
+  | WsInterruptedEvent
+  | WsGenerationCompleteEvent
+  | WsSessionResumedEvent
+  | WsGoAwayEvent
+  | WsReconnectingEvent
+  | WsReconnectedEvent
+  | WsCostWarningEvent
+  | WsQuotaExceededEvent
+  | WsErrorEvent
 
 export interface SessionUsage {
   session_id: string

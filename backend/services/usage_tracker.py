@@ -365,6 +365,54 @@ async def record_think_deep_cost(
         return {"cost_cents": 0}
 
 
+# Soft-warning threshold expressed as a fraction of the hard cap. 0.80 →
+# fire ``cost_warning`` once per WS connection when today's spend crosses
+# 80% of the daily cap so the owner sees a heads-up before the hard close
+# at 100%.
+_DAILY_COST_SOFT_FRACTION: float = 0.80
+
+
+async def check_soft_cap(subject: str = "owner") -> tuple[bool, float]:
+    """Return ``(over_soft, current_today_dollars)`` for ``subject``.
+
+    Soft cap = 80% of the hard daily cap (``DAILY_COST_CAP_DOLLARS``). The
+    voice WS handler emits a one-shot ``cost_warning`` frame when this
+    flips to True so the FE can render a banner BEFORE the hard cap fires
+    + closes the connection.
+
+    Same query shape as ``check_daily_cap`` — only the threshold differs.
+    Failing closed (``over_soft=False``) on a DB hiccup mirrors the hard
+    cap: better to skip a UI banner than to brick the WS handler.
+    """
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    cap_dollars = _daily_cost_cap_dollars()
+    soft_threshold = cap_dollars * _DAILY_COST_SOFT_FRACTION
+
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                """SELECT
+                       COALESCE(SUM(t.cost_cents), 0)    AS cost_cents,
+                       COALESCE(SUM(t.stt_cost_usd), 0.0) AS stt_cost_usd,
+                       COALESCE(SUM(t.tts_cost_usd), 0.0) AS tts_cost_usd
+                   FROM turns t
+                   INNER JOIN sessions s ON s.id = t.session_id
+                   WHERE t.created_at >= ? AND s.user_id = ?""",
+                (today_start, subject),
+            )
+            row = await cur.fetchone()
+    except Exception as exc:
+        logger.warning("check_soft_cap: query failed: %s", exc)
+        return False, 0.0
+
+    cents = int(row["cost_cents"]) if row else 0
+    stt = float(row["stt_cost_usd"]) if row else 0.0
+    tts = float(row["tts_cost_usd"]) if row else 0.0
+    current_dollars = (cents / 100.0) + stt + tts
+    return (current_dollars >= soft_threshold), current_dollars
+
+
 async def check_daily_cap(subject: str = "owner") -> tuple[bool, float]:
     """Return ``(over_cap, current_today_dollars)`` for the given subject.
 

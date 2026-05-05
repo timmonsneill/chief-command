@@ -308,6 +308,131 @@ async def test_check_daily_cap_env_override(temp_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Stage 4 — soft cap (80% of hard cap)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_check_soft_cap_under_80_percent_returns_false(temp_db):
+    """Empty DB → over_soft=False, current=0."""
+    from services.usage_tracker import check_soft_cap
+
+    over_soft, current = await check_soft_cap("owner")
+    assert over_soft is False
+    assert current == 0.0
+
+
+@pytest.mark.asyncio
+async def test_check_soft_cap_just_above_threshold_fires(temp_db):
+    """Today's spend > 80% of $15 ($12) → over_soft=True."""
+    from services.usage_tracker import (
+        check_soft_cap,
+        create_session,
+        record_turn,
+    )
+
+    sid = "soft-cap-trigger"
+    await create_session(sid)
+    # Opus pricing $5/M in + $25/M out. Need > $12 spend.
+    # 1M in × $5 = $5; 320K out × $25 = $8 → $13 total → over $12.
+    await record_turn(
+        session_id=sid,
+        model="claude-opus-4-7",
+        usage_dict={"input_tokens": 1_000_000, "output_tokens": 320_000},
+        user_text="x",
+        assistant_text="y",
+    )
+    over_soft, current = await check_soft_cap("owner")
+    assert over_soft is True
+    assert current >= 12.0
+    assert current < 15.0  # but still under hard cap
+
+
+@pytest.mark.asyncio
+async def test_check_soft_cap_below_threshold_returns_false(temp_db):
+    """Spend below 80% of $15 → over_soft=False even with real activity."""
+    from services.usage_tracker import (
+        check_soft_cap,
+        create_session,
+        record_turn,
+    )
+
+    sid = "soft-cap-clear"
+    await create_session(sid)
+    # 100K out at Opus $25/M = $2.50 — well below $12.
+    await record_turn(
+        session_id=sid,
+        model="claude-opus-4-7",
+        usage_dict={"input_tokens": 0, "output_tokens": 100_000},
+        user_text="x",
+        assistant_text="y",
+    )
+    over_soft, current = await check_soft_cap("owner")
+    assert over_soft is False
+    assert current >= 2.0
+
+
+@pytest.mark.asyncio
+async def test_check_soft_cap_respects_env_override(temp_db, monkeypatch):
+    """DAILY_COST_CAP_DOLLARS=$1 → 80% threshold = $0.80, $0.50 spend stays under."""
+    from services.usage_tracker import (
+        check_soft_cap,
+        create_session,
+        record_turn,
+    )
+
+    sid = "soft-cap-env"
+    await create_session(sid)
+    # Spend ~$0.50 via Haiku $5/M out × 100K = $0.50
+    await record_turn(
+        session_id=sid,
+        model="claude-haiku-4-5",
+        usage_dict={"input_tokens": 0, "output_tokens": 100_000},
+        user_text="x",
+        assistant_text="y",
+    )
+    # Default cap $15 → $0.50 < $12 → not over.
+    over_default, _ = await check_soft_cap("owner")
+    assert over_default is False
+    # Cap $1 → 80% threshold $0.80 → $0.50 < $0.80 → still under.
+    monkeypatch.setenv("DAILY_COST_CAP_DOLLARS", "1.00")
+    over_low, _ = await check_soft_cap("owner")
+    assert over_low is False
+    # Cap $0.50 → threshold $0.40 → $0.50 ≥ $0.40 → over.
+    monkeypatch.setenv("DAILY_COST_CAP_DOLLARS", "0.50")
+    over_very_low, _ = await check_soft_cap("owner")
+    assert over_very_low is True
+
+
+@pytest.mark.asyncio
+async def test_check_soft_cap_subject_filter(temp_db):
+    """Subject scoping — alice's spend doesn't trip owner's soft cap."""
+    from db import get_db
+    from services.usage_tracker import check_soft_cap, _now_iso
+
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO sessions (id, user_id, started_at, total_cost_cents, turn_count)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("alice-spent", "alice", _now_iso(), 130_000, 1),
+        )
+        await db.execute(
+            """INSERT INTO turns
+               (session_id, created_at, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, cost_cents,
+                user_text, assistant_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("alice-spent", _now_iso(), "claude-opus-4-7", 0, 0, 0, 0, 130_000, "x", "y"),
+        )
+        await db.commit()
+
+    over_owner, current_owner = await check_soft_cap("owner")
+    over_alice, current_alice = await check_soft_cap("alice")
+    assert over_owner is False
+    assert current_owner == 0.0
+    assert over_alice is True
+    assert current_alice >= 12.0
+
+
+# ---------------------------------------------------------------------------
 # record_think_deep_cost
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
