@@ -40,6 +40,24 @@ PRICING_PER_MTOK = {
     #   cached text input  $0.075 / 1M
     #   text output        $2.50 / 1M
     "gemini-2.5-flash":  {"in": 0.30, "out": 2.50,  "cached_in": 0.075},
+    # 2026-05-05 — Gemini Live API native-audio model (Stage 1 of the
+    # Live pivot). Pricing per Vertex AI Live API rate card (May 2026):
+    #   text input         $0.50 / 1M
+    #   cached text input  $0.075 / 1M
+    #   audio input        $3.00 / 1M
+    #   text output        $2.00 / 1M (transcripts)
+    #   audio output       $12.00 / 1M
+    # ``compute_cost_cents`` doesn't yet read audio_in / audio_out — Stage 3
+    # will plumb the per-modality token counts from
+    # ``gemini_live.LiveSession._usage`` through ``record_turn``. Entry
+    # added now so that wiring is a one-liner.
+    "gemini-live-2.5-flash-native-audio": {
+        "in":         0.50,
+        "audio_in":   3.00,
+        "out":        2.00,
+        "audio_out": 12.00,
+        "cached_in":  0.075,
+    },
 }
 
 # ---------------------------------------------------------------------------
