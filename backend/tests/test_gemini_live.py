@@ -367,8 +367,11 @@ async def _drain_queue(session: _FakeAsyncSession, max_wait_s: float = 0.5):
         if asyncio.get_event_loop().time() > deadline:
             raise AssertionError("queue did not drain")
         await asyncio.sleep(0.01)
-    # Give the pump one more loop so the final dispatch completes.
-    await asyncio.sleep(0.05)
+    # Give the pump one more loop so the final dispatch completes. The
+    # generation_complete dispatch has a USAGE_METADATA_DRAIN_DELAY_S
+    # (~200ms) sleep before firing on_turn_complete to catch trailing
+    # usage frames — wait 300ms here to comfortably clear that.
+    await asyncio.sleep(0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -376,8 +379,8 @@ async def _drain_queue(session: _FakeAsyncSession, max_wait_s: float = 0.5):
 # ---------------------------------------------------------------------------
 def test_init_stores_all_callbacks_and_handle():
     async def _audio(_b): pass
-    async def _in_tx(_t): pass
-    async def _out_tx(_t): pass
+    async def _in_tx(_t, _f): pass
+    async def _out_tx(_t, _f): pass
     async def _interrupted(): pass
     async def _turn_done(_u): pass
     async def _tool(_tc): pass
@@ -587,11 +590,11 @@ async def test_pump_dispatches_audio_chunk():
 @pytest.mark.asyncio
 async def test_pump_dispatches_input_and_output_transcripts():
     _, fake_session = _install_fake_client()
-    in_tx: list[str] = []
-    out_tx: list[str] = []
+    in_tx: list[tuple[str, bool]] = []
+    out_tx: list[tuple[str, bool]] = []
 
-    async def on_in(t): in_tx.append(t)
-    async def on_out(t): out_tx.append(t)
+    async def on_in(t, is_final): in_tx.append((t, is_final))
+    async def on_out(t, is_final): out_tx.append((t, is_final))
 
     sess = LiveSession(
         system_prompt="x",
@@ -601,19 +604,22 @@ async def test_pump_dispatches_input_and_output_transcripts():
     )
     await sess.open()
     try:
+        # Partial transcript (finished=False): WS layer streams as a
+        # live caption but doesn't yet commit a message bubble.
         await fake_session.messages.put(_LiveServerMessage(
             server_content=_ServerContent(
-                input_transcription=_Transcription(text="user said hi"),
+                input_transcription=_Transcription(text="user said hi", finished=False),
             )
         ))
+        # Finalized output: WS layer commits the bubble.
         await fake_session.messages.put(_LiveServerMessage(
             server_content=_ServerContent(
-                output_transcription=_Transcription(text="model said hello"),
+                output_transcription=_Transcription(text="model said hello", finished=True),
             )
         ))
         await _drain_queue(fake_session)
-        assert in_tx == ["user said hi"]
-        assert out_tx == ["model said hello"]
+        assert in_tx == [("user said hi", False)]
+        assert out_tx == [("model said hello", True)]
     finally:
         await sess.close()
 

@@ -76,12 +76,26 @@ OUTPUT_SAMPLE_RATE_HZ: int = 24000
 # doesn't wedge ``LiveSession.close`` indefinitely.
 RECEIVE_PUMP_CLOSE_TIMEOUT_S: float = 2.0
 
+# Stage 1A quirk #2: ``usage_metadata`` arrives on a separate frame a few
+# ms PAST ``generation_complete`` on short turns. Without a small delay
+# before we fire ``on_turn_complete``, the snapshot we hand the caller is
+# either zero or stale. This window is short enough that the user can't
+# perceive it (they see end-of-turn UX flicker after audio finishes
+# anyway) but long enough to catch the trailing frame on Vertex.
+USAGE_METADATA_DRAIN_DELAY_S: float = 0.2
+
 
 # Type aliases for the callback surface. All callbacks are async — the
 # pump is itself async and would otherwise spin a loop just to route
 # events to threads.
+#
+# TranscriptCb gains an ``is_final`` boolean alongside the text so
+# Stage 2's WS layer can stream partial dictation to the UI live and
+# only commit a finalized transcript to the assistant/user message
+# bubble when the server flips ``finished=True``. The LiveSession pump
+# reads the SDK's ``Transcription.finished`` field and forwards it.
 AudioCb = Callable[[bytes], Awaitable[None]]
-TranscriptCb = Callable[[str], Awaitable[None]]
+TranscriptCb = Callable[[str, bool], Awaitable[None]]
 InterruptedCb = Callable[[], Awaitable[None]]
 TurnCompleteCb = Callable[[dict], Awaitable[None]]
 ToolCallCb = Callable[[Any], Awaitable[Any]]
@@ -161,6 +175,28 @@ def _build_live_config(
     """
     from google.genai import types
 
+    # Barge-in feel — START_OF_ACTIVITY_INTERRUPTS tells the server to
+    # interrupt the model's current generation the moment server-side VAD
+    # detects user speech, instead of letting Chief's reply finish before
+    # processing the new turn. Mandatory for natural duplex feel; without
+    # it a barge-in waits ~half-second-to-multi-second to take effect.
+    # Some SDK builds expose ActivityHandling/RealtimeInputConfig only on
+    # newer versions; we attempt-and-skip so an older google-genai still
+    # imports clean. (Stage 1A quirk #4 from Riggs.)
+    realtime_input_config = None
+    activity_handling_enum = getattr(types, "ActivityHandling", None)
+    realtime_cfg_cls = getattr(types, "RealtimeInputConfig", None)
+    if activity_handling_enum is not None and realtime_cfg_cls is not None:
+        try:
+            realtime_input_config = realtime_cfg_cls(
+                activity_handling=activity_handling_enum.START_OF_ACTIVITY_INTERRUPTS,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "gemini_live: RealtimeInputConfig construction failed: %s "
+                "(barge-in will use SDK default behaviour)", exc,
+            )
+
     config_kwargs: dict[str, Any] = {
         "response_modalities": [types.Modality.AUDIO],
         "system_instruction": types.Content(
@@ -175,6 +211,8 @@ def _build_live_config(
             handle=resumption_handle,
         ),
     }
+    if realtime_input_config is not None:
+        config_kwargs["realtime_input_config"] = realtime_input_config
     if extra_tools:
         config_kwargs["tools"] = extra_tools
     return types.LiveConnectConfig(**config_kwargs)
@@ -308,14 +346,33 @@ class LiveSession:
         )
         self._pump_task.add_done_callback(self._on_pump_done)
 
-    async def close(self) -> None:
+    async def close(self, *, pump_grace_seconds: float = 0.0) -> None:
         """Cancel the receive pump and close the live session.
 
         Idempotent — repeated calls are no-ops after the first.
+
+        ``pump_grace_seconds`` is a small wait BEFORE we cancel the pump,
+        giving the SDK time to deliver any trailing ``usage_metadata``
+        frames the server emits just past ``generation_complete`` on
+        very short turns (Stage 1A quirk #2). Caller passes >0 only on
+        graceful shutdown after a clean turn — for hard close on WS drop
+        or error we want zero grace so the close races to completion.
         """
         if self._closed:
             return
         self._closed = True
+
+        # Optional pre-cancel grace so the pump can drain trailing
+        # usage_metadata that lands a few-ms after generation_complete.
+        if pump_grace_seconds > 0 and (
+            self._pump_task is not None and not self._pump_task.done()
+        ):
+            try:
+                await asyncio.sleep(pump_grace_seconds)
+            except asyncio.CancelledError:
+                # Don't swallow our own cancellation, but DO continue to
+                # the cleanup below so we don't leak the session.
+                pass
 
         # Cancel the pump first so it doesn't race the session close.
         if self._pump_task is not None and not self._pump_task.done():
@@ -385,6 +442,56 @@ class LiveSession:
         """
         sess = self._require_session()
         await sess.send_tool_response(function_responses=function_responses)
+
+    async def cancel_current_turn(self) -> None:
+        """Manual barge-in — used when the UI's cancel button fires.
+
+        Server-side VAD already handles the natural barge-in case (user
+        speaks while Chief is talking → server emits ``interrupted=True``
+        and we fan that out to ``on_interrupted``). The manual cancel
+        button has no audio to ride in on, so we synthesize the same
+        outcome here:
+
+          1. Fire ``on_interrupted`` so the WS layer / FE playback worklet
+             flushes whatever audio is queued. Without this the user hears
+             Chief finish the sentence even after pressing cancel.
+          2. Best-effort: signal the server that user activity started so
+             it stops generating early. The Live API doesn't expose a
+             clean "abort current turn" RPC when automatic VAD is on, so
+             we try ``send_realtime_input(activity_start=...)`` and
+             swallow the inevitable "manual activity not allowed with
+             automatic VAD" error if the SDK rejects it. The local
+             flush in (1) is the user-facing win; the server signal is
+             belt-and-suspenders.
+
+        Idempotent on repeated calls — the FE typically only fires this
+        once per click, but a double-tap shouldn't blow up.
+        """
+        # (1) Local flush — always safe even if the session is mid-close.
+        await self._safe_invoke(
+            self.on_interrupted,
+            None,
+            tag="on_interrupted (manual-cancel)",
+        )
+        # (2) Best-effort server hint. Wrapped narrowly so a failed signal
+        # doesn't mask the local flush we just did.
+        if self._session is None:
+            return
+        try:
+            from google.genai import types
+            activity_start_cls = getattr(types, "ActivityStart", None)
+            if activity_start_cls is None:
+                return
+            await self._session.send_realtime_input(
+                activity_start=activity_start_cls(),
+            )
+        except Exception as exc:
+            # Expected on automatic VAD: server rejects manual activity
+            # signals. Logged at debug because it's not actionable.
+            logger.debug(
+                "gemini_live: manual activity_start rejected (likely "
+                "automatic VAD): %s", exc,
+            )
 
     # ------------------------------------------------------------------
     # Receive pump — internals
@@ -506,13 +613,17 @@ class LiveSession:
                 )
 
         # Input audio transcription (the user's speech, recognised).
+        # Forward (text, is_final) so the WS layer can stream partial
+        # dictation chips and commit only on the finalized chunk.
         in_tx = getattr(sc, "input_transcription", None)
         if in_tx is not None and self.on_input_transcript is not None:
             text = getattr(in_tx, "text", None)
+            is_final = bool(getattr(in_tx, "finished", False))
             if text:
-                await self._safe_invoke(
+                await self._safe_invoke_pair(
                     self.on_input_transcript,
                     text,
+                    is_final,
                     tag="on_input_transcript",
                 )
 
@@ -520,10 +631,12 @@ class LiveSession:
         out_tx = getattr(sc, "output_transcription", None)
         if out_tx is not None and self.on_output_transcript is not None:
             text = getattr(out_tx, "text", None)
+            is_final = bool(getattr(out_tx, "finished", False))
             if text:
-                await self._safe_invoke(
+                await self._safe_invoke_pair(
                     self.on_output_transcript,
                     text,
+                    is_final,
                     tag="on_output_transcript",
                 )
 
@@ -541,7 +654,20 @@ class LiveSession:
         # We hand a copy of the running usage dict to the callback so
         # the caller can record billing without holding a live reference
         # that we'd later mutate.
+        #
+        # Stage 1A quirk #2: ``usage_metadata`` lags ``generation_complete``
+        # by a few-ms on short turns. Sleep briefly so any trailing usage
+        # frame lands and ``_accumulate_usage`` updates ``self._usage``
+        # BEFORE we snapshot. Without this, on_turn_complete fires with
+        # all-zero usage on quick "yes"/"no"-style replies. The sleep is
+        # cancellation-safe — if close() lands during the wait, we abort
+        # the dispatch entirely (the turn has ended; there's nothing to
+        # record on a session that's already torn down).
         if getattr(sc, "generation_complete", None) is True:
+            try:
+                await asyncio.sleep(USAGE_METADATA_DRAIN_DELAY_S)
+            except asyncio.CancelledError:
+                raise
             usage_snapshot = dict(self._usage)
             await self._safe_invoke(
                 self.on_turn_complete,
@@ -626,6 +752,29 @@ class LiveSession:
                 await cb()
             else:
                 await cb(arg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("gemini_live: callback %s raised: %s", tag, exc)
+
+    async def _safe_invoke_pair(
+        self,
+        cb: Optional[Callable[..., Awaitable[Any]]],
+        arg1: Any,
+        arg2: Any,
+        *,
+        tag: str,
+    ) -> None:
+        """Two-arg variant of ``_safe_invoke`` for transcript callbacks.
+
+        Used for ``on_input_transcript`` / ``on_output_transcript`` which
+        receive ``(text, is_final)``. Same swallow-and-log semantics so
+        a buggy caller callback can't kill the receive pump.
+        """
+        if cb is None:
+            return
+        try:
+            await cb(arg1, arg2)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
