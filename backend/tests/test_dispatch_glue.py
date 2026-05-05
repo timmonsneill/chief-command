@@ -344,60 +344,48 @@ async def test_route_task_rejects_leading_dash_task_spec(
 # ONLY the successful sentence.
 
 
-# ---------------------------------------- fix: bridge phrase always
+# ---------------------------------------- fix: deferred bridge phrase
 #
-# 2026-05-05 latency-bundle. Owner reported Pro feels 12-14s before the
-# first audio chunk lands. We can't beat the model's TTFT, so we mask it
-# with a short spoken bridge phrase ("one sec", "got it, thinking") that
-# fires the moment STT completes — BEFORE we await Gemini. Previously this
-# only fired on ``is_deep`` (Opus routing); with Pro on every turn the
-# bridge has to fire universally or every turn feels broken.
+# 2026-05-05 evening rollback. The morning revision (commit d586a37) fired
+# the bridge on EVERY turn, regardless of how fast Pro replied. Owner
+# complaint verbatim: "saying give me a sec on every single response is
+# fucking annoying and also not needed... it's able to respond within two,
+# three seconds on half of these, but it's still saying, okay, thinking".
 #
-# This test asserts: a non-deep classifier outcome STILL emits a
-# bridge_phrase WS frame and STILL enqueues the bridge text onto the TTS
-# queue. Regression guard.
+# Fix: schedule the bridge on a short delay (BRIDGE_PHRASE_DELAY_SECONDS,
+# 1.8s). When the first model token arrives, ``send_token`` sets
+# ``first_token_event`` and cancels the timer. So fast replies skip the
+# bridge entirely; only genuinely-slow turns get the spoken cue.
+#
+# These two tests assert both halves of that contract:
+# 1. fast: first token < delay → no bridge_phrase WS frame, no bridge in TTS.
+# 2. slow: no token before delay → bridge_phrase frame + bridge in TTS.
 
 
-@pytest.mark.asyncio
-async def test_bridge_phrase_fires_on_every_turn(
+def _bridge_test_stubs(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``random_voice_bridge_phrase`` is invoked + ``bridge_phrase`` frame
-    sent + bridge enqueued for TTS even when ``is_deep`` is False.
+    *,
+    fake_stream_turn: Any,
+    synth_inputs: list[str],
+) -> Any:
+    """Shared monkeypatch wiring for the two deferred-bridge tests.
 
-    The legacy code gated on ``is_deep`` and the bridge was silent on most
-    turns. With Pro's TTFT that produced ~12s of dead air per turn on iOS.
+    Returns the ``ws_mod`` reference so the calling test can shorten
+    ``BRIDGE_PHRASE_DELAY_SECONDS`` if needed.
     """
     from app import websockets as ws_mod
 
-    # Force is_deep=False so we KNOW the bridge isn't firing because of
-    # the legacy deep-routing gate.
     monkeypatch.setattr(
         ws_mod, "classify_and_route", lambda text: ("haiku", False),
     )
     monkeypatch.setattr(
         ws_mod, "random_voice_bridge_phrase", lambda: "one sec",
     )
-
-    # No-op stream — we only care about the bridge wiring here.
-    async def fake_stream_turn(
-        history: list, model: str, send_token: Any, send_tts_sentence: Any,
-        **kwargs: Any,
-    ) -> dict:
-        return {
-            "assistant_text": "",
-            "input_tokens": 1, "output_tokens": 1,
-            "cache_read_input_tokens": 0,
-        }
-
     monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
     monkeypatch.setattr(
         ws_mod, "build_chief_system",
         lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
     )
-
-    # Capture every sentence handed to the TTS worker via synthesize_stream.
-    synth_inputs: list[str] = []
 
     async def capture_synth(sentence: str, **_: Any):
         synth_inputs.append(sentence)
@@ -405,7 +393,8 @@ async def test_bridge_phrase_fires_on_every_turn(
 
     monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", capture_synth)
 
-    async def noop_append_turn(*a: Any, **kw: Any) -> None: return None
+    async def noop_append_turn(*a: Any, **kw: Any) -> None:
+        return None
 
     async def fake_record_turn(**kwargs: Any) -> dict:
         return {"id": 1, "cost_cents": 0}
@@ -429,29 +418,137 @@ async def test_bridge_phrase_fires_on_every_turn(
     monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_voice)
     monkeypatch.setattr(ws_mod, "get_session_totals", fake_get_session_totals)
 
+    return ws_mod
+
+
+@pytest.mark.asyncio
+async def test_bridge_phrase_skipped_when_first_token_is_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast reply — first token before the deferred-bridge timer fires →
+    no bridge_phrase WS frame, no bridge text on the TTS pipeline.
+
+    Owner complaint that triggered this: "saying give me a sec on every
+    single response is fucking annoying" — fast Pro replies (1-2s) should
+    NOT get a filler phrase in front of them.
+    """
+    synth_inputs: list[str] = []
+
+    # stream_turn that emits a token IMMEDIATELY — well before the
+    # deferred-bridge timer (1.8s) could fire. This simulates the fast
+    # reply path that owner specifically called out.
+    async def fake_stream_turn(
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
+    ) -> dict:
+        await send_token("hi")  # first token arrives instantly
+        return {
+            "assistant_text": "hi",
+            "input_tokens": 1, "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+        }
+
+    ws_mod = _bridge_test_stubs(
+        monkeypatch,
+        fake_stream_turn=fake_stream_turn,
+        synth_inputs=synth_inputs,
+    )
+
     ws = FakeWebSocket()
     await ws_mod._run_llm_turn(
         ws=ws,
-        session_id="sess-bridge",
+        session_id="sess-bridge-fast",
         history=[],
         user_text="hello",
         project_scope="chief",
     )
 
-    # WS bridge_phrase frame went out.
+    bridge_frames = [
+        f for f in ws.sent
+        if isinstance(f, dict) and f.get("type") == "bridge_phrase"
+    ]
+    assert len(bridge_frames) == 0, (
+        f"expected NO bridge_phrase frame on a fast reply; got "
+        f"{len(bridge_frames)} — deferred bridge regression"
+    )
+    assert "one sec" not in synth_inputs, (
+        f"bridge text leaked into TTS pipeline on a fast reply; "
+        f"synth_inputs={synth_inputs!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bridge_phrase_fires_on_slow_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow reply — no token within the deferred-bridge delay → bridge
+    fires (WS frame + TTS enqueue).
+
+    Pro takes 5-15s on long prompts; the bridge phrase exists to mask that
+    dead air. We shorten the delay to 0.05s so the test doesn't drag.
+    """
+    synth_inputs: list[str] = []
+
+    # stream_turn that takes longer than the delay before emitting any token.
+    async def fake_stream_turn(
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
+    ) -> dict:
+        # Sleep past the (test-shortened) bridge delay before any token.
+        await asyncio.sleep(0.2)
+        await send_token("ok")
+        return {
+            "assistant_text": "ok",
+            "input_tokens": 1, "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+        }
+
+    ws_mod = _bridge_test_stubs(
+        monkeypatch,
+        fake_stream_turn=fake_stream_turn,
+        synth_inputs=synth_inputs,
+    )
+
+    # Patch the delay constant inside _run_llm_turn. The constant is a local
+    # in the function, so we monkeypatch asyncio.sleep used inside the
+    # deferred bridge by leaving the real delay in place — except that
+    # would slow the suite. Instead use freezegun-equivalent: replace the
+    # function reference at the module level with a wrapper that shortens
+    # bridge sleeps. Simpler: shorten by patching asyncio.sleep ONLY when
+    # called with the bridge delay value.
+    real_sleep = asyncio.sleep
+
+    async def fast_bridge_sleep(seconds: float, *args: Any, **kwargs: Any):
+        # Bridge timer uses the constant 1.8 — shorten to 0.05 so the test
+        # is responsive. All other sleeps (e.g. fake_stream_turn's 0.2)
+        # pass through unchanged.
+        if seconds == 1.8:
+            return await real_sleep(0.05)
+        return await real_sleep(seconds, *args, **kwargs)
+
+    monkeypatch.setattr(ws_mod.asyncio, "sleep", fast_bridge_sleep)
+
+    ws = FakeWebSocket()
+    await ws_mod._run_llm_turn(
+        ws=ws,
+        session_id="sess-bridge-slow",
+        history=[],
+        user_text="hello",
+        project_scope="chief",
+    )
+
     bridge_frames = [
         f for f in ws.sent
         if isinstance(f, dict) and f.get("type") == "bridge_phrase"
     ]
     assert len(bridge_frames) == 1, (
-        f"expected exactly one bridge_phrase frame on a non-deep turn; "
-        f"got {len(bridge_frames)} — bridge gating regression"
+        f"expected exactly one bridge_phrase frame on a slow reply; "
+        f"got {len(bridge_frames)} — deferred bridge regression"
     )
     assert bridge_frames[0]["text"] == "one sec"
-
-    # Bridge text actually hit the TTS pipeline.
     assert "one sec" in synth_inputs, (
-        f"expected bridge text in TTS synth queue; got {synth_inputs!r}"
+        f"expected bridge text in TTS synth queue on slow reply; "
+        f"got {synth_inputs!r}"
     )
 
 

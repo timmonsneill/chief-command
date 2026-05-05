@@ -810,23 +810,55 @@ async def _run_llm_turn(
         current_task._tts_cancel_event = tts_cancel_event  # type: ignore[attr-defined]
         current_task._tts_queue = tts_queue  # type: ignore[attr-defined]
 
-    # 2026-05-05 latency mitigation: bridge phrase ALWAYS fires at turn
-    # start. Owner reported Pro feels 12-14s on iPhone — we can't beat
-    # the model's TTFT, but we can hide it with an immediate spoken cue.
-    # Variants in router.VOICE_BRIDGE_PHRASES are terse (1-3 words) so
-    # the real reply isn't backed up behind the bridge in the TTS queue.
-    # The legacy ``is_deep`` signal is still surfaced via ``active_model``
-    # for the frontend's thinking-indicator shading.
-    bridge = random_voice_bridge_phrase()
-    if bridge:
-        await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
-        # NOTE: tally happens in tts_worker AFTER synthesize_stream completes
-        # without raising — see the `tts_char_total += len(sentence)` there.
-        # Enqueueing here does not count a char toward Google's bill; only the
-        # actual synthesize_stream call does.
-        await tts_queue.put(bridge)
+    # 2026-05-05 deferred-bridge revision: 2026-05-05 morning fired the
+    # bridge phrase on EVERY turn (commit d586a37). Owner reaction was
+    # "saying give me a sec on every single response is fucking annoying
+    # and also not needed" — fast Pro replies (1-2s TTFT) didn't need
+    # the filler, only slow ones (5-15s on long prompts) do.
+    #
+    # New behaviour: schedule the bridge as a deferred task. After
+    # ``BRIDGE_PHRASE_DELAY_SECONDS`` of silence (no token from the model),
+    # fire it. If the first token arrives faster than that, ``send_token``
+    # sets ``first_token_event`` and cancels the bridge — owner gets the
+    # real reply with no filler in front of it.
+    BRIDGE_PHRASE_DELAY_SECONDS = 1.8
+    first_token_event = asyncio.Event()
+
+    async def _deferred_bridge_phrase() -> None:
+        try:
+            await asyncio.sleep(BRIDGE_PHRASE_DELAY_SECONDS)
+            # Race guard: if the first token landed during the sleep, the
+            # event will be set. Skip the bridge entirely — the real reply
+            # is already streaming.
+            if first_token_event.is_set():
+                return
+            bridge = random_voice_bridge_phrase()
+            if not bridge:
+                return
+            await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
+            # NOTE: tally happens in tts_worker AFTER synthesize_stream
+            # completes without raising — see the
+            # `tts_char_total += len(sentence)` there. Enqueueing here does
+            # not count a char toward Google's bill; only the actual
+            # synthesize_stream call does.
+            await tts_queue.put(bridge)
+        except asyncio.CancelledError:
+            # Normal path when the first token arrives before the timer
+            # fires (or on barge-in / WS drop). Swallow — nothing to clean.
+            pass
+
+    bridge_task = asyncio.create_task(_deferred_bridge_phrase())
 
     async def send_token(text: str) -> None:
+        # Mark first-token-received the moment the brain emits its first
+        # streamed chunk. The deferred bridge task watches this event to
+        # decide whether to suppress itself.
+        if not first_token_event.is_set():
+            first_token_event.set()
+            # Cancel the timer cleanly so it doesn't leak past the turn.
+            # If it has already fired we get a no-op cancel — harmless.
+            if not bridge_task.done():
+                bridge_task.cancel()
         streamed_tokens.append(text)
         await ws_send_json(ws, {"type": "token", "text": text})
 
@@ -971,6 +1003,17 @@ async def _run_llm_turn(
             subject=subject,
         )
 
+        # If the bridge task is still pending (e.g. the brain returned with
+        # zero streamed tokens — a rare empty-reply case where send_token
+        # never fired), cancel + await it before we close the TTS leg so
+        # the timer doesn't outlive the turn.
+        if not bridge_task.done():
+            bridge_task.cancel()
+        try:
+            await bridge_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
         await tts_queue.put(None)
         await tts_task
 
@@ -1081,6 +1124,15 @@ async def _run_llm_turn(
             await tts_task
         except (asyncio.CancelledError, Exception):
             pass
+        # Ensure the deferred bridge timer doesn't outlive the turn — if
+        # we cancelled before any token streamed, the task is still in its
+        # sleep. Cancel + drain so it doesn't fire after the WS is gone.
+        if not bridge_task.done():
+            bridge_task.cancel()
+        try:
+            await bridge_task
+        except (asyncio.CancelledError, Exception):
+            pass
         raise
     except Exception:
         # Non-cancel error path: let the worker drain naturally so any
@@ -1091,6 +1143,13 @@ async def _run_llm_turn(
             await asyncio.wait_for(tts_task, timeout=2.0)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             tts_task.cancel()
+        # Same bridge cleanup as the cancel path — don't leak the timer.
+        if not bridge_task.done():
+            bridge_task.cancel()
+        try:
+            await bridge_task
+        except (asyncio.CancelledError, Exception):
+            pass
         raise
     finally:
         # CRITICAL — cancel-path billing.

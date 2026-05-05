@@ -72,12 +72,13 @@ MAX_TOOL_ROUNDS: int = 16
 
 # Per-turn output ceiling — Gemini's ``max_output_tokens`` config knob.
 #
-# 2026-05-05 latency cut: voice doesn't need 1024 tokens of output. Pro
-# generates verbose replies; capping at 384 cuts time-from-first-to-last
-# token by 60-70% on long replies without truncating most natural voice
-# responses (a 1-3 sentence Chief reply is well under 384 tokens). Text
-# callers that want more can pass ``max_output_tokens`` explicitly.
-DEFAULT_MAX_OUTPUT_TOKENS: int = 384
+# 2026-05-05 rollback: 384 was too aggressive — Pro was truncating mid-
+# sentence on complex replies (owner saw "...what to work on next. I"
+# trail off). Pro stops naturally when it's done, so the cap is just a
+# ceiling, not a target; capping at 384 only hurts the long replies that
+# legitimately need 500-700 tokens. Restoring 1024 removes the artificial
+# truncation without slowing fast replies (Pro emits as much as it needs).
+DEFAULT_MAX_OUTPUT_TOKENS: int = 1024
 
 # Truncation caps on tool-call WS frames. Args summaries get truncated at
 # ARG_SUMMARY_MAX_CHARS so a "command" string of 20KB doesn't blow up the
