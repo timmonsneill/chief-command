@@ -70,7 +70,11 @@ async def stream_turn(
     send_token: Callable[[str], Awaitable[None]],
     send_tts_sentence: Callable[[str], Awaitable[None]],
     *,
-    max_tokens: int = 1024,
+    # 2026-05-05 latency cut: voice default drops 1024 -> 384. The voice
+    # WS handler doesn't pass ``max_tokens``, so this default IS the
+    # voice path's cap. Defers to ``gemini_brain.DEFAULT_MAX_OUTPUT_TOKENS``
+    # so future tuning happens in one spot.
+    max_tokens: int = gemini_brain.DEFAULT_MAX_OUTPUT_TOKENS,
     project_scope: Optional[str] = None,
     system_blocks: Optional[list[dict]] = None,
     send_tool_call: Optional[Callable[[dict], Awaitable[None]]] = None,

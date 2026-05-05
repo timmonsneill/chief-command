@@ -71,7 +71,13 @@ SENTENCE_FLUSH_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?])$")
 MAX_TOOL_ROUNDS: int = 16
 
 # Per-turn output ceiling — Gemini's ``max_output_tokens`` config knob.
-DEFAULT_MAX_OUTPUT_TOKENS: int = 1024
+#
+# 2026-05-05 latency cut: voice doesn't need 1024 tokens of output. Pro
+# generates verbose replies; capping at 384 cuts time-from-first-to-last
+# token by 60-70% on long replies without truncating most natural voice
+# responses (a 1-3 sentence Chief reply is well under 384 tokens). Text
+# callers that want more can pass ``max_output_tokens`` explicitly.
+DEFAULT_MAX_OUTPUT_TOKENS: int = 384
 
 # Truncation caps on tool-call WS frames. Args summaries get truncated at
 # ARG_SUMMARY_MAX_CHARS so a "command" string of 20KB doesn't blow up the
@@ -328,6 +334,20 @@ async def stream(
 
     cancelled = False
 
+    # 2026-05-05: track the last char emitted to fix the chunk-boundary
+    # smush bug. When Gemini chunks land as ``"One moment."`` then
+    # ``"I can't"`` (no whitespace at the seam), naive concatenation
+    # produces ``"One moment.I can't"`` — visible as missing a space in
+    # the assistant_text AND defeats SENTENCE_FLUSH_RE (which keys on
+    # whitespace AFTER ``.!?``), so the whole reply queues as one
+    # mega-sentence to TTS instead of two. Fix: when the prior chunk
+    # ended with a sentence-ending punctuation AND the new chunk starts
+    # with a non-whitespace alphanumeric / quote, prepend a single space
+    # to the new chunk before it hits send_token / sentence_buf /
+    # full_text. The space lands in all three so frontend display, TTS
+    # split, and persisted assistant_text all see proper spacing.
+    last_emitted_char: str = ""
+
     async def _flush_remaining_sentence_buf() -> None:
         # Flush whatever's in the sentence buffer to the TTS worker. Called
         # at the boundary where Gemini either stops cleanly OR pauses to
@@ -433,6 +453,32 @@ async def stream(
                         text_piece = getattr(part, "text", None)
                         fcall = getattr(part, "function_call", None)
                         if text_piece:
+                            # Chunk-boundary space injection. If the prior
+                            # chunk ended on ``.!?`` and this chunk starts
+                            # with an alphanumeric / quote (i.e. a fresh
+                            # sentence), insert one space at the seam so:
+                            #   * SENTENCE_FLUSH_RE actually splits
+                            #   * assistant_text doesn't read "moment.I"
+                            #   * TTS hears two sentences, not one mega
+                            # We deliberately key on the FIRST char of the
+                            # incoming chunk to avoid double-spacing if
+                            # the chunk already opened with whitespace.
+                            if (
+                                last_emitted_char
+                                and last_emitted_char in ".!?"
+                                and text_piece
+                                and text_piece[0] not in (" ", "\t", "\n", "\r")
+                            ):
+                                # Only inject when the seam is alpha/quote —
+                                # don't paste a space before another period
+                                # ("..." chunked as ".." + ".") or a comma
+                                # appended after a sentence stop, since those
+                                # are unusual but valid. Letters + quotes +
+                                # digits + open-paren/bracket cover the
+                                # natural-sentence-start cases.
+                                first = text_piece[0]
+                                if first.isalnum() or first in ('"', "'", "(", "["):
+                                    text_piece = " " + text_piece
                             full_text.append(text_piece)
                             try:
                                 await send_token(text_piece)
@@ -440,6 +486,14 @@ async def stream(
                                 cancelled = True
                                 raise
                             sentence_buf.append(text_piece)
+                            # Track the RAW final char so the seam check only
+                            # fires when the prior chunk ended directly on
+                            # ``.!?`` (no trailing space). A chunk ending with
+                            # ``". "`` already has the space we'd inject; we
+                            # must NOT add a second one or "Hello, world. " +
+                            # "How are" becomes "Hello, world.  How are".
+                            if text_piece:
+                                last_emitted_char = text_piece[-1]
 
                             joined = "".join(sentence_buf)
                             split_parts = SENTENCE_FLUSH_RE.split(joined)

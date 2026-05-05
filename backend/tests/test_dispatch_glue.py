@@ -344,6 +344,117 @@ async def test_route_task_rejects_leading_dash_task_spec(
 # ONLY the successful sentence.
 
 
+# ---------------------------------------- fix: bridge phrase always
+#
+# 2026-05-05 latency-bundle. Owner reported Pro feels 12-14s before the
+# first audio chunk lands. We can't beat the model's TTFT, so we mask it
+# with a short spoken bridge phrase ("one sec", "got it, thinking") that
+# fires the moment STT completes — BEFORE we await Gemini. Previously this
+# only fired on ``is_deep`` (Opus routing); with Pro on every turn the
+# bridge has to fire universally or every turn feels broken.
+#
+# This test asserts: a non-deep classifier outcome STILL emits a
+# bridge_phrase WS frame and STILL enqueues the bridge text onto the TTS
+# queue. Regression guard.
+
+
+@pytest.mark.asyncio
+async def test_bridge_phrase_fires_on_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``random_voice_bridge_phrase`` is invoked + ``bridge_phrase`` frame
+    sent + bridge enqueued for TTS even when ``is_deep`` is False.
+
+    The legacy code gated on ``is_deep`` and the bridge was silent on most
+    turns. With Pro's TTFT that produced ~12s of dead air per turn on iOS.
+    """
+    from app import websockets as ws_mod
+
+    # Force is_deep=False so we KNOW the bridge isn't firing because of
+    # the legacy deep-routing gate.
+    monkeypatch.setattr(
+        ws_mod, "classify_and_route", lambda text: ("haiku", False),
+    )
+    monkeypatch.setattr(
+        ws_mod, "random_voice_bridge_phrase", lambda: "one sec",
+    )
+
+    # No-op stream — we only care about the bridge wiring here.
+    async def fake_stream_turn(
+        history: list, model: str, send_token: Any, send_tts_sentence: Any,
+        **kwargs: Any,
+    ) -> dict:
+        return {
+            "assistant_text": "",
+            "input_tokens": 1, "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+        }
+
+    monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
+    monkeypatch.setattr(
+        ws_mod, "build_chief_system",
+        lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
+    )
+
+    # Capture every sentence handed to the TTS worker via synthesize_stream.
+    synth_inputs: list[str] = []
+
+    async def capture_synth(sentence: str, **_: Any):
+        synth_inputs.append(sentence)
+        yield b"audio"
+
+    monkeypatch.setattr(ws_mod.tts_service, "synthesize_stream", capture_synth)
+
+    async def noop_append_turn(*a: Any, **kw: Any) -> None: return None
+
+    async def fake_record_turn(**kwargs: Any) -> dict:
+        return {"id": 1, "cost_cents": 0}
+
+    async def fake_record_voice(**kwargs: Any) -> dict:
+        return {
+            "stt_seconds": kwargs.get("audio_seconds", 0.0),
+            "stt_cost_usd": 0.0,
+            "stt_provider": kwargs.get("provider", "local"),
+            "tts_chars": kwargs.get("chars", 0),
+            "tts_cost_usd": 0.0,
+            "tts_provider": kwargs.get("provider", "local"),
+        }
+
+    async def fake_get_session_totals(session_id: str) -> dict:
+        return {"cost_cents": 0, "voice": {"total_usd": 0.0}}
+
+    monkeypatch.setattr(ws_mod, "append_turn", noop_append_turn)
+    monkeypatch.setattr(ws_mod, "record_turn", fake_record_turn)
+    monkeypatch.setattr(ws_mod, "record_stt_usage", fake_record_voice)
+    monkeypatch.setattr(ws_mod, "record_tts_usage", fake_record_voice)
+    monkeypatch.setattr(ws_mod, "get_session_totals", fake_get_session_totals)
+
+    ws = FakeWebSocket()
+    await ws_mod._run_llm_turn(
+        ws=ws,
+        session_id="sess-bridge",
+        history=[],
+        user_text="hello",
+        project_scope="chief",
+    )
+
+    # WS bridge_phrase frame went out.
+    bridge_frames = [
+        f for f in ws.sent
+        if isinstance(f, dict) and f.get("type") == "bridge_phrase"
+    ]
+    assert len(bridge_frames) == 1, (
+        f"expected exactly one bridge_phrase frame on a non-deep turn; "
+        f"got {len(bridge_frames)} — bridge gating regression"
+    )
+    assert bridge_frames[0]["text"] == "one sec"
+
+    # Bridge text actually hit the TTS pipeline.
+    assert "one sec" in synth_inputs, (
+        f"expected bridge text in TTS synth queue; got {synth_inputs!r}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_tts_char_tally_excludes_failed_synthesis(
     monkeypatch: pytest.MonkeyPatch,
@@ -354,12 +465,17 @@ async def test_tts_char_tally_excludes_failed_synthesis(
     """
     from app import websockets as ws_mod
 
-    # Force non-deep routing so no bridge phrase is emitted; the bridge is
-    # tallied through the same worker path, but isolating the two stream_turn
-    # sentences keeps the assertion simple.
+    # 2026-05-05: bridge phrase now fires on every turn (latency mitigation).
+    # Stub it to "" so the test isolates only the two stream_turn sentences;
+    # an empty bridge bypasses TTS enqueue (the WS handler treats falsy
+    # bridge text as a no-op via the empty-string skip in tts_worker /
+    # synthesize_stream — Google rejects empty input). classify_and_route
+    # is_deep flag is no longer load-bearing for bridge gating but kept
+    # so the active_model frame still flows.
     monkeypatch.setattr(
         ws_mod, "classify_and_route", lambda text: ("haiku", False),
     )
+    monkeypatch.setattr(ws_mod, "random_voice_bridge_phrase", lambda: "")
 
     # stream_turn emits two sentences: the first will fail in TTS, the second
     # will succeed. Returns a minimal usage dict for the downstream record_turn
@@ -469,6 +585,9 @@ async def test_run_llm_turn_records_voice_usage_on_cancel_midstream(
     monkeypatch.setattr(
         ws_mod, "classify_and_route", lambda text: ("haiku", False),
     )
+    # 2026-05-05: bridge phrase now fires on every turn. Stub to "" so the
+    # cancel-path TTS char tally only reflects the in-test sentence.
+    monkeypatch.setattr(ws_mod, "random_voice_bridge_phrase", lambda: "")
 
     # Slow stream: emit the first sentence, then sleep long enough for the
     # outer cancel to land BEFORE the second sentence is enqueued.

@@ -32,7 +32,11 @@ from services.project_context import (
     detect_project_switch,
 )
 from services.repo_map import get_repo_path
-from services.router import classify_and_route, random_thinking_phrase
+from services.router import (
+    classify_and_route,
+    random_thinking_phrase,
+    random_voice_bridge_phrase,
+)
 from services.usage_tracker import (
     close_session,
     create_session,
@@ -314,6 +318,20 @@ async def voice_ws(ws: WebSocket) -> None:
     # frame to override per session.
     current_speed: float = 1.25
     current_turn_task: Optional[asyncio.Task] = None
+
+    # 2026-05-05 latency-bundle: dedupe + suppress STT error chips.
+    # Outdoor wind / keyboard clicks fire VAD and produce empty STT
+    # transcripts. Those used to surface as ``error: Could not transcribe
+    # audio`` chips on the timeline — multiple per minute outdoors, very
+    # noisy. New behavior:
+    #   * Empty STT result (no speech) → silent INFO log + counter, NO
+    #     error chip emitted. Any frontend chip dedupe Finn adds in
+    #     parallel sees zero duplicates because we never send one.
+    #   * Real STT failure (network 5xx, billing 429, conversion error)
+    #     → ONE error chip per WS connection. Subsequent failures log
+    #     WARNING but don't re-emit. Reconnect resets the dedupe.
+    stt_error_emitted = False
+    stt_empty_count = 0
 
     async def ensure_session() -> str:
         """Lazy-create session on first real turn to avoid ghost rows from
@@ -609,17 +627,34 @@ async def voice_ws(ws: WebSocket) -> None:
                 # perceives it as "Chief stopped mid-sentence and never answered."
                 # Only after we have a non-empty transcript is it safe to
                 # supersede the current turn.
+                #
+                # 2026-05-05 latency-bundle: empty transcripts NEVER produce
+                # an error chip (they're normal VAD noise). Real STT
+                # failures dedupe — one chip per WS connection. See
+                # ``stt_error_emitted`` flag init above.
                 try:
                     wav_data = await convert_webm_to_wav(audio_data)
                     transcript = await stt_service.transcribe(wav_data)
                 except Exception as exc:
                     logger.exception("Audio conversion/transcription failed: %s", exc)
-                    await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
+                    if not stt_error_emitted:
+                        await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
+                        stt_error_emitted = True
+                    else:
+                        logger.warning(
+                            "Voice WS STT error suppressed (already emitted once "
+                            "this connection): %s", exc,
+                        )
                     continue
 
                 if not transcript:
-                    logger.info("Voice WS empty transcript — not superseding in-flight turn")
-                    await ws_send_json(ws, {"type": "error", "message": "Could not transcribe audio"})
+                    stt_empty_count += 1
+                    logger.info(
+                        "Voice WS empty transcript (VAD trigger, no speech) "
+                        "session=%s count=%d — silently discarding",
+                        session_id, stt_empty_count,
+                    )
+                    # No error chip — empty STT is normal, not an error.
                     continue
 
                 await cancel_current_turn("superseded")
@@ -775,8 +810,15 @@ async def _run_llm_turn(
         current_task._tts_cancel_event = tts_cancel_event  # type: ignore[attr-defined]
         current_task._tts_queue = tts_queue  # type: ignore[attr-defined]
 
-    if is_deep:
-        bridge = random_thinking_phrase()
+    # 2026-05-05 latency mitigation: bridge phrase ALWAYS fires at turn
+    # start. Owner reported Pro feels 12-14s on iPhone — we can't beat
+    # the model's TTFT, but we can hide it with an immediate spoken cue.
+    # Variants in router.VOICE_BRIDGE_PHRASES are terse (1-3 words) so
+    # the real reply isn't backed up behind the bridge in the TTS queue.
+    # The legacy ``is_deep`` signal is still surfaced via ``active_model``
+    # for the frontend's thinking-indicator shading.
+    bridge = random_voice_bridge_phrase()
+    if bridge:
         await ws_send_json(ws, {"type": "bridge_phrase", "text": bridge})
         # NOTE: tally happens in tts_worker AFTER synthesize_stream completes
         # without raising — see the `tts_char_total += len(sentence)` there.

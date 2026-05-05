@@ -327,6 +327,114 @@ class TestTextOnlyStreaming:
         assert "" not in [c.parts[0].text for c in contents]
 
     @pytest.mark.asyncio
+    async def test_chunk_boundary_punctuation_injects_space(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When Gemini emits one chunk ending with sentence-ending punctuation
+        and the next chunk starts directly with a capital letter (no
+        whitespace at the seam), the brain injects a single space so:
+
+          * SENTENCE_FLUSH_RE actually splits — TTS hears two sentences,
+            not one mega-sentence.
+          * assistant_text reads "One moment. I can't" — not the smushed
+            "One moment.I can't" the owner saw on iOS 2026-05-05.
+          * send_token frames carry the space so the frontend display
+            doesn't render a missing space either.
+
+        Regression guard for the iOS-iPhone observation: "sentences
+        sometimes smush together missing a space (One moment.I can't)".
+        """
+        rounds = [[
+            _make_text_chunk("One moment."),  # ends on '.'
+            _make_text_chunk(
+                "I can't help with that.",  # starts directly with 'I'
+                finish=FakeFinishReason("STOP"),
+                usage=FakeUsageMetadata(prompt=10, candidates=8),
+            ),
+        ]]
+        client = FakeClient(rounds)
+        monkeypatch.setattr(gemini_brain, "_client", client)
+
+        tokens: list[str] = []
+        sentences: list[str] = []
+
+        async def send_token(t):
+            tokens.append(t)
+
+        async def send_tts_sentence(s):
+            sentences.append(s)
+
+        usage = await gemini_brain.stream(
+            history=[],
+            user_text="hi",
+            system_prompt="sys",
+            send_token=send_token,
+            send_tts_sentence=send_tts_sentence,
+            cwd=tmp_path,
+            subject="owner",
+            scope="Chief Command",
+            system_prompt_append="",
+        )
+
+        # Joined token stream has the injected space — no smush.
+        joined = "".join(tokens)
+        assert "moment.I can't" not in joined, (
+            f"chunk-boundary smush bug regression: {joined!r}"
+        )
+        assert "moment. I can't" in joined or "moment.  I can't" not in joined
+        # Persisted assistant_text agrees with what we streamed.
+        assert usage["assistant_text"] == joined
+        # SENTENCE_FLUSH_RE actually fires now — two sentences, not one
+        # mega-sentence held in the buffer until end-of-stream flush.
+        assert len(sentences) == 2
+        assert sentences[0].rstrip() == "One moment."
+        assert sentences[1].rstrip() == "I can't help with that."
+
+    @pytest.mark.asyncio
+    async def test_chunk_boundary_with_existing_space_no_double_space(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When the seam already has a space — chunk ends with ``". "`` —
+        we MUST NOT inject a second one. Pins behavior added 2026-05-05
+        for the chunk-boundary smush fix so a future tweak can't
+        accidentally double-space natural-shape streams.
+        """
+        rounds = [[
+            _make_text_chunk("Hello, "),
+            _make_text_chunk("world. "),
+            _make_text_chunk(
+                "How are you?",
+                finish=FakeFinishReason("STOP"),
+                usage=FakeUsageMetadata(prompt=5, candidates=5),
+            ),
+        ]]
+        client = FakeClient(rounds)
+        monkeypatch.setattr(gemini_brain, "_client", client)
+
+        tokens: list[str] = []
+
+        async def send_token(t):
+            tokens.append(t)
+
+        async def noop(*a, **kw):
+            pass
+
+        await gemini_brain.stream(
+            history=[],
+            user_text="hi",
+            system_prompt="sys",
+            send_token=send_token,
+            send_tts_sentence=noop,
+            cwd=tmp_path,
+            subject="owner",
+            scope="Chief Command",
+            system_prompt_append="",
+        )
+
+        # Exact concatenation — no extra space anywhere.
+        assert "".join(tokens) == "Hello, world. How are you?"
+
+    @pytest.mark.asyncio
     async def test_history_round_trip(self, tmp_path: Path, monkeypatch):
         # Verify prior history is converted to Content with role mapping.
         rounds = [[_make_text_chunk("ok", finish=FakeFinishReason("STOP"))]]
