@@ -48,9 +48,15 @@ export function useVad({ onSpeechEnd, onSpeechStart }: UseVadOptions): UseVadRet
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
         model: 'legacy',
-        positiveSpeechThreshold: 0.5,
-        negativeSpeechThreshold: 0.25,
-        minSpeechFrames: 3,
+        // Tuned for outdoor / ambient-noise environments (iPhone in the wild,
+        // wind, AC, keyboard). 0.75 confidence to start prevents wind from
+        // tripping barge-in; 12 frames (~384ms) of consistent speech is still
+        // short enough that a normal-volume interruption registers fast.
+        // negativeSpeechThreshold lifted to 0.45 so end-of-speech fires
+        // promptly once the owner stops talking.
+        positiveSpeechThreshold: 0.75,
+        negativeSpeechThreshold: 0.45,
+        minSpeechFrames: 12,
         // ~15 frames * 32ms = 480ms of sub-threshold audio before we call
         // end-of-speech. 6 (~190ms) was cutting the owner off mid-thought
         // during natural inter-word dips. 15 matches Siri/Alexa's ballpark
