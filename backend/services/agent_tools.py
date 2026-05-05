@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -76,6 +77,37 @@ _THINK_DEEP_ALLOWED_MODELS: frozenset[str] = frozenset({
     THINK_DEEP_DEFAULT_MODEL,
     THINK_DEEP_OPUS_MODEL,
 })
+
+
+# ---------------------------------------------------------------------------
+# code_review — Pro on Vertex specialist (Stage 5 of multi-brain stack)
+# ---------------------------------------------------------------------------
+# When the owner points at a specific artifact (file, git diff, pasted code/
+# spec) and asks for review, Live brain (Flash) self-routes to code_review
+# instead of think_deep. Pro is stronger at structured artifact analysis;
+# Anthropic Sonnet is stronger at conversational warmth. Different shapes,
+# different brains.
+#
+# Pricing rows for gemini-2.5-pro already exist in usage_tracker.PRICING_PER_MTOK
+# from when Pro was the conversational model. The executor records the
+# tool-call cost via record_code_review_cost so the dashboard sees this
+# specialist spend alongside Live audio + think_deep.
+CODE_REVIEW_MODEL: str = "gemini-2.5-pro"
+CODE_REVIEW_TIMEOUT_S: float = 45.0
+CODE_REVIEW_MAX_OUTPUT_TOKENS: int = 2048
+# Cap on the artifact text we send into Pro. 100KB matches the dispatch
+# preview ceiling and keeps the prompt below the 1M-token Pro limit by ~10x
+# even on dense source. Truncated content gets a footer note so the model
+# knows it's seeing a head slice.
+CODE_REVIEW_TARGET_MAX_BYTES: int = 100 * 1024
+# Heuristic for git-range detection. Three forms recognized:
+#   * "A..B" or "A...B" where A and B are commit-ish refs (alphanumeric +
+#     dot/slash/dash/underscore)
+#   * "HEAD" or "HEAD~N" (single ref, treated as a range "HEAD~N..HEAD")
+#   * other single refs are NOT auto-treated as ranges; they fall through
+#     to inline. Keeps "HEAD" the only single-ref shortcut.
+_GIT_RANGE_RE = re.compile(r"^[\w./\-~^]+\.{2,3}[\w./\-~^]+$")
+_GIT_HEAD_REF_RE = re.compile(r"^HEAD(~\d+)?$")
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +239,45 @@ THINK_DEEP_TOOL = ToolSchema(
 )
 
 
+CODE_REVIEW_TOOL = ToolSchema(
+    name="code_review",
+    description=(
+        "Review a specific code artifact and return structured feedback. "
+        "Use this for: PR review, spec sanity-check, security audit, "
+        "architecture review, performance pass. NOT for open-ended "
+        "thinking — use think_deep for that. Pro on Vertex handles the "
+        "actual analysis (deep, structured); the result is read back to "
+        "the user as Chief's reply."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": (
+                    "What to review. Three accepted forms (auto-detected): "
+                    "(1) file path relative to current scope's repo "
+                    "(e.g. 'backend/services/agent_tools.py'), (2) git "
+                    "range (e.g. 'HEAD~3..HEAD' or 'main..feature'), or "
+                    "(3) inline code/spec text. If a path doesn't exist "
+                    "and isn't a valid git range, treated as inline."
+                ),
+            },
+            "focus": {
+                "type": "string",
+                "enum": ["general", "security", "performance", "spec", "architecture"],
+                "description": (
+                    "Review angle. Default 'general' covers correctness + "
+                    "readability + obvious issues."
+                ),
+                "default": "general",
+            },
+        },
+        "required": ["target"],
+    },
+)
+
+
 DISPATCH_AGENT_TOOL = ToolSchema(
     name="dispatch_agent",
     description=(
@@ -242,6 +313,7 @@ ALL_TOOLS: tuple[ToolSchema, ...] = (
     GREP_TOOL,
     DISPATCH_AGENT_TOOL,
     THINK_DEEP_TOOL,
+    CODE_REVIEW_TOOL,
 )
 
 
@@ -662,6 +734,390 @@ async def execute_think_deep(
 
 
 # ---------------------------------------------------------------------------
+# code_review — Pro on Vertex via gemini_brain.stream
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _ResolvedTarget:
+    """Outcome of resolving a code_review target into review-ready content.
+
+    ``kind`` is one of ``"file"``, ``"git_range"``, ``"inline"``. ``error``
+    is non-None when resolution failed (path traversal, git command failure,
+    etc.) and ``text`` is empty in that case.
+    """
+    kind: str
+    text: str
+    truncated: bool = False
+    error: Optional[str] = None
+
+
+def _looks_like_git_range(target: str) -> bool:
+    """True iff ``target`` matches our git-range / single-HEAD-ref heuristic.
+
+    Doesn't actually invoke git — that happens in the resolver, where a
+    failed ``git diff`` call falls through to inline. This is just a cheap
+    pre-filter so an arbitrary text blob with two dots in it doesn't get
+    routed to a subprocess shell.
+    """
+    if not isinstance(target, str):
+        return False
+    s = target.strip()
+    if not s or "\n" in s or " " in s:
+        return False
+    if _GIT_RANGE_RE.match(s):
+        return True
+    if _GIT_HEAD_REF_RE.match(s):
+        return True
+    return False
+
+
+async def _resolve_review_target(target: str, cwd: Path) -> _ResolvedTarget:
+    """Auto-detect target type and produce review-ready content.
+
+    Detection order matters:
+      1. **File path** — ``cwd / target`` exists, is a regular file, AND
+         lives inside cwd (path-fence). Read up to 100KB; truncate with note.
+      2. **Git range** — matches ``_GIT_RANGE_RE`` or is ``HEAD[~N]`` AND
+         ``git -C cwd diff <range>`` succeeds. Single ``HEAD`` / ``HEAD~N``
+         is normalized to ``HEAD~N..HEAD`` so ``git diff`` produces the
+         expected output.
+      3. **Inline** — everything else. The owner pasted code/spec/text;
+         truncate at 100KB but otherwise pass through verbatim.
+
+    A path that doesn't exist falls through to inline (per spec).
+    A path that resolves outside cwd ALWAYS errors — we never silently treat
+    a path-traversal attempt as inline content because that would let the
+    model exfiltrate filesystem-shaped strings to Pro under a different
+    label.
+    """
+    if not isinstance(target, str) or not target.strip():
+        return _ResolvedTarget(kind="inline", text="", error="target is required")
+
+    cwd_resolved = cwd.resolve()
+    stripped = target.strip()
+
+    # --- Branch 1: file path ---
+    # Heuristic: looks like a path (no newlines, has '/' or '.' or is short
+    # enough to be a single filename). We check cwd containment first; if
+    # the literal target resolves to something outside cwd, that's a hard
+    # error (path-traversal), not a fallthrough.
+    looks_like_path = (
+        "\n" not in stripped
+        and len(stripped) < 1024
+        and (
+            "/" in stripped
+            or stripped.endswith((
+                ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".json",
+                ".yaml", ".yml", ".toml", ".sh", ".sql", ".html", ".css",
+            ))
+        )
+    )
+    if looks_like_path:
+        # Path-traversal guard. Reject ../escape and absolute paths outside
+        # cwd before any filesystem read. Allow non-existent paths to fall
+        # through to inline only if the path was a plain relative name (no
+        # ``..`` segments and not absolute) — that's the spec'd behavior.
+        is_absolute = stripped.startswith("/")
+        has_traversal = ".." in stripped.split("/")
+        if is_absolute or has_traversal:
+            resolved = _path_inside_cwd(stripped, cwd_resolved)
+            if resolved is None:
+                return _ResolvedTarget(
+                    kind="file",
+                    text="",
+                    error=(
+                        f"path is outside the project cwd: {stripped!r}"
+                    ),
+                )
+        else:
+            resolved = _path_inside_cwd(stripped, cwd_resolved)
+
+        if resolved is not None and resolved.exists() and resolved.is_file():
+            if _path_forbidden(resolved):
+                return _ResolvedTarget(
+                    kind="file",
+                    text="",
+                    error=(
+                        f"path matches a forbidden pattern "
+                        f"(env/credential/secret): {stripped!r}"
+                    ),
+                )
+            try:
+                def _read():
+                    with open(resolved, "rb") as fh:
+                        return fh.read(CODE_REVIEW_TARGET_MAX_BYTES + 1)
+
+                data = await asyncio.to_thread(_read)
+            except (OSError, PermissionError) as exc:
+                return _ResolvedTarget(
+                    kind="file",
+                    text="",
+                    error=f"read failed: {exc}",
+                )
+            text, truncated = _truncate(data, CODE_REVIEW_TARGET_MAX_BYTES)
+            return _ResolvedTarget(
+                kind="file", text=text, truncated=truncated, error=None,
+            )
+        # Path-shaped string but file doesn't exist → fall through to
+        # inline (per spec). ``stripped`` is the inline content.
+
+    # --- Branch 2: git range ---
+    if _looks_like_git_range(stripped):
+        # Normalize a bare HEAD / HEAD~N into a range so ``git diff`` works.
+        if _GIT_HEAD_REF_RE.match(stripped):
+            range_arg = f"{stripped}..HEAD" if stripped != "HEAD" else "HEAD~1..HEAD"
+        else:
+            range_arg = stripped
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(cwd_resolved), "diff", range_arg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_clean_subprocess_env(),
+            )
+        except OSError as exc:
+            # Fall through to inline — git wasn't usable.
+            logger.warning("code_review: git spawn failed: %s", exc)
+        else:
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=TOOL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+                return _ResolvedTarget(
+                    kind="git_range",
+                    text="",
+                    error=f"git diff timed out after {TOOL_TIMEOUT_S:.0f}s",
+                )
+            except asyncio.CancelledError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=0.5))
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+                raise
+            if proc.returncode == 0:
+                text, truncated = _truncate(stdout, CODE_REVIEW_TARGET_MAX_BYTES)
+                if not text.strip():
+                    text = "(no diff — range is empty)"
+                return _ResolvedTarget(
+                    kind="git_range", text=text, truncated=truncated, error=None,
+                )
+            # Non-zero — fall through to inline. (e.g. unknown ref)
+            err_text, _ = _truncate(stderr, 1024)
+            logger.info(
+                "code_review: git diff %r exit=%d stderr=%s",
+                range_arg, proc.returncode, err_text[:200],
+            )
+
+    # --- Branch 3: inline (fallthrough) ---
+    raw = stripped.encode("utf-8", errors="replace")
+    text, truncated = _truncate(raw, CODE_REVIEW_TARGET_MAX_BYTES)
+    return _ResolvedTarget(kind="inline", text=text, truncated=truncated, error=None)
+
+
+_FOCUS_DESCRIPTIONS: dict[str, str] = {
+    "general": "correctness, readability, obvious issues",
+    "security": (
+        "security vulnerabilities, auth gaps, injection vectors, "
+        "credential exposure"
+    ),
+    "performance": "hot paths, async mistakes, query patterns, memory churn",
+    "spec": "completeness, ambiguity, edge cases, missing requirements",
+    "architecture": (
+        "coupling, separation of concerns, scalability, design smells"
+    ),
+}
+
+
+def _build_code_review_prompt(
+    target: str, resolved: _ResolvedTarget, focus: str,
+) -> str:
+    """Build the prompt fed to Pro on Vertex.
+
+    Pro returns a structured review (Critical / High-priority / Suggestions /
+    What's done well) so the Live brain can read it back to the owner with
+    minimal massaging. The path/range header is omitted for inline content
+    since the target IS the content.
+    """
+    angle = _FOCUS_DESCRIPTIONS.get(focus, _FOCUS_DESCRIPTIONS["general"])
+    header_lines = [
+        f"Review the following artifact for {angle}.",
+        "",
+        f"Target type: {resolved.kind}",
+    ]
+    if resolved.kind != "inline":
+        header_lines.append(f"Path/range: {target}")
+    if resolved.truncated:
+        header_lines.append(
+            f"(truncated at {CODE_REVIEW_TARGET_MAX_BYTES} bytes — head slice only)"
+        )
+    header_lines.append("")
+    header_lines.append("Content:")
+    header_lines.append("```")
+    header_lines.append(resolved.text)
+    header_lines.append("```")
+    header_lines.append("")
+    header_lines.append(
+        "Return structured feedback in this format:\n"
+        "- **Critical issues** (bullets, with file:line if applicable)\n"
+        "- **High-priority issues** (bullets)\n"
+        "- **Suggestions** (bullets)\n"
+        "- **What's done well** (1-2 lines)\n"
+        "\n"
+        "Be specific. No filler. If there's nothing to flag in a category, "
+        "say \"(none)\"."
+    )
+    return "\n".join(header_lines)
+
+
+async def execute_code_review(
+    target: str,
+    *,
+    cwd: Path,
+    scope: str,
+    system_prompt_append: str = "",
+    focus: str = "general",
+) -> ToolResult:
+    """Resolve target → call gemini_brain.stream (Pro) → return review text.
+
+    Three resolution branches (file path / git range / inline) are handled
+    by ``_resolve_review_target``. The Pro call runs through the existing
+    ``gemini_brain.stream`` so we get the same auth + retry + cancellation
+    posture as the conversational pipeline.
+
+    Cost: a separate ``record_code_review_cost`` row keeps the daily-cap
+    math aware of this specialist spend without polluting the active voice
+    session's token accounting (which would falsely tag Pro tokens onto a
+    row whose model column says ``gemini-live-2.5-flash-native-audio``).
+
+    Cancellation: the outer 45s timeout is the wall-clock cap; an
+    asyncio.CancelledError from a barge-in propagates without retry.
+    """
+    if not isinstance(target, str) or not target.strip():
+        return ToolResult(output="error: target is required", error=True)
+
+    chosen_focus = focus if focus in _FOCUS_DESCRIPTIONS else "general"
+
+    resolved = await _resolve_review_target(target, cwd)
+    if resolved.error:
+        return ToolResult(
+            output=f"error: {resolved.error}",
+            error=True,
+        )
+    if not resolved.text.strip():
+        return ToolResult(
+            output="error: target resolved to empty content",
+            error=True,
+        )
+
+    review_prompt = _build_code_review_prompt(target, resolved, chosen_focus)
+
+    # Capture the streamed reply into a buffer so we can return it as a
+    # single ToolResult.output string. The send_token / send_tts_sentence
+    # callbacks gemini_brain expects are no-ops here — code_review is a
+    # specialist call, not a user-facing voice turn; the Live brain reads
+    # the result back as Chief's reply.
+    text_buf: list[str] = []
+
+    async def _capture_token(token: str) -> None:
+        text_buf.append(token)
+
+    async def _noop_sentence(_: str) -> None:
+        return None
+
+    # Lazy import — keeps the module import-safe in environments without
+    # google-genai installed (parity with think_deep / dispatch_agent).
+    from services import gemini_brain
+
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(CODE_REVIEW_TIMEOUT_S):
+            usage = await gemini_brain.stream(
+                history=[],
+                user_text=review_prompt,
+                system_prompt=(
+                    "You are a senior software reviewer. Be specific and "
+                    "terse. Cite file:line when applicable. Prefer concrete "
+                    "fixes over abstract critique."
+                ),
+                send_token=_capture_token,
+                send_tts_sentence=_noop_sentence,
+                send_tool_call=None,
+                cwd=cwd,
+                subject="owner",
+                scope=scope,
+                system_prompt_append=system_prompt_append,
+                max_output_tokens=CODE_REVIEW_MAX_OUTPUT_TOKENS,
+            )
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - started
+        logger.warning(
+            "code_review: timed out after %.1fs (target_kind=%s focus=%s)",
+            elapsed, resolved.kind, chosen_focus,
+        )
+        return ToolResult(
+            output=f"error: code_review timed out after {elapsed:.0f}s",
+            error=True,
+        )
+    except asyncio.CancelledError:
+        # Outer turn cancelled (barge-in). The SDK iterator inside
+        # gemini_brain.stream tears itself down on its own; just propagate.
+        raise
+    except Exception as exc:
+        logger.exception("code_review: gemini_brain.stream failed: %s", exc)
+        return ToolResult(
+            output="error: code_review failed",
+            error=True,
+        )
+
+    output = "".join(text_buf).strip()
+    if not output:
+        # Some Pro replies arrive on assistant_text rather than streamed
+        # tokens (rare; usually empty-output guard fires upstream). Pull
+        # from the usage dict as a fallback before declaring failure.
+        if isinstance(usage, dict):
+            assistant_text = usage.get("assistant_text") or ""
+            if isinstance(assistant_text, str):
+                output = assistant_text.strip()
+    if not output:
+        return ToolResult(
+            output="error: code_review returned empty text",
+            error=True,
+        )
+
+    # Record the specialist cost. Same shape as record_think_deep_cost —
+    # synthetic bookkeeping session so daily-cap math sums it without
+    # contaminating the voice session's token columns.
+    try:
+        if isinstance(usage, dict):
+            from services.usage_tracker import record_code_review_cost
+            await record_code_review_cost(
+                model=usage.get("model") or CODE_REVIEW_MODEL,
+                scope=scope,
+                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                output_tokens=int(usage.get("output_tokens", 0) or 0),
+                cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
+                prompt=review_prompt,
+                assistant_text=output,
+            )
+    except Exception as exc:
+        logger.warning("code_review: cost recording failed: %s", exc)
+
+    return ToolResult(output=output, error=False, truncated=resolved.truncated)
+
+
+# ---------------------------------------------------------------------------
 # dispatch_agent — async CC subprocess spawn via cc_session pool
 # ---------------------------------------------------------------------------
 async def execute_dispatch_agent(
@@ -847,6 +1303,18 @@ async def dispatch_tool(
             scope=scope,
             model=args.get("model") or THINK_DEEP_DEFAULT_MODEL,
         )
+    if name == "code_review":
+        # code_review CAN touch the filesystem (file-path branch) so the
+        # cwd guard above is load-bearing. ``focus`` is enum-validated
+        # inside the executor; an arbitrary string from a misbehaving model
+        # is silently downgraded to "general".
+        return await execute_code_review(
+            target=args.get("target") or "",
+            cwd=cwd,
+            scope=scope,
+            system_prompt_append=system_prompt_append,
+            focus=args.get("focus") or "general",
+        )
     return ToolResult(output=f"error: unknown tool {name!r}", error=True)
 
 
@@ -918,6 +1386,9 @@ def _clean_subprocess_env() -> dict[str, str]:
 __all__ = [
     "ALL_TOOLS",
     "BASH_TOOL",
+    "CODE_REVIEW_MODEL",
+    "CODE_REVIEW_TIMEOUT_S",
+    "CODE_REVIEW_TOOL",
     "DISPATCH_AGENT_TOOL",
     "GREP_TOOL",
     "READ_TOOL",
@@ -929,6 +1400,7 @@ __all__ = [
     "ToolSchema",
     "dispatch_tool",
     "execute_bash",
+    "execute_code_review",
     "execute_dispatch_agent",
     "execute_grep",
     "execute_read",

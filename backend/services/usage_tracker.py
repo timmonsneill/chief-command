@@ -365,6 +365,71 @@ async def record_think_deep_cost(
         return {"cost_cents": 0}
 
 
+async def record_code_review_cost(
+    *,
+    model: str,
+    scope: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    prompt: str = "",
+    assistant_text: str = "",
+) -> dict:
+    """Persist a code_review call as a standalone turn row.
+
+    Mirrors record_think_deep_cost but tags the synthetic session with
+    ``code-review-bookkeeping`` and uses the gemini-2.5-pro pricing row.
+    Same rationale: code_review fires from inside the Live brain's tool-call
+    loop, but the WS layer's main turn-recording path bills the Live
+    native-audio cost — Pro side-call cost would otherwise vanish from the
+    daily-cap math.
+
+    Best-effort: any error is logged + swallowed so a billing failure
+    can't break the user-facing reply.
+    """
+    sid = "code-review-bookkeeping"
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT id FROM sessions WHERE id = ?", (sid,))
+            row = await cur.fetchone()
+            if row is None:
+                await db.execute(
+                    """INSERT INTO sessions
+                       (id, user_id, started_at, total_cost_cents, turn_count, project)
+                       VALUES (?, ?, ?, 0, 0, ?)""",
+                    (sid, "owner", _now_iso(), scope),
+                )
+                await db.commit()
+    except Exception as exc:
+        logger.warning("record_code_review_cost: session bootstrap failed: %s", exc)
+        return {"cost_cents": 0}
+
+    usage = {
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "cache_read_input_tokens": int(cache_read_tokens or 0),
+        "cache_creation_input_tokens": int(cache_creation_tokens or 0),
+    }
+    try:
+        turn = await record_turn(
+            session_id=sid,
+            model=model,
+            usage_dict=usage,
+            user_text=prompt[:2000],
+            assistant_text=assistant_text[:4000],
+        )
+        logger.info(
+            "code_review cost recorded model=%s scope=%s in=%d out=%d cents=%d",
+            model, scope, usage["input_tokens"], usage["output_tokens"],
+            turn.get("cost_cents", 0),
+        )
+        return turn
+    except Exception as exc:
+        logger.warning("record_code_review_cost: record_turn failed: %s", exc)
+        return {"cost_cents": 0}
+
+
 # Soft-warning threshold expressed as a fraction of the hard cap. 0.80 →
 # fire ``cost_warning`` once per WS connection when today's spend crosses
 # 80% of the daily cap so the owner sees a heads-up before the hard close

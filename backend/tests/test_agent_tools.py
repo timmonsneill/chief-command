@@ -499,19 +499,21 @@ class TestExecuteDispatchAgent:
 # Gemini adapter
 # ---------------------------------------------------------------------------
 class TestGeminiAdapter:
-    def test_to_gemini_declarations_returns_five(self):
+    def test_to_gemini_declarations_returns_six(self):
         # Stage 3 of Live pivot added think_deep as the fifth tool.
+        # Stage 5 added code_review (Pro on Vertex specialist) as the sixth.
         decls = to_gemini_declarations()
-        assert len(decls) == 5
+        assert len(decls) == 6
         names = [d.name for d in decls]
         assert set(names) == {
             "Read", "Bash", "Grep", "dispatch_agent", "think_deep",
+            "code_review",
         }
 
     def test_to_gemini_tool_packages_them(self):
         tool = to_gemini_tool()
         assert tool.function_declarations is not None
-        assert len(tool.function_declarations) == 5
+        assert len(tool.function_declarations) == 6
 
     def test_read_declaration_has_required_path(self):
         decls = to_gemini_declarations()
