@@ -381,7 +381,8 @@ async def test_tts_char_tally_excludes_failed_synthesis(
 
     # build_chief_system is called via to_thread — return a simple blob.
     monkeypatch.setattr(
-        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+        ws_mod, "build_chief_system",
+        lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
     )
 
     # synthesize_stream: raise on the first sentence, yield on the second.
@@ -491,7 +492,8 @@ async def test_run_llm_turn_records_voice_usage_on_cancel_midstream(
 
     monkeypatch.setattr(ws_mod, "stream_turn", slow_stream_turn)
     monkeypatch.setattr(
-        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+        ws_mod, "build_chief_system",
+        lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
     )
 
     # synthesize_stream succeeds quickly so the first sentence's chars do
@@ -611,7 +613,8 @@ async def test_run_llm_turn_skips_partial_billing_on_clean_success(
 
     monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
     monkeypatch.setattr(
-        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+        ws_mod, "build_chief_system",
+        lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
     )
 
     async def fast_synth(sentence: str, **_: Any):
@@ -890,7 +893,8 @@ async def test_run_llm_turn_no_double_write_when_cancel_after_record_turn(
 
     monkeypatch.setattr(ws_mod, "stream_turn", fake_stream_turn)
     monkeypatch.setattr(
-        ws_mod, "build_chief_system", lambda scope: [{"type": "text", "text": "x"}],
+        ws_mod, "build_chief_system",
+        lambda scope, prior_summary=None: [{"type": "text", "text": "x"}],
     )
 
     async def fast_synth(sentence: str, **_: Any):

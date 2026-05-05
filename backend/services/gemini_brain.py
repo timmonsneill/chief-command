@@ -74,6 +74,16 @@ DEFAULT_MAX_OUTPUT_TOKENS: int = 1024
 ARG_SUMMARY_MAX_CHARS: int = 200
 TOOL_PREVIEW_MAX_CHARS: int = 240
 
+# Cap on the synthetic "[tool: ...]" note we emit per tool round so cross-
+# session tool memory survives a reconnect (Phase 3). Each note carries:
+# the tool name, a one-line arg summary, and a short preview of the
+# output. Short by design — these land in voice_turns and the next
+# reconnect's history; we want the model to see "I ran git log -5, top
+# commit was abc123" not the full 50KB stdout.
+TOOL_NOTE_MAX_CHARS: int = 160
+TOOL_NOTE_ARG_CHARS: int = 60
+TOOL_NOTE_PREVIEW_CHARS: int = 80
+
 
 UsageRecord = dict
 
@@ -247,6 +257,7 @@ async def stream(
     send_token: Callable[[str], Awaitable[None]],
     send_tts_sentence: Callable[[str], Awaitable[None]],
     send_tool_call: Optional[Callable[[dict], Awaitable[None]]] = None,
+    on_tool_round_complete: Optional[Callable[[str], Awaitable[None]]] = None,
     cwd: Path,
     subject: str,
     scope: str,
@@ -268,6 +279,13 @@ async def stream(
       send_tool_call:   Optional coroutine emitting a tool-chip WS frame
                         ``{"type":"tool_call", "name":..., "args":..., "status":...}``.
                         Called once on tool start and once on tool end.
+      on_tool_round_complete: Optional coroutine invoked once after each
+                        completed tool round with a single argument: a
+                        compact synthetic ``[tool: ...]`` note string.
+                        Caller is expected to append this note to the
+                        WS-layer history list AND persist it via
+                        ``history_store.append_turn(role="assistant", ...)``
+                        so cross-reconnect tool memory survives.
       cwd:              Active scope's repo path. Passed to every tool.
       subject:          JWT subject — keys the dispatch_agent CC pool.
       scope:            Active scope — keys the dispatch_agent CC pool.
@@ -584,6 +602,37 @@ async def stream(
             contents.append(
                 _build_tool_response_content(pending_function_calls, tool_results)
             )
+
+            # Phase 3: synthetic tool-round note. Build one note PER tool
+            # call in this round and hand each to the WS layer's
+            # on_tool_round_complete callback (if provided). The WS layer
+            # is responsible for appending to in-memory history AND
+            # persisting via history_store.append_turn so cross-reconnect
+            # tool memory survives. Failures are logged + swallowed —
+            # missing a note row should never break the turn.
+            if on_tool_round_complete is not None:
+                for fcall, result in zip(pending_function_calls, tool_results):
+                    try:
+                        raw_args = getattr(fcall, "args", None) or {}
+                        try:
+                            args_dict = dict(raw_args)
+                        except Exception:
+                            args_dict = {}
+                        note = _build_tool_note(
+                            tool_name=fcall.name,
+                            args=args_dict,
+                            output=getattr(result, "output", "") or "",
+                            error=bool(getattr(result, "error", False)),
+                        )
+                        await on_tool_round_complete(note)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "gemini_brain: on_tool_round_complete raised: %s", exc
+                        )
+
             # Loop and let Gemini speak its post-tool reply.
         else:
             # Tool-loop guard fired. Surface a one-line message; the partial
@@ -648,6 +697,67 @@ def _preview(output: str) -> str:
     if len(output) <= TOOL_PREVIEW_MAX_CHARS:
         return output
     return output[:TOOL_PREVIEW_MAX_CHARS] + "..."
+
+
+def _build_tool_note(
+    tool_name: str,
+    args: dict[str, Any],
+    output: str,
+    error: bool,
+) -> str:
+    """Build a one-line synthetic note describing a tool round.
+
+    Format: ``[tool: <name> · <arg-snippet> · <output-preview>]``
+
+    The note is persisted to ``voice_turns`` as an assistant-role row so
+    cross-session tool memory survives a reconnect. We deliberately keep
+    it terse (no raw paths, single-line output preview) so it doesn't
+    pollute the rolling history with stdout dumps.
+
+    Sensitive paths from raw output are NOT scrubbed beyond the size cap;
+    callers (Read/Bash/Grep dispatchers) already path-fence to scope cwd,
+    and the brain's previous chip-render path emits the same preview text
+    to the user. This note carries the same surface as the chip preview,
+    not anything new.
+    """
+    # Pick the most informative arg key for the snippet. Most tools have a
+    # primary string arg; fall back to a compact dict repr otherwise.
+    arg_snippet = ""
+    for primary in ("command", "file_path", "pattern", "task_description"):
+        v = args.get(primary)
+        if isinstance(v, str) and v:
+            arg_snippet = v
+            break
+    if not arg_snippet and args:
+        # Compact fallback — first string arg we find.
+        for v in args.values():
+            if isinstance(v, str) and v:
+                arg_snippet = v
+                break
+    if len(arg_snippet) > TOOL_NOTE_ARG_CHARS:
+        arg_snippet = arg_snippet[:TOOL_NOTE_ARG_CHARS] + "..."
+
+    # Output preview — collapse newlines to a single line, cap length.
+    preview = ""
+    if isinstance(output, str) and output:
+        first_line = output.replace("\r", "").split("\n", 1)[0].strip()
+        if len(first_line) > TOOL_NOTE_PREVIEW_CHARS:
+            first_line = first_line[:TOOL_NOTE_PREVIEW_CHARS] + "..."
+        preview = first_line
+
+    status = "error" if error else "ok"
+    parts = [f"tool: {tool_name}"]
+    if arg_snippet:
+        parts.append(arg_snippet)
+    if preview:
+        parts.append(f"{status}: {preview}")
+    elif error:
+        parts.append("error")
+    note = "[" + " · ".join(parts) + "]"
+
+    if len(note) > TOOL_NOTE_MAX_CHARS:
+        note = note[: TOOL_NOTE_MAX_CHARS - 1] + "]"
+    return note
 
 
 __all__ = [

@@ -29,6 +29,14 @@ PRICING_PER_MTOK = {
     #   text output                    $10.00 / 1M
     # Audio input doesn't apply — text-mode only in Phase 2.
     "gemini-2.5-pro":    {"in": 1.25, "out": 10.00, "cached_in": 0.31},
+    # Phase 3 — Gemini 2.5 Flash powers the rolling-summary writer
+    # (services.memory_rollup). Brain stays Pro; Flash is cheap enough that
+    # firing it per-rollup (every ~30 turns) is essentially free at owner
+    # usage volumes. Pricing per Vertex AI public rate card (early 2026):
+    #   text input         $0.30 / 1M
+    #   cached text input  $0.075 / 1M
+    #   text output        $2.50 / 1M
+    "gemini-2.5-flash":  {"in": 0.30, "out": 2.50,  "cached_in": 0.075},
 }
 
 # ---------------------------------------------------------------------------

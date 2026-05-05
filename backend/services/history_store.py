@@ -58,6 +58,29 @@ CREATE TABLE IF NOT EXISTS voice_turns (
 
 CREATE INDEX IF NOT EXISTS idx_voice_turns_session_id
     ON voice_turns (session_id, id);
+
+-- Phase 3: rolling cross-session memory.
+--
+-- Each row captures a compressed summary of the conversation from the
+-- start (or the previous summary's watermark) up through
+-- ``covers_through_turn_id`` of ``voice_turns``. A project's ``latest``
+-- summary is the row with the largest ``id`` for that project. Older
+-- rows are kept for audit / rebuild but never read on the hot path.
+--
+-- ``session_id`` is nullable on purpose: a rollup spans whatever sessions
+-- existed inside the watermark range (often more than one).
+CREATE TABLE IF NOT EXISTS voice_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    session_id TEXT,
+    summary_text TEXT NOT NULL,
+    covers_through_turn_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_summaries_project_created
+    ON voice_summaries (project, created_at DESC);
 """
 
 
@@ -153,6 +176,181 @@ async def load_recent(session_id: str, limit: int = 50) -> list[dict]:
     finally:
         await db.close()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — voice_summaries: rolling cross-session memory.
+# ---------------------------------------------------------------------------
+async def _do_append_summary(
+    project: str,
+    session_id: Optional[str],
+    summary_text: str,
+    covers_through_turn_id: int,
+    model: str,
+) -> None:
+    db = await _connect()
+    try:
+        await db.execute(
+            """INSERT INTO voice_summaries
+                 (project, session_id, summary_text, covers_through_turn_id,
+                  model, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                project,
+                session_id,
+                summary_text,
+                covers_through_turn_id,
+                model,
+                _now_iso(),
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def append_summary(
+    project: str,
+    session_id: Optional[str],
+    summary_text: str,
+    covers_through_turn_id: int,
+    model: str,
+) -> None:
+    """Persist a new rolling summary row for a project.
+
+    Wrapped in ``asyncio.shield`` so a barge-in cancel landing on the rollup
+    task can't tear the row mid-commit. ``covers_through_turn_id`` is the
+    largest ``voice_turns.id`` included in the rolled-up window — used by
+    ``turns_since_summary`` to count incremental work.
+    """
+    if not summary_text:
+        return
+    await asyncio.shield(
+        _do_append_summary(
+            project, session_id, summary_text, covers_through_turn_id, model,
+        )
+    )
+
+
+async def latest_summary(project: str) -> Optional[dict]:
+    """Return the most recent summary row for ``project`` or ``None``.
+
+    Shape: ``{"id", "project", "session_id", "summary_text",
+    "covers_through_turn_id", "model", "created_at"}``. Used to (a)
+    inject prior summary into the next system prompt, and (b) seed the
+    next rollup so we don't re-summarize already-rolled turns.
+    """
+    db = await _connect()
+    try:
+        cur = await db.execute(
+            """SELECT id, project, session_id, summary_text,
+                      covers_through_turn_id, model, created_at
+               FROM voice_summaries
+               WHERE project = ?
+               ORDER BY id DESC
+               LIMIT 1""",
+            (project,),
+        )
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "project": row["project"],
+        "session_id": row["session_id"],
+        "summary_text": row["summary_text"],
+        "covers_through_turn_id": row["covers_through_turn_id"],
+        "model": row["model"],
+        "created_at": row["created_at"],
+    }
+
+
+async def turns_since_summary(project: str) -> int:
+    """Count voice_turns rows newer than the project's latest summary.
+
+    Returns the full count of rows for ``project`` when no summary exists.
+    Drives the rollup-trigger decision in ``memory_rollup.maybe_rollup``.
+    """
+    db = await _connect()
+    try:
+        cur = await db.execute(
+            """SELECT COALESCE(MAX(covers_through_turn_id), 0) AS watermark
+               FROM voice_summaries
+               WHERE project = ?""",
+            (project,),
+        )
+        row = await cur.fetchone()
+        watermark = int(row["watermark"]) if row else 0
+
+        cur = await db.execute(
+            """SELECT COUNT(*) AS n FROM voice_turns
+               WHERE project = ? AND id > ?""",
+            (project, watermark),
+        )
+        row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+    finally:
+        await db.close()
+
+
+async def turns_to_rollup(
+    project: str,
+    since_turn_id: int,
+    limit: int = 80,
+) -> list[dict]:
+    """Return role/content/id rows for ``project`` newer than ``since_turn_id``.
+
+    Used by the rollup writer to feed Flash a chronological transcript of
+    just the new work. Results are oldest-first (chronological). ``limit``
+    is a safety cap so a runaway gap doesn't dump 10k rows into a single
+    Flash call.
+
+    Each entry includes ``id`` so the caller can record the highest id as
+    the new ``covers_through_turn_id`` watermark.
+    """
+    if limit <= 0:
+        return []
+    db = await _connect()
+    try:
+        cur = await db.execute(
+            """SELECT id, role, content FROM voice_turns
+               WHERE project = ? AND id > ?
+               ORDER BY id ASC
+               LIMIT ?""",
+            (project, since_turn_id, limit),
+        )
+        rows = await cur.fetchall()
+    finally:
+        await db.close()
+    return [
+        {"id": r["id"], "role": r["role"], "content": r["content"]}
+        for r in rows
+    ]
+
+
+async def latest_turn_id(project: str) -> Optional[int]:
+    """Return the highest ``voice_turns.id`` for ``project`` or ``None``.
+
+    Used by the rollup writer to set ``covers_through_turn_id`` when it
+    can't read individual ids back (e.g. a cap-truncated rollup window
+    where we still want the watermark to advance to the actual newest
+    row, not the cap row).
+    """
+    db = await _connect()
+    try:
+        cur = await db.execute(
+            """SELECT MAX(id) AS max_id FROM voice_turns
+               WHERE project = ?""",
+            (project,),
+        )
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    if row is None or row["max_id"] is None:
+        return None
+    return int(row["max_id"])
 
 
 async def load_recent_for_project(

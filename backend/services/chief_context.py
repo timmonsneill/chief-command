@@ -349,24 +349,36 @@ def _estimate_tokens(blocks: list[dict]) -> int:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def build_chief_system(project_scope: str) -> list[dict]:
+def build_chief_system(
+    project_scope: str,
+    prior_summary: str | None = None,
+) -> list[dict]:
     """Return Anthropic system-message blocks that make Claude into Chief.
 
     ``project_scope`` must be a concrete canonical project name (one of
     ``AVAILABLE_PROJECTS``). It is never None, never "All", never empty.
+
+    ``prior_summary`` is the optional rolling cross-session memory blob
+    produced by ``services.memory_rollup``. When supplied, a
+    ``# Conversation So Far`` block is injected between the user-profile
+    block and the agent roster + project memory — same authority level as
+    the agent roster, so the brain treats it as ambient context not
+    instruction. When ``None`` (no prior summary written yet for this
+    project) the block is omitted entirely; the existing 4-block layout is
+    unchanged.
 
     Anthropic caps us at **4 cache_control breakpoints** per request, so we
     group the content into up to 4 logical cached blocks:
 
       1. Chief identity + voice style                              (breakpoint)
       2. User profile + house rules + user-level project notes     (breakpoint)
-      3. Agent roster + scoped project memory                      (breakpoint)
+      3. Agent roster + conversation_so_far + scoped project memory(breakpoint)
       4. Current project scope hint                                (breakpoint)
 
-    Blocks are deterministic for the same (scope, file contents) pair so the
-    cache hits on subsequent turns. Content for one scope never leaks into
-    another scope — we only load the project memory dir(s) whose canonical
-    name matches ``project_scope`` exactly.
+    Blocks are deterministic for the same (scope, file contents,
+    prior_summary) pair so the cache hits on subsequent turns. Content for
+    one scope never leaks into another scope — we only load the project
+    memory dir(s) whose canonical name matches ``project_scope`` exactly.
     """
     if not project_scope or not project_scope.strip():
         # Defensive — should never happen. Upstream fixes (per-subject context
@@ -395,23 +407,43 @@ def build_chief_system(project_scope: str) -> list[dict]:
 
     total_scoped = len(scoped_files)
     kept_files = _enforce_budget_by_file(scoped_files, project_scope)
-    blocks = _assemble_blocks(kept_files, project_scope)
+    blocks = _assemble_blocks(kept_files, project_scope, prior_summary=prior_summary)
     total_tokens = _estimate_tokens(blocks)
     logger.info(
         "chief_context: built %d system blocks, ~%d tokens "
-        "(scope=%s, %d/%d scoped files kept)",
+        "(scope=%s, %d/%d scoped files kept, prior_summary=%s)",
         len(blocks),
         total_tokens,
         project_scope,
         len(kept_files),
         total_scoped,
+        "yes" if prior_summary else "no",
     )
     return blocks
+
+
+def _build_conversation_so_far(prior_summary: str) -> str:
+    """Render the rolling-summary memory block.
+
+    Provenance-fenced (``conversation_so_far`` tag) so the brain treats it
+    as data, mirroring how ``_provenance_wrap`` handles every other memory
+    body. The ``note`` attribute makes the lossy-summary nature explicit so
+    the brain doesn't quote it as authoritative.
+    """
+    body = prior_summary.strip()
+    return (
+        "# Conversation So Far\n\n"
+        '<conversation_so_far note="auto-summarized; may be lossy">\n'
+        + body
+        + "\n</conversation_so_far>\n"
+    )
 
 
 def _assemble_blocks(
     kept_files: list[tuple[Path, float]],
     project_scope: str,
+    *,
+    prior_summary: str | None = None,
 ) -> list[dict]:
     """Turn the kept scoped files + fixed memory bits into at most 4 cached blocks."""
     # Block 1: identity.
@@ -424,10 +456,15 @@ def _assemble_blocks(
     part2_pieces = [p for p in (profile_md, feedback_md, user_notes_md) if p]
     profile_block = _block("\n\n".join(part2_pieces)) if part2_pieces else None
 
-    # Block 3: agent roster + scoped project memory.
+    # Block 3: agent roster + conversation_so_far + scoped project memory.
+    # Conversation summary sits between roster and project memory so it
+    # reads as ambient context (alongside the agent layer) rather than as
+    # an instruction. When prior_summary is None / blank we drop the block
+    # entirely — no empty fence.
     roster_md = _build_agent_roster()
+    convo_md = _build_conversation_so_far(prior_summary) if prior_summary and prior_summary.strip() else ""
     project_md = _render_project_block(project_scope, kept_files)
-    part3_pieces = [p for p in (roster_md, project_md) if p]
+    part3_pieces = [p for p in (roster_md, convo_md, project_md) if p]
     projects_block = _block("\n\n".join(part3_pieces)) if part3_pieces else None
 
     # Block 4: scope hint (always present now that scope is always concrete).
@@ -473,6 +510,12 @@ def _enforce_budget_by_file(
     Files are evicted one-by-one from the tail (oldest mtime first, since
     ``files`` is newest-first). This preserves recent notes when a scope has
     more memory than the budget allows.
+
+    NOTE: budgeting is deliberately computed against ``_assemble_blocks(...)``
+    WITHOUT ``prior_summary`` injection. The summary is at most ~600 tokens
+    (``MAX_SUMMARY_TOKENS``), which is well under the 40k budget headroom we
+    leave per scope, and fluctuating its presence per call would otherwise
+    cause file-eviction churn between turns.
     """
     kept = list(files)
     if _estimate_tokens(_assemble_blocks(kept, project_scope)) <= _MAX_PROMPT_TOKENS:
@@ -497,7 +540,10 @@ def estimate_prompt_tokens(project_scope: str) -> int:
     return _estimate_tokens(build_chief_system(project_scope))
 
 
-def build_chief_system_string(project_scope: str) -> str:
+def build_chief_system_string(
+    project_scope: str,
+    prior_summary: str | None = None,
+) -> str:
     """Flatten the Anthropic-shaped block list into a single string.
 
     Used by providers that take a single ``system_instruction`` parameter
@@ -506,9 +552,9 @@ def build_chief_system_string(project_scope: str) -> str:
     optimization, so concatenating with ``\\n\\n`` between blocks preserves
     everything Gemini needs to be Chief.
 
-    Identical to calling ``build_chief_system(project_scope)`` and joining
-    each block's ``text`` field. We keep the underlying builder unchanged so
-    Anthropic-cached calls still hit identical bytes.
+    Identical to calling ``build_chief_system(project_scope, prior_summary=...)``
+    and joining each block's ``text`` field. We keep the underlying builder
+    unchanged so Anthropic-cached calls still hit identical bytes.
     """
-    blocks = build_chief_system(project_scope)
+    blocks = build_chief_system(project_scope, prior_summary=prior_summary)
     return "\n\n".join(b.get("text", "") for b in blocks if b.get("text"))

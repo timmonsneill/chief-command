@@ -21,8 +21,9 @@ from services.chief_context import build_chief_system
 # task chip's red X still calls _route_cancel directly).
 from services.dispatcher import TaskDispatcher, TaskAlreadyRunning
 from services.gemini_brain import GEMINI_MODEL
-from services.history_store import append_turn, load_recent_for_project
+from services.history_store import append_turn
 from services.llm import stream_turn
+from services.memory_rollup import load_persistent_memory, maybe_rollup
 from services.project_context import (
     AVAILABLE_PROJECTS,
     DEFAULT_PROJECT,
@@ -195,6 +196,11 @@ async def voice_ws(ws: WebSocket) -> None:
 
     session_id: Optional[str] = None
     history: list[dict] = []
+    # Phase 3: rolling cross-session memory. Loaded alongside ``history``
+    # at WS open and refreshed lazily after rollups land. Passed into the
+    # system-prompt builder so Chief picks up cross-session context that
+    # the raw 20-turn window would miss.
+    current_summary: Optional[str] = None
 
     # Per-subject scope keying. The in-memory ``_context_store`` is a
     # module-level dict; before this fix it was keyed by the hardcoded literal
@@ -279,16 +285,26 @@ async def voice_ws(ws: WebSocket) -> None:
     # deliberately do NOT resume the prior session_id — a fresh uuid is
     # allocated on the first turn (via ensure_session) so usage tracking
     # doesn't attribute turns to a ghost session row. Hawke CRITICAL 2026-04-20.
+    #
+    # Phase 3: ``load_persistent_memory`` returns BOTH the latest rolling
+    # summary (if any) AND the recent raw window. The summary is injected
+    # into the system prompt by ``_run_llm_turn``; the raw window stays as
+    # the brain's history kwarg so token-level continuity is preserved.
     try:
-        history = await load_recent_for_project(current_project, limit=20)
+        current_summary, history = await load_persistent_memory(
+            current_project, raw_limit=20,
+        )
         logger.info(
-            "voice_ws hydrated scope=%s history_turns=%d (fresh session)",
+            "voice_ws hydrated scope=%s history_turns=%d summary=%s "
+            "(fresh session)",
             current_project, len(history),
+            "yes" if current_summary else "no",
         )
     except Exception as exc:
         # Best-effort: a broken DB shouldn't 500 the WS.
         logger.warning("voice_ws history rehydrate failed: %s", exc)
         history = []
+        current_summary = None
     # TTS speed multiplier. Applied server-side via Google's `speaking_rate` so
     # the audio is time-stretched without pitch shift. Frontend must NOT apply
     # playbackRate on top — that would re-introduce the chipmunk effect.
@@ -488,6 +504,7 @@ async def voice_ws(ws: WebSocket) -> None:
                 ) -> None:
                     await _await_context_gate()
                     scope = current_project  # re-read AFTER gate opens
+                    summary = current_summary  # Phase 3: snapshot at call time
                     logger.info(
                         "Voice WS handling text turn session=%s len=%d scope=%s",
                         sid, len(text_content), scope,
@@ -495,6 +512,7 @@ async def voice_ws(ws: WebSocket) -> None:
                     await _route_user_turn(
                         ws, sid, history, text_content, scope, speed,
                         subject=cid,
+                        prior_summary=summary,
                     )
                 current_turn_task = asyncio.create_task(_gated_text_turn())
 
@@ -552,6 +570,7 @@ async def voice_ws(ws: WebSocket) -> None:
                 ) -> None:
                     await _await_context_gate()
                     scope = current_project  # re-read AFTER gate opens
+                    summary = current_summary  # Phase 3: snapshot at call time
                     logger.info(
                         "Voice WS handling audio turn session=%s len=%d scope=%s",
                         sid, len(transcript), scope,
@@ -560,6 +579,7 @@ async def voice_ws(ws: WebSocket) -> None:
                         ws, sid, history, transcript, scope, speed,
                         stt_seconds=stt_seconds,
                         subject=cid,
+                        prior_summary=summary,
                     )
                 current_turn_task = asyncio.create_task(_gated_audio_turn())
 
@@ -602,6 +622,7 @@ async def _run_llm_turn(
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
+    prior_summary: Optional[str] = None,
 ) -> None:
     """Core LLM streaming loop: route → stream tokens → TTS → record.
 
@@ -686,6 +707,33 @@ async def _run_llm_turn(
         """
         await ws_send_json(ws, {"type": "tool_call", **payload})
 
+    async def on_tool_round_complete(note: str) -> None:
+        """Phase 3: persist a synthetic tool note after each tool round.
+
+        ``note`` is a short ``[tool: ...]`` string built by
+        ``gemini_brain._build_tool_note`` capturing the tool name + args
+        snippet + output preview. Appending it to ``history`` (in-memory)
+        AND ``voice_turns`` (persisted) means cross-reconnect tool memory
+        survives — the brain on the next turn / next session sees that
+        ``git log -5`` already ran and what its top commit was, instead
+        of needing to rerun the same tool to remind itself.
+
+        Best-effort: if either write fails we log + drop the note. The
+        live turn already has the tool's actual function_response in its
+        contents list, so a missing note row only affects future turns'
+        ability to remember THIS tool round.
+        """
+        if not note:
+            return
+        history.append({"role": "assistant", "content": note})
+        try:
+            await append_turn(session_id, project_scope, "assistant", note)
+        except Exception as exc:
+            logger.warning(
+                "history persist (tool note) failed session=%s: %s",
+                session_id, exc,
+            )
+
     async def tts_worker() -> None:
         nonlocal tts_char_total
         try:
@@ -747,10 +795,15 @@ async def _run_llm_turn(
     tts_task = asyncio.create_task(tts_worker())
 
     # Build Chief system prompt blocks — identity + memory + roster + project scope.
-    # Deterministic for (scope, file-contents) so the Gemini ``system_instruction``
-    # bytes stay stable across turns. File reads are blocking I/O — wrap in
-    # to_thread to avoid stalling the loop.
-    system_blocks = await asyncio.to_thread(build_chief_system, project_scope)
+    # Deterministic for (scope, file-contents, prior_summary) so the Gemini
+    # ``system_instruction`` bytes stay stable across turns when nothing has
+    # changed. File reads are blocking I/O — wrap in to_thread to avoid
+    # stalling the loop. Phase 3: ``prior_summary`` is the cross-session
+    # rolling summary loaded at WS open (or refreshed after a rollup); when
+    # None, the conversation_so_far block is omitted entirely.
+    system_blocks = await asyncio.to_thread(
+        build_chief_system, project_scope, prior_summary,
+    )
 
     try:
         # Resolve the active scope's repo path so tool calls (Read/Bash/
@@ -774,6 +827,7 @@ async def _run_llm_turn(
             project_scope=project_scope,
             system_blocks=system_blocks,
             send_tool_call=send_tool_call,
+            on_tool_round_complete=on_tool_round_complete,
             cwd=repo_cwd,
             subject=subject,
         )
@@ -798,6 +852,20 @@ async def _run_llm_turn(
             except Exception as exc:
                 logger.warning(
                     "history persist (assistant) failed session=%s: %s", session_id, exc
+                )
+
+            # Phase 3: fire-and-forget rolling-summary trigger. ``maybe_rollup``
+            # itself checks the threshold + concurrency lock — it's a cheap
+            # noop until enough turns have stacked up. We don't await it: the
+            # turn shouldn't block on a Flash call. Errors are logged inside
+            # the rollup module; we wrap the create_task in try/except as
+            # belt-and-suspenders so a loop-state oddity can't kill the turn.
+            try:
+                asyncio.create_task(maybe_rollup(project_scope))
+            except Exception as exc:
+                logger.warning(
+                    "memory_rollup spawn failed session=%s scope=%s: %s",
+                    session_id, project_scope, exc,
                 )
 
         await ws_send_json(ws, {"type": "message_done"})
@@ -961,12 +1029,14 @@ async def _handle_text_turn(
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
+    prior_summary: Optional[str] = None,
 ) -> None:
     try:
         await _run_llm_turn(
             ws, session_id, history, text, project_scope, current_speed,
             stt_seconds=stt_seconds,
             subject=subject,
+            prior_summary=prior_summary,
         )
     except asyncio.CancelledError:
         # Turn was cancelled (barge-in / superseded) — don't emit a user-facing
@@ -1004,6 +1074,7 @@ async def _route_user_turn(
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
+    prior_summary: Optional[str] = None,
 ) -> None:
     """Single entry point — Phase 2: every turn goes to the Gemini brain.
 
@@ -1024,11 +1095,16 @@ async def _route_user_turn(
     `subject` is the JWT subject (typically "owner"); threaded through to
     the brain so the dispatch_agent CC pool can key on (subject, scope) and
     reuse warm subprocesses across WS reconnects.
+
+    ``prior_summary`` carries the rolling cross-session memory blob for
+    this scope (Phase 3). Optional — when ``None`` the brain is built
+    without a ``conversation_so_far`` block.
     """
     await _handle_text_turn(
         ws, session_id, history, user_text, current_project, current_speed,
         stt_seconds=stt_seconds,
         subject=subject,
+        prior_summary=prior_summary,
     )
 
 
