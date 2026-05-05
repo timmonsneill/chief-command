@@ -310,7 +310,12 @@ export interface WsTaskCancelledEvent {
 // shape. `duration_ms` and `preview` are present on terminal frames only.
 export interface WsToolCallEvent {
   type: 'tool_call'
-  name: string                       // e.g. 'Read' | 'Bash' | 'Grep' | 'dispatch_agent'
+  name: string                       // e.g. 'Read' | 'Bash' | 'Grep' | 'dispatch_agent' | 'code_review'
+  // Persona alias (Glass for code_review, etc.). Optional — tools without a
+  // persona (Read / Bash / Grep / dispatch_agent) omit it and the chip falls
+  // back to ``name``. Same pattern as the agent roster: ``code_review`` is
+  // the function-call ID, ``Glass`` is what the UI shows.
+  display_name?: string
   args?: Record<string, unknown>     // backend truncates each field to 200 chars
   status: 'running' | 'complete' | 'error' | 'cancelled'
   duration_ms?: number               // present on terminal frames only

@@ -38,6 +38,10 @@ export type ToolCallStatus = 'running' | 'complete' | 'error' | 'cancelled'
 
 export interface ToolCallChipProps {
   name: string
+  // Persona alias (e.g. Glass for code_review). When present, rendered as
+  // the header label instead of the raw tool ID. Optional — tools without a
+  // persona fall back to ``name``.
+  displayName?: string
   args?: Record<string, unknown>
   status: ToolCallStatus
   durationMs?: number
@@ -55,6 +59,8 @@ function iconFor(name: string): LucideIcon {
       return Search
     case 'dispatch_agent':
       return Send
+    case 'code_review':
+      return FileText
     default:
       return Wrench
   }
@@ -73,6 +79,7 @@ function summarizeArgs(name: string, args?: Record<string, unknown>): string {
     Bash: ['command', 'cmd'],
     Grep: ['pattern', 'query'],
     dispatch_agent: ['task_spec', 'prompt', 'description', 'subagent_type'],
+    code_review: ['target', 'focus'],
   }
   const keys = preferredKeys[name] ?? []
   for (const key of keys) {
@@ -99,6 +106,7 @@ function formatDuration(ms?: number): string {
 
 export function ToolCallChip({
   name,
+  displayName,
   args,
   status,
   durationMs,
@@ -118,6 +126,10 @@ export function ToolCallChip({
     return null
   }
   const Icon = iconFor(name)
+  // Prefer the persona alias (Glass, etc.) over the raw tool ID. ``name`` is
+  // the function-call ID (Read / Bash / code_review); ``displayName`` is
+  // what Chief verbalizes and what the chip should show.
+  const headerName = displayName ?? name
 
   const argsSummary = truncate(summarizeArgs(name, args), 80)
   // After the error early-return above, status is 'running' | 'complete' |
@@ -177,7 +189,7 @@ export function ToolCallChip({
           type="button"
           onClick={() => hasPreview && setExpanded((v) => !v)}
           aria-expanded={hasPreview ? expanded : undefined}
-          aria-label={`${name} ${status}${argsSummary ? `: ${argsSummary}` : ''}`}
+          aria-label={`${headerName} ${status}${argsSummary ? `: ${argsSummary}` : ''}`}
           disabled={!hasPreview}
           className={`group w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-left transition-colors min-h-[32px] ${containerClass} ${
             hasPreview
@@ -196,7 +208,7 @@ export function ToolCallChip({
           <span className="text-[11px] font-semibold uppercase tracking-wide text-ink/45 shrink-0">
             {statusLabel[status]}
           </span>
-          <span className="text-[12px] font-medium text-ink/80 shrink-0">{name}</span>
+          <span className="text-[12px] font-medium text-ink/80 shrink-0">{headerName}</span>
           {inlineVerb && (
             <span className="text-[11px] text-ink/45 shrink-0">· {inlineVerb}</span>
           )}

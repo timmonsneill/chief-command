@@ -36,7 +36,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.auth import verify_token
 from services import cc_session
-from services.agent_tools import dispatch_tool, to_gemini_tool
+from services.agent_tools import dispatch_tool, display_name_for, to_gemini_tool
 from services.chief_context import build_chief_system_string
 from services.dispatcher import TaskDispatcher
 from services.gemini_live import LIVE_MODEL, LiveSession
@@ -527,14 +527,22 @@ async def voice_ws(ws: WebSocket) -> None:
                 else:
                     args_summary[k] = v
 
-            # Emit the "running" chip frame.
+            # Emit the "running" chip frame. ``display_name`` carries the
+            # persona alias (Glass for code_review, etc.) so the FE chip
+            # renders "Glass · reviewing …" instead of the raw tool ID.
+            # Omitted entirely for tools without a persona — frontend falls
+            # back to ``name``.
+            persona = display_name_for(tool_name)
+            running_frame: dict = {
+                "type": "tool_call",
+                "name": tool_name,
+                "args": args_summary,
+                "status": "running",
+            }
+            if persona:
+                running_frame["display_name"] = persona
             try:
-                await ws_send_json(ws, {
-                    "type": "tool_call",
-                    "name": tool_name,
-                    "args": args_summary,
-                    "status": "running",
-                })
+                await ws_send_json(ws, running_frame)
             except Exception as exc:
                 logger.debug("voice_ws tool_call running emit failed: %s", exc)
 
@@ -580,14 +588,17 @@ async def voice_ws(ws: WebSocket) -> None:
                 preview_text = getattr(result, "output", "") or ""
                 if isinstance(preview_text, str) and len(preview_text) > 240:
                     preview_text = preview_text[:240] + "..."
-                await ws_send_json(ws, {
+                terminal_frame: dict = {
                     "type": "tool_call",
                     "name": tool_name,
                     "args": args_summary,
                     "status": status,
                     "duration_ms": duration_ms,
                     "preview": preview_text,
-                })
+                }
+                if persona:
+                    terminal_frame["display_name"] = persona
+                await ws_send_json(ws, terminal_frame)
             except Exception as exc:
                 logger.debug("voice_ws tool_call terminal emit failed: %s", exc)
 

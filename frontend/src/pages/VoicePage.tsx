@@ -48,6 +48,9 @@ interface ToolCallState {
   id: string
   startedAt: string                  // ISO; controls timeline interleave
   name: string
+  // Persona alias surfaced by the backend (Glass for code_review, etc.).
+  // When present, ToolCallChip renders this instead of the raw tool ID.
+  displayName?: string
   args?: Record<string, unknown>
   argsKey: string                    // JSON.stringify(args ?? {})
   status: ToolCallStatus
@@ -412,6 +415,10 @@ export default function VoicePage() {
         // ─── Gemini brain tool-call frames (Phase 2 / Stage 3) ───────────
         case 'tool_call': {
           const name = String(parsed.name)
+          const displayName =
+            typeof parsed.display_name === 'string' && parsed.display_name
+              ? parsed.display_name
+              : undefined
           const args = parsed.args as Record<string, unknown> | undefined
           const status = parsed.status as ToolCallStatus
           const argsKey = JSON.stringify(args ?? {})
@@ -422,7 +429,7 @@ export default function VoicePage() {
             const startedAt = new Date().toISOString()
             setToolCalls((prev) => [
               ...prev,
-              { id, startedAt, name, args, argsKey, status: 'running' },
+              { id, startedAt, name, displayName, args, argsKey, status: 'running' },
             ])
           } else {
             setToolCalls((prev) => {
@@ -454,6 +461,7 @@ export default function VoicePage() {
                     id: `${name}#${seq}`,
                     startedAt: new Date().toISOString(),
                     name,
+                    displayName,
                     args,
                     argsKey,
                     status,
@@ -463,8 +471,11 @@ export default function VoicePage() {
                 ]
               }
               const next = prev.slice()
+              // Prefer terminal frame's displayName if backend includes it,
+              // otherwise keep what we recorded on the running frame.
               next[matchIdx] = {
                 ...next[matchIdx],
+                displayName: displayName ?? next[matchIdx].displayName,
                 status,
                 durationMs,
                 preview,
@@ -818,6 +829,7 @@ export default function VoicePage() {
                 <ToolCallChip
                   key={`tool-${tc.id}`}
                   name={tc.name}
+                  displayName={tc.displayName}
                   args={tc.args}
                   status={tc.status}
                   durationMs={tc.durationMs}

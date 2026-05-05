@@ -318,6 +318,34 @@ ALL_TOOLS: tuple[ToolSchema, ...] = (
 
 
 # ---------------------------------------------------------------------------
+# Tool ID → persona display name mapping
+# ---------------------------------------------------------------------------
+# Function-call IDs (Read / Bash / dispatch_agent / code_review) are imperative
+# — that's the name Live emits when it invokes a tool. The persona name is
+# what shows up in the UI chip and what Live verbalizes ("Glass is reviewing
+# the diff…"). Same pattern as the agent roster: ``code_review`` is the verb,
+# Glass is the named reviewer doing the work.
+#
+# Tools without a persona entry (Read / Bash / Grep) fall back to the raw
+# tool ID — they're imperative shell-shaped calls, no personality wrapper.
+# dispatch_agent gets named per-spec by Chief at dispatch time (Riggs / Finn /
+# etc.) so it's also intentionally absent here.
+TOOL_DISPLAY_NAMES: dict[str, str] = {
+    "code_review": "Glass",
+}
+
+
+def display_name_for(tool_name: str) -> Optional[str]:
+    """Return the persona display name for ``tool_name``, or None if absent.
+
+    Callers (the WS layer that builds tool_call frames) use this to populate
+    the optional ``display_name`` field on the chip. ``None`` means "no
+    persona; render the raw tool ID" — the frontend handles the fallback.
+    """
+    return TOOL_DISPLAY_NAMES.get(tool_name)
+
+
+# ---------------------------------------------------------------------------
 # Tool execution result
 # ---------------------------------------------------------------------------
 @dataclass
@@ -1396,9 +1424,11 @@ __all__ = [
     "THINK_DEEP_DEFAULT_MODEL",
     "THINK_DEEP_OPUS_MODEL",
     "THINK_DEEP_TIMEOUT_S",
+    "TOOL_DISPLAY_NAMES",
     "ToolResult",
     "ToolSchema",
     "dispatch_tool",
+    "display_name_for",
     "execute_bash",
     "execute_code_review",
     "execute_dispatch_agent",

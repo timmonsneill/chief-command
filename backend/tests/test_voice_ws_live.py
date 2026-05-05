@@ -674,6 +674,58 @@ async def test_voice_ws_dispatches_tool_call_and_replies(patched_ws, monkeypatch
     statuses = [f.get("status") for f in tool_frames]
     assert "running" in statuses
     assert "complete" in statuses
+    # think_deep has no persona registered, so display_name is omitted —
+    # the FE chip falls back to ``name``.
+    for frame in tool_frames:
+        assert "display_name" not in frame
+
+
+@pytest.mark.asyncio
+async def test_voice_ws_code_review_tool_call_carries_glass_display_name(
+    patched_ws, monkeypatch,
+):
+    """code_review tool_call frames include ``display_name: "Glass"``.
+
+    Tool ID stays imperative (``code_review``) — that's what Live emits and
+    what the function-call API expects. The persona alias is layered on so
+    the FE chip renders "Glass · reviewing …" instead of the raw verb.
+    """
+    fake_genai_types = types.SimpleNamespace(
+        FunctionResponse=lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    fake_genai_pkg = types.SimpleNamespace(types=fake_genai_types)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai_pkg)
+    monkeypatch.setitem(sys.modules, "google", types.SimpleNamespace(genai=fake_genai_pkg))
+
+    ws = FakeWebSocket()
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+    for _ in range(50):
+        if FakeLiveSession.instances:
+            break
+        await asyncio.sleep(0.01)
+    sess = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if sess.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    await sess.on_tool_call(_FakeToolCallEvent([
+        _FakeFunctionCall(
+            name="code_review",
+            args={"target": "backend/services/llm.py", "focus": "general"},
+            fc_id="fc-cr-1",
+        )
+    ]))
+    await ws.finish()
+    await task
+
+    tool_frames = [f for f in ws.outbound_json if f.get("type") == "tool_call"]
+    # Both the running and terminal frames should carry display_name=Glass.
+    assert tool_frames, "expected at least one tool_call frame"
+    for frame in tool_frames:
+        assert frame.get("name") == "code_review"
+        assert frame.get("display_name") == "Glass"
 
 
 @pytest.mark.asyncio

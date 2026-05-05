@@ -536,6 +536,32 @@ class TestGeminiAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Persona display-name mapping
+# ---------------------------------------------------------------------------
+class TestDisplayNameMapping:
+    """Tool ID → persona alias. ``code_review`` is the imperative function
+    name Live emits; ``Glass`` is what the UI chip and Chief verbalize."""
+
+    def test_code_review_maps_to_glass(self):
+        assert agent_tools.display_name_for("code_review") == "Glass"
+        assert agent_tools.TOOL_DISPLAY_NAMES["code_review"] == "Glass"
+
+    def test_imperative_tools_have_no_persona(self):
+        # Read / Bash / Grep are shell-shaped — no persona wrapper. The FE
+        # falls back to the raw tool ID for these.
+        for name in ("Read", "Bash", "Grep"):
+            assert agent_tools.display_name_for(name) is None
+
+    def test_dispatch_agent_has_no_persona(self):
+        # dispatch_agent is named per-spec by Chief at dispatch time
+        # (Riggs / Finn / etc.), so the static mapping is intentionally absent.
+        assert agent_tools.display_name_for("dispatch_agent") is None
+
+    def test_unknown_tool_returns_none(self):
+        assert agent_tools.display_name_for("not_a_real_tool") is None
+
+
+# ---------------------------------------------------------------------------
 # Forbidden-path coverage — verify each newly-added pattern is blocked
 # (cc_session._FORBIDDEN_PATH_RE extension, sweep finding 2026-05-04).
 # ---------------------------------------------------------------------------
