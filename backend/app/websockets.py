@@ -309,7 +309,10 @@ async def voice_ws(ws: WebSocket) -> None:
     # TTS speed multiplier. Applied server-side via Google's `speaking_rate` so
     # the audio is time-stretched without pitch shift. Frontend must NOT apply
     # playbackRate on top — that would re-introduce the chipmunk effect.
-    current_speed: float = 1.0
+    # Default 1.25 (set 2026-05-05 per owner) — slightly snappier than
+    # Google's neutral 1.0. Frontend may still send a {"type":"speed"}
+    # frame to override per session.
+    current_speed: float = 1.25
     current_turn_task: Optional[asyncio.Task] = None
 
     async def ensure_session() -> str:
@@ -520,15 +523,20 @@ async def voice_ws(ws: WebSocket) -> None:
                     continue
 
                 if msg_type == "speed":
-                    # TTS speed preference. Clamp to Google's supported range
-                    # (0.25-4.0) and fall back to 1.0 on bad input. No LLM turn.
+                    # TTS speed preference. Clamp to the streaming RPC's
+                    # supported range (0.25-2.0) and fall back to the per-WS
+                    # default on bad input. No LLM turn. NOTE: the one-shot
+                    # synthesize_speech RPC accepts up to 4.0, but our hot
+                    # path goes through streaming_synthesize whose
+                    # StreamingAudioConfig caps at 2.0. Sending >2.0 would
+                    # drop a frame on the floor with no narration.
                     raw_speed = data.get("value")
                     try:
                         new_speed = float(raw_speed)
-                        if not (0.25 <= new_speed <= 4.0):
-                            new_speed = 1.0
+                        if not (0.25 <= new_speed <= 2.0):
+                            new_speed = current_speed
                     except (TypeError, ValueError):
-                        new_speed = 1.0
+                        new_speed = current_speed
                     current_speed = new_speed
                     logger.info("Voice WS speed updated speed=%.2f", current_speed)
                     continue
@@ -693,7 +701,7 @@ async def _run_llm_turn(
     history: list[dict],
     user_text: str,
     project_scope: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
@@ -1114,7 +1122,7 @@ async def _handle_text_turn(
     history: list[dict],
     text: str,
     project_scope: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
@@ -1159,7 +1167,7 @@ async def _route_user_turn(
     history: list[dict],
     user_text: str,
     current_project: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
     stt_seconds: float = 0.0,
     *,
     subject: str = "owner",
@@ -1203,7 +1211,7 @@ async def _route_task(
     history: list[dict],
     task_spec: str,
     current_project: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
     *,
     stt_seconds: float = 0.0,
 ) -> None:
@@ -1354,7 +1362,7 @@ async def _route_status(
     session_id: str,
     history: list[dict],
     current_project: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
 ) -> None:
     handle = _dispatcher.get_handle(session_id)
     if handle is None:
@@ -1400,7 +1408,7 @@ async def _route_status(
 async def _route_cancel(
     ws: WebSocket,
     session_id: str,
-    current_speed: float = 1.0,
+    current_speed: float = 1.25,
 ) -> None:
     # Fetch the handle BEFORE cancel so we still have access to task_id for
     # the frame (cancel() may evict the handle).

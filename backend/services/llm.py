@@ -7,9 +7,11 @@ to know which provider is wired in — they pass history + callbacks + scope
 context the same way they always did.
 
 What changed at the API surface vs the legacy Anthropic version:
-  * ``model`` is accepted but ignored for routing — Gemini 2.5 Pro is the
-    only brain. The returned ``usage_dict["model"]`` reports
-    ``"gemini-2.5-pro"`` (the Phase 2 cost-tracker bucket).
+  * ``model`` is accepted but ignored for routing — a single Gemini brain is
+    wired in (see ``services.gemini_brain.GEMINI_MODEL``; currently
+    ``gemini-2.5-flash`` after the 2026-05-05 Pro->Flash latency flip). The
+    returned ``usage_dict["model"]`` reports that same id (the Phase 2
+    cost-tracker bucket).
   * ``system_blocks`` (Anthropic-shaped) is still accepted; we flatten the
     block list to a single string for Gemini's ``system_instruction`` field.
     Callers that pass ``project_scope`` instead get a fresh build via
@@ -81,9 +83,11 @@ async def stream_turn(
     """Run one Gemini turn and stream tokens / TTS sentences / tool-call frames.
 
     Maintains the legacy signature so the WS handler keeps working without
-    changes. ``model`` is accepted but ignored — Gemini 2.5 Pro is the
-    only brain. Returns a usage dict with the same keys legacy callers
-    expect plus ``model`` pinned to ``gemini-2.5-pro``.
+    changes. ``model`` is accepted but ignored — the Gemini brain id is
+    pinned in ``services.gemini_brain.GEMINI_MODEL`` (currently
+    ``gemini-2.5-flash`` after the 2026-05-05 Pro->Flash latency flip).
+    Returns a usage dict with the same keys legacy callers expect plus
+    ``model`` set to that id.
 
     See module docstring for the full migration notes.
 

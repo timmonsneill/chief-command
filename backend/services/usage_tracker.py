@@ -22,17 +22,20 @@ PRICING_PER_MTOK = {
     "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "cached_in": 0.1},
     "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "cached_in": 0.3},
     "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "cached_in": 0.5},
-    # Phase 2 — Gemini 2.5 Pro via Vertex AI is now Chief's brain.
-    # Pricing per Vertex AI public rate card, ≤200k context window (May 2026):
+    # Phase 2 — Gemini 2.5 Pro via Vertex AI was Chief's brain through
+    # 2026-05-04. Pricing per Vertex AI public rate card, ≤200k context
+    # window (May 2026):
     #   text/image/video input         $1.25 / 1M
     #   cached text/image/video input  $0.31 / 1M
     #   text output                    $10.00 / 1M
-    # Audio input doesn't apply — text-mode only in Phase 2.
+    # Audio input doesn't apply — text-mode only in Phase 2. Entry kept so
+    # historical voice_turns rows recorded under Pro continue to bill at
+    # Pro rates if anything ever recomputes them.
     "gemini-2.5-pro":    {"in": 1.25, "out": 10.00, "cached_in": 0.31},
-    # Phase 3 — Gemini 2.5 Flash powers the rolling-summary writer
-    # (services.memory_rollup). Brain stays Pro; Flash is cheap enough that
-    # firing it per-rollup (every ~30 turns) is essentially free at owner
-    # usage volumes. Pricing per Vertex AI public rate card (early 2026):
+    # 2026-05-05 — flipped Pro -> Flash for the brain after owner hit
+    # 12-14s TTFT on Pro in real iOS use. Flash also previously powered
+    # the rolling-summary writer (services.memory_rollup); the same entry
+    # serves both roles. Pricing per Vertex AI public rate card (May 2026):
     #   text input         $0.30 / 1M
     #   cached text input  $0.075 / 1M
     #   text output        $2.50 / 1M

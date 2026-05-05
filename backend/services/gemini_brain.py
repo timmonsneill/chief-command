@@ -1,4 +1,5 @@
-"""Gemini 2.5 Pro via Vertex AI — Chief's brain (Phase 2).
+"""Gemini 2.5 Flash via Vertex AI — Chief's brain (Phase 2; flipped from Pro
+to Flash on 2026-05-05 for latency).
 
 This is the streaming + function-call adapter that turns the Vertex AI
 Gemini SDK into a drop-in for the legacy Anthropic ``stream_turn`` API.
@@ -53,7 +54,12 @@ logger = logging.getLogger(__name__)
 # Canonical model id used both as the Vertex AI model name AND as the
 # database "model" column for the cost tracker. Keeping a single source of
 # truth here avoids drift between the brain call and the cost row.
-GEMINI_MODEL: str = "gemini-2.5-pro"
+#
+# 2026-05-05: flipped Pro -> Flash after owner hit 12-14s TTFT on Pro in real
+# iOS use. Flash measures ~1-2s TTFT for the same prompts and the routing
+# quality is good enough for the rule-#9-shaped dispatch surface. Pricing
+# entry already in usage_tracker.PRICING_PER_MTOK.
+GEMINI_MODEL: str = "gemini-2.5-flash"
 
 # Same sentence-flush regex the legacy llm.py used. Mirrors ``\s+`` after
 # sentence-ending punctuation.
@@ -298,7 +304,8 @@ async def stream(
 
     Returns:
       UsageRecord with the same keys legacy callers expect plus ``model``
-      pinned to ``gemini-2.5-pro``.
+      pinned to whatever ``GEMINI_MODEL`` is set to (currently
+      ``gemini-2.5-flash`` after the 2026-05-05 Pro->Flash flip).
     """
     from google.genai import types
 

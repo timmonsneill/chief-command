@@ -271,7 +271,7 @@ class TestTextOnlyStreaming:
         # Usage came from the last chunk.
         assert usage["input_tokens"] == 120
         assert usage["output_tokens"] == 10
-        assert usage["model"] == "gemini-2.5-pro"
+        assert usage["model"] == "gemini-2.5-flash"
         # cost_cents is deliberately NOT populated by the brain — the caller
         # (usage_tracker.record_turn) recomputes from token counts. The brain
         # is the single source of token counts; usage_tracker is the single

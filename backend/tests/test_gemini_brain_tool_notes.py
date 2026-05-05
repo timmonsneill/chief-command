@@ -267,7 +267,7 @@ class TestOnToolRoundComplete:
             system_prompt_append="",
         )
         # Turn still completed; usage is present.
-        assert usage["model"] == "gemini-2.5-pro"
+        assert usage["model"] == "gemini-2.5-flash"
 
     @pytest.mark.asyncio
     async def test_no_callback_when_kwarg_omitted(
@@ -305,4 +305,4 @@ class TestOnToolRoundComplete:
             scope="Chief Command",
             system_prompt_append="",
         )
-        assert usage["model"] == "gemini-2.5-pro"
+        assert usage["model"] == "gemini-2.5-flash"

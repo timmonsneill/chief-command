@@ -7,8 +7,8 @@ swap implementations through services.voice_provider without changes:
         is_loaded: bool
         voice: str
         sample_rate: int
-        async synthesize(text, speed=1.0) -> bytes            # WAV bytes
-        async synthesize_stream(text, speed=1.0) -> AsyncIterator[bytes]  # WAV chunks
+        async synthesize(text, speed=DEFAULT_SPEAKING_RATE) -> bytes            # WAV bytes
+        async synthesize_stream(text, speed=DEFAULT_SPEAKING_RATE) -> AsyncIterator[bytes]  # WAV chunks
         def list_voices() -> list[dict]
         async set_voice(voice_id: str) -> None
 
@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_VOICE = "en-US-Chirp3-HD-Aoede"  # American female, conversational
 DEFAULT_LANGUAGE = "en-US"
 DEFAULT_SAMPLE_RATE = 24000  # Matches Kokoro output to avoid frontend resample
+# Default speaking_rate for synthesize / synthesize_stream when the caller
+# doesn't pass one. 1.0 is Google's neutral pace; 1.25 is the owner's
+# preferred pace (set 2026-05-05) — slightly snappier without losing
+# clarity. Callers that explicitly pass a `speed` arg (e.g. the WS handler
+# forwarding the per-connection slider) override this.
+DEFAULT_SPEAKING_RATE = 1.25
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -188,7 +194,7 @@ class GoogleTTSService:
     # Synthesis — one-shot
     # ------------------------------------------------------------------ #
 
-    async def synthesize(self, text: str, speed: float = 1.0) -> bytes:
+    async def synthesize(self, text: str, speed: float = DEFAULT_SPEAKING_RATE) -> bytes:
         """Render text to WAV bytes (24kHz, mono, 16-bit PCM)."""
         if not text or not text.strip():
             raise ValueError("Empty text input")
@@ -241,7 +247,7 @@ class GoogleTTSService:
     async def synthesize_stream(
         self,
         text: str,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEAKING_RATE,
         cancel_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[bytes]:
         """Stream WAV audio chunks as Google renders them.
@@ -306,9 +312,17 @@ class GoogleTTSService:
             language_code=self._language,
             name=self._voice,
         )
+        # ``speaking_rate`` MUST be passed on the streaming path explicitly —
+        # leaving it off (or sending 0.0) makes the server fall back to 1.0
+        # regardless of what the caller set on the slider. Range on the
+        # streaming RPC is [0.25, 2.0] (tighter than the one-shot RPC's
+        # [0.25, 4.0]); clamp here so the WS handler can pass through whatever
+        # the slider held without an out-of-range RPC error.
+        clamped_speed = max(0.25, min(2.0, float(speed or DEFAULT_SPEAKING_RATE)))
         streaming_audio_config = texttospeech.StreamingAudioConfig(
             audio_encoding=texttospeech.AudioEncoding.PCM,
             sample_rate_hertz=self._sample_rate,
+            speaking_rate=clamped_speed,
         )
         streaming_config = texttospeech.StreamingSynthesizeConfig(
             voice=voice_params,
