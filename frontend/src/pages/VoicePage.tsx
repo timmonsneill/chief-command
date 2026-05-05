@@ -3,7 +3,7 @@ import { Mic, PhoneOff, ChevronDown } from 'lucide-react'
 import Composer from './voice/Composer'
 import { toast } from 'sonner'
 import { useWebSocket } from '../hooks/useWebSocket'
-import { useVad } from '../hooks/useVad'
+import { useLiveAudio } from '../hooks/useLiveAudio'
 import { useProjectContext } from '../hooks/useProjectContext'
 import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
@@ -11,22 +11,18 @@ import { type TaskBubbleStatus } from '../components/TaskBubble'
 import { InlineTaskActivity } from '../components/InlineTaskActivity'
 import { ToolCallChip, type ToolCallStatus } from '../components/ToolCallChip'
 import { ThinkingDots } from '../components/ThinkingDots'
-import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
+import type { VoiceMessage, Agent, ActiveModel, WsUsageEvent } from '../lib/api'
 
-type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
-
-// Independent of VoiceState. Tracks the *deep-reply* lifecycle so the
-// thinking dots can persist UNDER the bridge-phrase TTS playback (which
-// flips voiceState into 'speaking' the moment the first chunk lands).
-//   awaiting   — owner audio/text was sent; brain hasn't streamed yet
-//   streaming  — first `token` event arrived; dots disappear
-//   idle       — pre-turn or post-message_done
-type ThinkingState = 'idle' | 'awaiting' | 'streaming'
+// VoiceState in Stage-2 is a thin derived label — `useLiveAudio` owns the
+// real audio state (isMicActive / isSpeaking). We only synthesize an
+// "awaiting" pseudo-state for the gap between owner-speech-end and the
+// first inbound audio chunk so the thinking dots have a place to live.
+type VoiceLabel = 'idle' | 'listening' | 'speaking' | 'thinking'
 
 // Transient STT failures the backend used to surface verbatim ("Could
-// not transcribe audio" when wind/noise tripped VAD). Riggs is muting
-// these at the source, but we suppress on the FE too as belt-and-braces
-// so a single stray frame doesn't reach the timeline.
+// not transcribe audio" when wind/noise tripped VAD). Live's server-side
+// VAD eliminates most of these but we keep the dedup belt-and-braces in
+// case the backend ever leaks one through during reconnect / fallback.
 const TRANSIENT_ERROR_PATTERN = /could not transcribe/i
 
 interface TaskState {
@@ -59,54 +55,31 @@ interface ToolCallState {
   preview?: string
 }
 
-function float32ToWav(samples: Float32Array, sampleRate = 16000): ArrayBuffer {
-  const numSamples = samples.length
-  const buffer = new ArrayBuffer(44 + numSamples * 2)
-  const view = new DataView(buffer)
-
-  function writeStr(offset: number, str: string) {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i))
-  }
-
-  writeStr(0, 'RIFF')
-  view.setUint32(4, 36 + numSamples * 2, true)
-  writeStr(8, 'WAVE')
-  writeStr(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  writeStr(36, 'data')
-  view.setUint32(40, numSamples * 2, true)
-
-  let offset = 44
-  for (let i = 0; i < numSamples; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]))
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
-    offset += 2
-  }
-
-  return buffer
-}
-
 // ─── State label ──────────────────────────────────────────────────────────────
 
-const STATE_LABELS: Record<VoiceState, string> = {
+const STATE_LABELS: Record<VoiceLabel, string> = {
   idle: 'Ready',
   listening: 'Listening...',
   speaking: 'Chief is speaking...',
   thinking: 'Thinking...',
 }
 
-const STATE_COLORS: Record<VoiceState, string> = {
+const STATE_COLORS: Record<VoiceLabel, string> = {
   idle: 'text-ink/40',
   listening: 'text-emerald-600',
   speaking: 'text-primary',
   thinking: 'text-status-working',
 }
+
+// ─── Stable bubble ids for streaming transcripts ──────────────────────────────
+//
+// We reuse a single id per role across an in-flight turn so message-list
+// updates land on the same bubble instead of stacking. `generation_complete`
+// finalizes by re-keying to a real uuid; `interrupted` discards any pending
+// tail (replaces with a final uuid'd snapshot of what's been said so far).
+
+const STREAMING_USER_ID = 'streaming-user'
+const STREAMING_ASSISTANT_ID = 'streaming-assistant'
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -115,12 +88,19 @@ export default function VoicePage() {
   const [tasks, setTasks] = useState<Record<string, TaskState>>({})
   const [toolCalls, setToolCalls] = useState<ToolCallState[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
-  const [voiceState, setVoiceState] = useState<VoiceState>('idle')
-  const [thinkingState, setThinkingState] = useState<ThinkingState>('idle')
   const [textInput, setTextInput] = useState('')
   const [speed, setSpeed] = useState(1)
   const [conversationActive, setConversationActive] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
+
+  // True from owner-speech-end (input_transcript final) until the first
+  // inbound audio chunk decodes (liveAudio.isSpeaking flips). Drives the
+  // thinking dots — a Live-aware replacement for the old `thinkingState`
+  // which keyed off token streams.
+  const [awaitingReply, setAwaitingReply] = useState(false)
+  // Reconnect hint surfaced from `go_away` frames (Stage 4 will implement
+  // the actual session resume — for now we just show subtle UI feedback).
+  const [reconnecting, setReconnecting] = useState(false)
 
   const [activeModel, setActiveModel] = useState<ActiveModel | null>(null)
   const [usage, setUsage] = useState<WsUsageEvent | null>(null)
@@ -129,7 +109,6 @@ export default function VoicePage() {
   const { current: currentProject, setContext: setProjectContext } = useProjectContext()
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  const responseBuffer = useRef('')
   // Tracks the id of the most recently-started task so the Cancel button on
   // the bubble UI can issue a {type:'cancel'} frame without dragging the
   // task_id through component props. Event routing itself uses parsed.task_id
@@ -140,291 +119,204 @@ export default function VoicePage() {
   // emit one — we generate `${name}#${seq}` at running-time and match terminal
   // frames by (name, argsKey) against the most-recent-open chip.
   const toolCallSeqRef = useRef(0)
-  // Last-seen transient STT error timestamp (ms epoch). Caps visible
+  // Last-seen transient error timestamp (ms epoch). Caps visible
   // "Could not transcribe" chips at 1/min in case backend ever leaks one
-  // through. Mostly defensive — the primary defense is full suppression
-  // for the matching pattern; this dedups the residual non-transient
-  // error if its text happens to repeat back-to-back.
+  // through. Mostly defensive.
   const lastErrorAtRef = useRef<{ text: string; at: number } | null>(null)
 
-  const audioQueueRef = useRef<ArrayBuffer[]>([])
-  const isPlayingAudioRef = useRef(false)
-  // Whether the current TTS turn has produced a `source.start(0)` yet. Reset on
-  // every tts_start; flipped true when the first chunk actually begins playing.
-  // Gates the `setVoiceState('speaking')` transition so the orb doesn't jump to
-  // "speaking" during the 50–200ms of silence between tts_start and first audio.
-  const hasStartedAudioRef = useRef(false)
-  // True when the in-flight VAD speech segment began while Chief was playing
-  // audio. Used by onSpeechEnd to apply a duration gate before treating it as
-  // a real barge-in — browser AEC leaks enough of Chief's own voice on laptop
-  // speakers that VAD's onSpeechStart fires on echo, so we can't trust it as
-  // an immediate interrupt signal.
-  const speechStartedDuringTtsRef = useRef(false)
-  // True from the MOMENT `tts_start` arrives on the WS, false once the last
-  // decoded chunk's `onended` fires (or on explicit cancel). This closes the
-  // 50–300ms race window between `tts_start` and `source.start(0)` where
-  // `isPlayingAudioRef && hasStartedAudioRef` would both be false and a VAD
-  // speech-start would bypass the echo gate — so the owner's own voice would
-  // supersede Chief's own turn before it became audible. Forge caught this
-  // as the likely root cause of "Chief can't hear me, responds to text."
-  const ttsActiveRef = useRef(false)
-  // iOS Safari: HTMLAudioElement.play() only works inside a user-gesture stack.
-  // Creating a new Audio() per chunk in a WebSocket callback fails silently on
-  // iPhone (DOMException swallowed by .catch{}). Fix: a single AudioContext
-  // primed on first tap, then every chunk is decoded + played via Web Audio API.
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  // ─── useLiveAudio wiring ───────────────────────────────────────────────
+  // Outbound: every ~20ms PCM window posts to the WS as a binary frame.
+  // Inbound (server -> playback): handled in useWebSocket onBinary below.
+  // sendRef avoids re-creating useLiveAudio on every render of `send`.
+  const sendRef = useRef<((data: string | ArrayBuffer | Blob) => boolean) | null>(null)
 
-  const unlockAudio = useCallback(() => {
-    if (audioContextRef.current) {
-      // Re-resume in case iOS auto-suspended between gestures.
-      if (audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume().catch(() => {})
-      }
-      return
-    }
-    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    if (!Ctor) return
-    const ctx = new Ctor()
-    // Play a 1-sample silent buffer to "unlock" audio output on iOS.
-    try {
-      const buf = ctx.createBuffer(1, 1, 22050)
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      src.connect(ctx.destination)
-      src.start(0)
-    } catch {
-      // Best-effort unlock; proceed regardless.
-    }
-    audioContextRef.current = ctx
-  }, [])
+  const liveAudio = useLiveAudio({
+    onPcmChunk: useCallback((pcm: ArrayBuffer) => {
+      const send = sendRef.current
+      if (!send) return
+      send(pcm)
+    }, []),
+    onError: useCallback((err: Error) => {
+      console.error('[voice] live audio error:', err)
+      toast.error(`Mic error: ${err.message}`)
+    }, []),
+  })
 
-  const stopAudioPlayback = useCallback(() => {
-    audioQueueRef.current = []
-    if (currentSourceRef.current) {
-      try {
-        currentSourceRef.current.stop()
-      } catch {
-        // Already stopped / not yet started — ignore.
-      }
-      currentSourceRef.current = null
-    }
-    isPlayingAudioRef.current = false
-    hasStartedAudioRef.current = false
-    ttsActiveRef.current = false
-  }, [])
-
-  const playNextChunk = useCallback(async () => {
-    if (isPlayingAudioRef.current || audioQueueRef.current.length === 0) return
-    const ctx = audioContextRef.current
-    if (!ctx) {
-      // No primed AudioContext — shouldn't happen after a user gesture, but
-      // drop the chunk rather than silently queueing forever. Also force a
-      // state transition so the UI doesn't sit in 'thinking' waiting for audio
-      // that will never decode.
-      audioQueueRef.current = []
-      setVoiceState('listening')
-      return
-    }
-    isPlayingAudioRef.current = true
-
-    const chunk = audioQueueRef.current.shift()!
-    try {
-      // decodeAudioData requires a detached ArrayBuffer copy on some browsers.
-      const buffer = await ctx.decodeAudioData(chunk.slice(0))
-      const source = ctx.createBufferSource()
-      source.buffer = buffer
-      // Speed is applied server-side via Google TTS `speaking_rate` (proper
-      // time-stretch, preserves pitch). Do NOT set playbackRate here —
-      // that's what produced the chipmunk effect at > 1.0x.
-      source.connect(ctx.destination)
-      currentSourceRef.current = source
-      source.onended = () => {
-        currentSourceRef.current = null
-        isPlayingAudioRef.current = false
-        if (audioQueueRef.current.length > 0) {
-          playNextChunk()
-        } else {
-          // Last chunk drained — TTS playback is fully over. Only clear
-          // ttsActiveRef here (not at tts_end) so the echo gate stays on
-          // through the trailing playback window after the server says
-          // "done streaming chunks."
-          ttsActiveRef.current = false
-          setVoiceState('listening')
-        }
-      }
-      source.start(0)
-      // Only the FIRST chunk of a turn flips the UI into "speaking" — that way
-      // the orb and state strip move in lockstep with actual audible audio,
-      // not with the server-sent `tts_start` event (which arrives ~50–200ms
-      // before the first sample is decodable).
-      if (!hasStartedAudioRef.current) {
-        hasStartedAudioRef.current = true
-        setVoiceState('speaking')
-      }
-    } catch {
-      currentSourceRef.current = null
-      isPlayingAudioRef.current = false
-      if (audioQueueRef.current.length > 0) playNextChunk()
-      else setVoiceState('listening')
-    }
-  }, [])
-
-  // Mirror VAD's `speaking` state into a ref so the synchronous tts_end handler
-  // can read the live value without re-creating the WS onMessage callback on
-  // every speech transition. Used to keep speechStartedDuringTtsRef armed when
-  // tts_end arrives WHILE the owner is mid-utterance (barge-in race).
-  const vadIsSpeakingRef = useRef(false)
+  // ─── WebSocket ─────────────────────────────────────────────────────────
 
   const { send, isConnected } = useWebSocket({
     path: '/ws/voice',
     onBinary: useCallback((data: ArrayBuffer) => {
-      audioQueueRef.current.push(data)
-      // Kick playback on the FIRST chunk so streaming TTS actually streams.
-      // playNextChunk is a no-op if already playing or queue empty, so calling
-      // it on every push is cheap. Without this, chunks pile up until tts_end
-      // fires playNextChunk and Chief's first audible word can land seconds
-      // after the server started rendering.
-      playNextChunk()
-    }, [playNextChunk]),
+      // Inbound 24kHz Int16 PCM straight from the Live API. Push into
+      // the playback worklet's ring buffer; isSpeaking flips inside
+      // useLiveAudio when samples actually start coming out the speaker.
+      liveAudio.playPcmChunk(data)
+    }, [liveAudio]),
     onMessage: useCallback((data: string) => {
+      let parsed: { type: string; [k: string]: unknown }
       try {
-        const parsed = JSON.parse(data) as WsEvent
+        parsed = JSON.parse(data)
+      } catch {
+        return
+      }
 
-        if (parsed.type === 'context_switched') {
-          // Backend already updated scope — mirror it into the picker so the UI
-          // matches and project-aware views re-fetch with the new scope.
-          setProjectContext(parsed.project)
-          toast.success(`Switched to ${parsed.project}`)
+      switch (parsed.type) {
+        case 'context_switched': {
+          const project = String(parsed.project ?? '')
+          setProjectContext(project)
+          toast.success(`Switched to ${project}`)
+          break
         }
 
-        if (parsed.type === 'transcript') {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: crypto.randomUUID(),
-              role: 'user',
-              content: parsed.content,
-              timestamp: new Date().toISOString(),
-            },
-          ])
-        }
+        case 'input_transcript': {
+          // Live owner speech transcription. `is_final` flips once the
+          // model commits the segment. We keep it in a single bubble
+          // (id=STREAMING_USER_ID) so partials don't stack, then re-key
+          // to a uuid on final so the next turn opens a fresh bubble.
+          const text = String(parsed.text ?? '')
+          const isFinal = Boolean(parsed.is_final)
+          if (!text && !isFinal) break
 
-        if (parsed.type === 'active_model') {
-          setActiveModel(parsed.model)
-        }
-
-        if (parsed.type === 'token') {
-          // First real token from the deep brain — kill the thinking dots.
-          // Bridge-phrase TTS may already be playing; that's fine, dots
-          // were always meant to die at first-token, not at tts_start.
-          setThinkingState('streaming')
-          responseBuffer.current += parsed.text
           setMessages((prev) => {
             const last = prev[prev.length - 1]
-            if (last && last.role === 'assistant' && last.id === 'streaming') {
+            if (last && last.role === 'user' && last.id === STREAMING_USER_ID) {
               return [
                 ...prev.slice(0, -1),
-                { ...last, content: responseBuffer.current },
+                {
+                  ...last,
+                  content: text,
+                  ...(isFinal ? { id: crypto.randomUUID() } : {}),
+                },
               ]
             }
             return [
               ...prev,
               {
-                id: 'streaming',
-                role: 'assistant',
-                content: responseBuffer.current,
+                id: isFinal ? crypto.randomUUID() : STREAMING_USER_ID,
+                role: 'user',
+                content: text,
                 timestamp: new Date().toISOString(),
               },
             ]
           })
+
+          // Owner finished an utterance — arm the dots until Chief starts
+          // speaking (or replies via output_transcript first; both clear).
+          if (isFinal) {
+            setAwaitingReply(true)
+          }
+          break
         }
 
-        if (parsed.type === 'message_done') {
+        case 'output_transcript': {
+          // Live transcript of Chief's spoken reply. Same single-bubble
+          // pattern as input_transcript.
+          const text = String(parsed.text ?? '')
+          const isFinal = Boolean(parsed.is_final)
+          if (!text && !isFinal) break
+
+          // Either path counts as "Chief is now responding" — clear the
+          // dots even if the audio chunks haven't started flowing yet.
+          setAwaitingReply(false)
+
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && last.id === STREAMING_ASSISTANT_ID) {
+              return [
+                ...prev.slice(0, -1),
+                {
+                  ...last,
+                  content: text,
+                  ...(isFinal ? { id: crypto.randomUUID() } : {}),
+                },
+              ]
+            }
+            return [
+              ...prev,
+              {
+                id: isFinal ? crypto.randomUUID() : STREAMING_ASSISTANT_ID,
+                role: 'assistant',
+                content: text,
+                timestamp: new Date().toISOString(),
+              },
+            ]
+          })
+          break
+        }
+
+        case 'interrupted': {
+          // Owner barged in — drop any audio still queued for playback so
+          // Chief stops mid-sentence. Re-key any in-flight bubbles so the
+          // partial transcript lands as a permanent message rather than
+          // disappearing into the next turn's stream.
+          liveAudio.flushPlayback()
+          setAwaitingReply(false)
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === 'streaming' ? { ...m, id: crypto.randomUUID() } : m
+              m.id === STREAMING_USER_ID || m.id === STREAMING_ASSISTANT_ID
+                ? { ...m, id: crypto.randomUUID() }
+                : m
             )
           )
-          responseBuffer.current = ''
-          setThinkingState('idle')
-          setVoiceState('listening')
-        }
-
-        if (parsed.type === 'tts_start') {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === 'streaming' ? { ...m, id: crypto.randomUUID() } : m
-            )
-          )
-          responseBuffer.current = ''
-          // Reset the "has first audio landed?" latch — playNextChunk will flip
-          // it + set voiceState('speaking') when source.start(0) actually fires
-          // on the first decoded chunk. We intentionally DO NOT setVoiceState
-          // here: the 50–200ms gap between tts_start and playable audio was
-          // showing a "speaking" label with zero sound coming out.
-          hasStartedAudioRef.current = false
-          // Gate the echo filter open IMMEDIATELY — a VAD speech-start during
-          // the 50–300ms gap before the first chunk decodes would otherwise
-          // supersede Chief's own turn. Clear only at real end-of-playback.
-          ttsActiveRef.current = true
-        }
-
-        if (parsed.type === 'tts_end') {
-          // Any pending speech-start-during-TTS flag is no longer valid once
-          // TTS is over — clear it so a stale mid-sentence echo blip can't
-          // be retroactively used to drop a user utterance captured AFTER
-          // Chief went silent. EXCEPTION: if VAD reports the user is CURRENTLY
-          // speaking, this is a real barge-in mid-utterance — leave the flag
-          // armed so the upcoming onSpeechEnd still triggers stopAudioPlayback
-          // + interrupt. Without this guard, owner-speech that begins ~150ms
-          // before tts_end gets its barge-in path silently downgraded to a
-          // normal turn, and the trailing TTS chunks already on the local
-          // queue keep playing over the new question.
-          if (!vadIsSpeakingRef.current) {
-            speechStartedDuringTtsRef.current = false
-          }
-          if (audioQueueRef.current.length > 0) {
-            playNextChunk()
-          } else if (!hasStartedAudioRef.current) {
-            // Zero-chunk TTS turn (empty narration / TTS error / all chunks
-            // filtered out). No source.start(0) ever fired, so the
-            // speaking-state transition in playNextChunk is dead code for this
-            // turn — force the UI out of whatever prior state (usually
-            // 'thinking') or it hangs until the next turn. Also release the
-            // echo gate since no audio will ever play.
-            ttsActiveRef.current = false
-            setVoiceState(conversationActive ? 'listening' : 'idle')
-          } else {
-            setVoiceState('listening')
-          }
-        }
-
-        if (parsed.type === 'turn_cancelled') {
-          // Backend aborted the turn (barge-in or superseded). Binary TTS frames
-          // in flight at cancel-time can still arrive and land in audioQueueRef;
-          // flush so they don't replay on the next turn.
-          stopAudioPlayback()
-          speechStartedDuringTtsRef.current = false
-          ttsActiveRef.current = false
-          setThinkingState('idle')
-          setVoiceState(conversationActive ? 'listening' : 'idle')
-          // Race guard: backend may not emit a terminal tool_call frame for an
-          // in-flight chip when the turn is cancelled. Flip any still-running
-          // chips to 'cancelled' so the UI doesn't spin forever.
+          // Race guard: backend may not emit a terminal tool_call frame for
+          // an in-flight chip on interrupt. Mark any still-running chips
+          // as cancelled so the UI doesn't spin forever.
           setToolCalls((prev) =>
             prev.map((tc) => (tc.status === 'running' ? { ...tc, status: 'cancelled' } : tc))
           )
+          break
         }
 
-        if (parsed.type === 'usage') {
-          setUsage(parsed)
+        case 'generation_complete': {
+          // Chief's turn is fully done (audio + text). Finalize any
+          // streaming bubbles by giving them permanent uuids so the next
+          // turn starts with a clean slate.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === STREAMING_USER_ID || m.id === STREAMING_ASSISTANT_ID
+                ? { ...m, id: crypto.randomUUID() }
+                : m
+            )
+          )
+          setAwaitingReply(false)
+          break
+        }
+
+        case 'session_resumed': {
+          // Stage 4 wires actual reconnect; for now just clear the hint
+          // and log. Frame includes a `handle` we'll persist later.
+          console.info('[voice] session resumed', parsed.handle)
+          setReconnecting(false)
+          break
+        }
+
+        case 'go_away': {
+          // Server is about to close this socket (Live session quota /
+          // server-side rotation). Stage 4 will implement actual resume;
+          // for now show a subtle reconnect hint.
+          console.info('[voice] go_away', parsed.time_left)
+          setReconnecting(true)
+          break
+        }
+
+        case 'usage': {
+          setUsage(parsed as unknown as WsUsageEvent)
           setTurnCount((n) => n + 1)
+          break
         }
 
-        if (parsed.type === 'agent_status') {
+        case 'active_model': {
+          // Optional Live frame — backend may still emit it for the
+          // session badge. Leave as-is; if it's dropped, badge keeps last.
+          const model = (parsed.model as ActiveModel | undefined) ?? null
+          if (model) setActiveModel(model)
+          break
+        }
+
+        case 'agent_status': {
+          const list = (parsed.agents as Record<string, string>[] | undefined) ?? []
           setAgents(
-            (parsed.agents || []).map((a: Record<string, string>, i: number) => ({
+            list.map((a, i) => ({
               id: `agent-${i}`,
               name: a.name || 'Agent',
               role: a.role || '',
@@ -435,34 +327,32 @@ export default function VoicePage() {
               duration_seconds: null,
             }))
           )
+          break
         }
 
-        // Dispatch Bridge: task_* frames always carry task_id. We key state
-        // by id and route ALL subsequent events (output / complete / cancel)
-        // by the id on the frame — never by "which task is currently active".
-        // That way a late task_output from task A arriving after task B has
-        // started doesn't get stamped onto B.
-        if (parsed.type === 'task_started') {
-          const id = parsed.task_id
+        // ─── Dispatch Bridge frames (unchanged contract) ─────────────────
+        // Always carry task_id; route by id, never by "currently active".
+
+        case 'task_started': {
+          const id = String(parsed.task_id)
           activeTaskIdRef.current = id
           setTasks((prev) => ({
             ...prev,
             [id]: {
               id,
-              taskSpec: parsed.task_spec,
-              repo: parsed.repo,
-              startedAt: parsed.started_at,
+              taskSpec: String(parsed.task_spec ?? ''),
+              repo: String(parsed.repo ?? ''),
+              startedAt: String(parsed.started_at ?? ''),
               status: 'running',
               stdoutLines: [],
             },
           }))
-          // While a task is running the voice orb should return to listening —
-          // the task itself owns the "doing work" affordance via its bubble.
-          setVoiceState(conversationActive ? 'listening' : 'idle')
+          break
         }
 
-        if (parsed.type === 'task_output') {
-          const id = parsed.task_id
+        case 'task_output': {
+          const id = String(parsed.task_id)
+          const text = String(parsed.text ?? '')
           setTasks((prev) => {
             const t = prev[id]
             if (!t) return prev
@@ -470,14 +360,15 @@ export default function VoicePage() {
               ...prev,
               [id]: {
                 ...t,
-                stdoutLines: [...t.stdoutLines, parsed.text.replace(/\n$/, '')],
+                stdoutLines: [...t.stdoutLines, text.replace(/\n$/, '')],
               },
             }
           })
+          break
         }
 
-        if (parsed.type === 'task_complete') {
-          const id = parsed.task_id
+        case 'task_complete': {
+          const id = String(parsed.task_id)
           setTasks((prev) => {
             const t = prev[id]
             if (!t) return prev
@@ -486,19 +377,20 @@ export default function VoicePage() {
               [id]: {
                 ...t,
                 status: 'complete',
-                exitCode: parsed.exit_code,
-                durationSeconds: parsed.duration_seconds,
-                summary: parsed.summary,
+                exitCode: Number(parsed.exit_code),
+                durationSeconds: Number(parsed.duration_seconds),
+                summary: String(parsed.summary ?? ''),
               },
             }
           })
           if (activeTaskIdRef.current === id) {
             activeTaskIdRef.current = null
           }
+          break
         }
 
-        if (parsed.type === 'task_cancelled') {
-          const id = parsed.task_id
+        case 'task_cancelled': {
+          const id = String(parsed.task_id)
           setTasks((prev) => {
             const t = prev[id]
             if (!t) return prev
@@ -507,48 +399,37 @@ export default function VoicePage() {
               [id]: {
                 ...t,
                 status: 'cancelled',
-                cancelReason: parsed.reason,
+                cancelReason: String(parsed.reason ?? ''),
               },
             }
           })
           if (activeTaskIdRef.current === id) {
             activeTaskIdRef.current = null
           }
+          break
         }
 
-        // Gemini brain tool-call frames (Phase 2). Backend emits one on dispatch
-        // (running) and one on return (complete/error/cancelled). NO id is
-        // shared between the two — we match terminal frames against the most
-        // recent open chip with the same name + argsKey, then fall back to
-        // most-recent-open with same name. New running chips append; terminal
-        // frames mutate the matched chip in place.
-        if (parsed.type === 'tool_call') {
-          const argsKey = JSON.stringify(parsed.args ?? {})
-          if (parsed.status === 'running') {
+        // ─── Gemini brain tool-call frames (Phase 2 / Stage 3) ───────────
+        case 'tool_call': {
+          const name = String(parsed.name)
+          const args = parsed.args as Record<string, unknown> | undefined
+          const status = parsed.status as ToolCallStatus
+          const argsKey = JSON.stringify(args ?? {})
+
+          if (status === 'running') {
             const seq = ++toolCallSeqRef.current
-            const id = `${parsed.name}#${seq}`
+            const id = `${name}#${seq}`
             const startedAt = new Date().toISOString()
             setToolCalls((prev) => [
               ...prev,
-              {
-                id,
-                startedAt,
-                name: parsed.name,
-                args: parsed.args,
-                argsKey,
-                status: 'running',
-              },
+              { id, startedAt, name, args, argsKey, status: 'running' },
             ])
           } else {
-            // Terminal: complete | error | cancelled. Find the most-recently
-            // appended open chip whose (name, argsKey) match. If args were
-            // mutated (rare — backend truncates so a deep field could differ),
-            // fall back to most-recent open with same name.
             setToolCalls((prev) => {
               let matchIdx = -1
               for (let i = prev.length - 1; i >= 0; i--) {
                 const c = prev[i]
-                if (c.status !== 'running' || c.name !== parsed.name) continue
+                if (c.status !== 'running' || c.name !== name) continue
                 if (c.argsKey === argsKey) {
                   matchIdx = i
                   break
@@ -557,64 +438,55 @@ export default function VoicePage() {
               if (matchIdx === -1) {
                 for (let i = prev.length - 1; i >= 0; i--) {
                   const c = prev[i]
-                  if (c.status === 'running' && c.name === parsed.name) {
+                  if (c.status === 'running' && c.name === name) {
                     matchIdx = i
                     break
                   }
                 }
               }
+              const durationMs = parsed.duration_ms as number | undefined
+              const preview = parsed.preview as string | undefined
               if (matchIdx === -1) {
-                // No open chip — render a synthetic terminal-only chip so
-                // late frames after a reload still show context.
                 const seq = ++toolCallSeqRef.current
                 return [
                   ...prev,
                   {
-                    id: `${parsed.name}#${seq}`,
+                    id: `${name}#${seq}`,
                     startedAt: new Date().toISOString(),
-                    name: parsed.name,
-                    args: parsed.args,
+                    name,
+                    args,
                     argsKey,
-                    status: parsed.status,
-                    durationMs: parsed.duration_ms,
-                    preview: parsed.preview,
+                    status,
+                    durationMs,
+                    preview,
                   },
                 ]
               }
               const next = prev.slice()
               next[matchIdx] = {
                 ...next[matchIdx],
-                status: parsed.status,
-                durationMs: parsed.duration_ms,
-                preview: parsed.preview,
+                status,
+                durationMs,
+                preview,
               }
               return next
             })
           }
+          break
         }
 
-        if (parsed.type === 'error' as string) {
-          const err = parsed as unknown as { type: 'error'; message: string }
-          const text = err.message ?? ''
-          // Transient STT failures (wind / silence / mic hiccup) are noise to
-          // the owner. Riggs is muting them at the source; we double-tap on
-          // the FE so a stray frame can't reach the timeline. Logged to
-          // console for diagnosis.
+        case 'error': {
+          const text = String(parsed.message ?? '')
           if (TRANSIENT_ERROR_PATTERN.test(text)) {
             console.warn('[voice] suppressed transient STT error:', text)
-            setThinkingState('idle')
-            setVoiceState(conversationActive ? 'listening' : 'idle')
+            setAwaitingReply(false)
             return
           }
-          // Dedup: identical error text within 60s collapses into the prior
-          // chip rather than spamming the timeline. Real distinct errors
-          // (auth, network, model 5xx) flow through.
           const now = Date.now()
           const last = lastErrorAtRef.current
           if (last && last.text === text && now - last.at < 60_000) {
             console.warn('[voice] deduped repeat error within 60s:', text)
-            setThinkingState('idle')
-            setVoiceState(conversationActive ? 'listening' : 'idle')
+            setAwaitingReply(false)
             return
           }
           lastErrorAtRef.current = { text, at: now }
@@ -627,57 +499,22 @@ export default function VoicePage() {
               timestamp: new Date().toISOString(),
             },
           ])
-          setThinkingState('idle')
-          setVoiceState(conversationActive ? 'listening' : 'idle')
+          setAwaitingReply(false)
+          break
         }
-      } catch {
-        // ignore non-JSON
+
+        default:
+          // Unknown frame types are ignored — Stage 3/4 will add more.
+          break
       }
-    }, [conversationActive, playNextChunk, stopAudioPlayback, setProjectContext]),
+    }, [liveAudio, setProjectContext]),
   })
 
-  const { start: startVad, stop: stopVad, speaking: vadSpeaking } = useVad({
-    onSpeechStart: useCallback(() => {
-      // Gate is active from tts_start through end-of-playback. Using the
-      // combo `isPlayingAudioRef && hasStartedAudioRef` (previous attempt)
-      // left a 50–300ms race after tts_start where neither was true yet —
-      // VAD would bypass the gate and kill Chief's own turn before audio
-      // became audible. Forge verified this as the likely root cause of
-      // "Chief can't hear me, responds to text."
-      vadIsSpeakingRef.current = true
-      const chiefActive = ttsActiveRef.current
-      speechStartedDuringTtsRef.current = chiefActive
-      console.log('[voice] speech-start chiefActive=', chiefActive)
-      if (!chiefActive) {
-        setVoiceState('speaking')
-      }
-    }, []),
-    onSpeechEnd: useCallback((audio: Float32Array) => {
-      vadIsSpeakingRef.current = false
-      const startedDuringTts = speechStartedDuringTtsRef.current
-      speechStartedDuringTtsRef.current = false
-      console.log('[voice] speech-end samples=', audio.length, 'duringTts=', startedDuringTts)
-      // 16kHz mono → 4000 samples = 250ms. Only applies when Chief is audibly
-      // speaking — outside of TTS playback, every utterance goes through
-      // regardless of length. Echo blips that AEC misses are typically
-      // <200ms total; real barge-in speech ("stop", "wait") with VAD's
-      // ~480ms redemption pad comfortably clears 250ms.
-      if (startedDuringTts && audio.length < 4000) {
-        return
-      }
-      if (startedDuringTts) {
-        stopAudioPlayback()
-        send(JSON.stringify({ type: 'interrupt' }))
-      }
-      setVoiceState('thinking')
-      // Dots arm the moment audio leaves the wire — they'll persist
-      // through the bridge phrase TTS and only die when first deep-reply
-      // token streams (or the turn errors / cancels).
-      setThinkingState('awaiting')
-      const wav = float32ToWav(audio)
-      send(wav)
-    }, [send, stopAudioPlayback]),
-  })
+  // Keep the latest send fn in a ref so onPcmChunk (defined before the
+  // hook returns `send`) can reach it without recreating the hook.
+  useEffect(() => {
+    sendRef.current = send
+  }, [send])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -685,59 +522,53 @@ export default function VoicePage() {
     }
   }, [messages])
 
-  // WS dropped (network blip / backend restart). Reset every piece of voice
-  // state that could otherwise survive into the auto-reconnected session and
-  // strand the orb in a wedged state. Concrete bug this fixes: a drop between
-  // `tts_start` and any audio chunk leaves `ttsActiveRef=true` forever, so
-  // every subsequent owner utterance gets treated as "barge-in of nothing"
-  // and the echo gate stays half-on indefinitely. stopAudioPlayback() clears
-  // ttsActiveRef + hasStartedAudioRef + flushes the audio queue + stops the
-  // current source; we additionally clear the barge-in latch and VAD-speaking
-  // mirror, neither of which stopAudioPlayback knows about.
+  // WS dropped (network blip / backend restart). Flush playback so a
+  // half-finished Chief reply doesn't keep playing into the auto-
+  // reconnected session, and clear the awaiting-reply hint.
   useEffect(() => {
     if (isConnected) return
-    stopAudioPlayback()
-    speechStartedDuringTtsRef.current = false
-    vadIsSpeakingRef.current = false
-    setThinkingState('idle')
-  }, [isConnected, stopAudioPlayback])
+    liveAudio.flushPlayback()
+    setAwaitingReply(false)
+  }, [isConnected, liveAudio])
 
-  // Send project context frame to backend whenever the context changes or WS connects.
-  // This keeps the backend in sync so it can scope the system prompt correctly.
+  // Send project context frame to backend whenever the context changes or
+  // WS connects. Backend uses it to scope the system prompt.
   useEffect(() => {
     if (!isConnected) return
     send(JSON.stringify({ type: 'context', project: currentProject }))
   }, [isConnected, currentProject, send])
 
-  // Send TTS speed preference to backend whenever it changes (or on reconnect).
-  // Applied server-side via Google TTS `speaking_rate` — proper time-stretch,
-  // preserves pitch. Frontend no longer sets AudioBufferSource.playbackRate.
+  // Speed control is a no-op on Live API (no TTS speed parameter), but
+  // we still emit the frame for back-compat — server ignores cleanly.
+  // Owner can flip a future "Use Google TTS" toggle to make it active.
   useEffect(() => {
     if (!isConnected) return
     send(JSON.stringify({ type: 'speed', value: speed }))
   }, [isConnected, speed, send])
 
-  useEffect(() => {
-    if (!conversationActive) {
-      setVoiceState('idle')
-    } else if (!vadSpeaking && voiceState === 'idle') {
-      setVoiceState('listening')
-    }
-  }, [conversationActive, vadSpeaking, voiceState])
+  // ─── Conversation lifecycle ────────────────────────────────────────────
 
   async function handleStartConversation() {
-    unlockAudio()
+    // CRITICAL on iOS Safari: useLiveAudio.start() MUST run inside the
+    // click handler stack. Mounting on useEffect leaves the playback
+    // AudioContext suspended and no inbound audio ever decodes.
+    try {
+      await liveAudio.start()
+    } catch (err) {
+      // Permission denied / no device / etc. — already toasted via onError.
+      console.error('[voice] failed to start live audio:', err)
+      return
+    }
     setConversationActive(true)
-    setVoiceState('listening')
-    await startVad()
   }
 
   function handleEndConversation() {
-    stopVad()
-    stopAudioPlayback()
+    liveAudio.stop()
     setConversationActive(false)
-    setVoiceState('idle')
-    setThinkingState('idle')
+    setAwaitingReply(false)
+    // Tell the backend to wrap up its Live session for this connection.
+    // Server-side close also flushes any half-buffered transcript.
+    send(JSON.stringify({ type: 'interrupt' }))
   }
 
   async function handleToggleVoice() {
@@ -747,24 +578,22 @@ export default function VoicePage() {
 
   function handleTextSend(e: FormEvent) {
     e.preventDefault()
-    if (!textInput.trim() || voiceState === 'thinking') return
+    const trimmed = textInput.trim()
+    if (!trimmed) return
 
-    // Prime audio on any user gesture so Chief's spoken reply plays on iPhone.
-    unlockAudio()
-    send(JSON.stringify({ type: 'text', content: textInput.trim() }))
+    send(JSON.stringify({ type: 'text', content: trimmed }))
 
     setMessages((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
         role: 'user',
-        content: textInput.trim(),
+        content: trimmed,
         timestamp: new Date().toISOString(),
       },
     ])
     setTextInput('')
-    setVoiceState('thinking')
-    setThinkingState('awaiting')
+    setAwaitingReply(true)
   }
 
   async function handleCamera() {
@@ -787,8 +616,7 @@ export default function VoicePage() {
             timestamp: new Date().toISOString(),
           },
         ])
-        setVoiceState('thinking')
-        setThinkingState('awaiting')
+        setAwaitingReply(true)
       }
       reader.readAsDataURL(file)
     }
@@ -818,13 +646,11 @@ export default function VoicePage() {
           timestamp: new Date().toISOString(),
         },
       ])
-      setVoiceState('thinking')
-      setThinkingState('awaiting')
+      setAwaitingReply(true)
     } catch {
       // User cancelled or not supported
     }
   }
-
 
   function formatTime(iso: string) {
     return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -847,14 +673,33 @@ export default function VoicePage() {
   ].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
 
   const handleCancelTask = () => {
-    send(JSON.stringify({ type: 'cancel' }))
+    send(JSON.stringify({ type: 'cancel', action: 'task' }))
   }
 
-  // Determine label shown under orb during active session
+  // ─── Derived label / state ─────────────────────────────────────────────
+  // Live owns the source of truth — `isMicActive`, `isSpeaking`, and the
+  // owner-derived `awaitingReply` flag combine into a single label for the
+  // header strip + orb tint. Order of precedence:
+  //   1. Chief speaking (audio actually flowing)
+  //   2. Awaiting reply (you spoke, Chief hasn't started)
+  //   3. Listening (mic open, room is quiet)
+  //   4. Idle
+  const voiceLabel: VoiceLabel = !conversationActive
+    ? 'idle'
+    : liveAudio.isSpeaking
+      ? 'speaking'
+      : awaitingReply
+        ? 'thinking'
+        : 'listening'
+
+  // Active label sits under the orb when a call is in progress. We use
+  // audioLevel as a soft "you're talking right now" hint without needing a
+  // VAD — Live handles real turn detection server-side.
+  const youAreTalking = conversationActive && liveAudio.audioLevel > 0.04 && !liveAudio.isSpeaking
   function getActiveLabel(): string {
-    if (vadSpeaking) return 'Listening to you...'
-    if (voiceState === 'thinking') return 'Thinking...'
-    if (voiceState === 'speaking') return 'Chief is speaking'
+    if (youAreTalking) return 'Listening to you...'
+    if (voiceLabel === 'thinking') return 'Thinking...'
+    if (voiceLabel === 'speaking') return 'Chief is speaking'
     return 'Listening...'
   }
 
@@ -863,11 +708,14 @@ export default function VoicePage() {
       {/* Header strip */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface">
         <div className="flex items-center gap-3">
-          <span className={`text-xs font-medium ${STATE_COLORS[voiceState]}`}>
-            {voiceState === 'idle' ? 'Ready' : STATE_LABELS[voiceState]}
+          <span className={`text-xs font-medium ${STATE_COLORS[voiceLabel]}`}>
+            {STATE_LABELS[voiceLabel]}
           </span>
           {!isConnected && (
             <span className="text-xs text-ink/30">Connecting...</span>
+          )}
+          {reconnecting && isConnected && (
+            <span className="text-xs text-ink/40">Reconnecting...</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -907,19 +755,16 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Main content area — single chat-first layout. The old centerpiece
-          orb is gone: the mic lives inline in the composer row, voice state
-          shows as a thin strip above the chat, and messages take the full
-          viewport on mobile. */}
+      {/* Main content area */}
       <div className="flex-1 flex flex-col min-h-0">
         {conversationActive && (
           <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-surface-border bg-surface-overlay shrink-0">
             <span className={`text-xs font-medium transition-colors ${
-              vadSpeaking
+              youAreTalking
                 ? 'text-accent-dark'
-                : voiceState === 'thinking'
+                : voiceLabel === 'thinking'
                 ? 'text-status-working'
-                : voiceState === 'speaking'
+                : voiceLabel === 'speaking'
                 ? 'text-primary'
                 : 'text-emerald-600'
             }`}>
@@ -935,9 +780,7 @@ export default function VoicePage() {
           </div>
         )}
 
-        {/* Message history — full-height scroll area. Interleaves chat messages
-            and dispatched-task bubbles by timestamp so the conversation shows
-            tasks inline where they were issued. */}
+        {/* Message history */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {timeline.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
@@ -1004,12 +847,10 @@ export default function VoicePage() {
             )
           })}
 
-          {/* Thinking dots — appear from speech-end through first-token,
-              independent of voiceState. They persist UNDER bridge-phrase
-              TTS playback (voiceState='speaking') because the deep brain
-              is still processing during that window. Disappear the moment
-              the first real token streams. */}
-          {thinkingState === 'awaiting' && <ThinkingDots />}
+          {/* Thinking dots — armed when the owner just finished speaking
+              (or sent text) and Chief hasn't started speaking back yet.
+              Cleared the moment output_transcript or audio chunks land. */}
+          {awaitingReply && !liveAudio.isSpeaking && <ThinkingDots />}
         </div>
       </div>
 
@@ -1029,8 +870,7 @@ export default function VoicePage() {
         </div>
       )}
 
-      {/* Bottom controls — mic button outside Composer, camera/screenshot/speed
-          live inside Composer's + menu so they're only visible when needed. */}
+      {/* Bottom controls */}
       <div className="px-4 pb-2 pt-2 bg-surface">
         <div className="flex gap-2 items-center">
           <button
@@ -1041,11 +881,11 @@ export default function VoicePage() {
             className={`w-12 h-12 shrink-0 flex items-center justify-center rounded-2xl border transition-all active:scale-95 disabled:opacity-30 ${
               !conversationActive
                 ? 'bg-surface-raised border-ink/15 text-ink/70 hover:text-ink hover:border-primary/40'
-                : vadSpeaking
+                : youAreTalking
                 ? 'bg-accent/15 border-accent text-accent-dark animate-pulse'
-                : voiceState === 'speaking'
+                : voiceLabel === 'speaking'
                 ? 'bg-primary/15 border-primary text-primary animate-pulse'
-                : voiceState === 'thinking'
+                : voiceLabel === 'thinking'
                 ? 'bg-status-working/15 border-status-working text-status-working'
                 : 'bg-primary text-white border-primary-dark shadow-card'
             }`}
@@ -1059,7 +899,7 @@ export default function VoicePage() {
               onSubmit={handleTextSend}
               onCamera={handleCamera}
               onScreenshot={handleScreenshot}
-              disabled={voiceState === 'thinking'}
+              disabled={false}
               speed={speed}
               onSpeedChange={setSpeed}
             />
