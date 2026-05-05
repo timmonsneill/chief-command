@@ -324,6 +324,23 @@ export interface WsTaskCancelledEvent {
   reason: string
 }
 
+// Gemini brain tool-use frames (Phase 2). Emitted by services/gemini_brain.py
+// when the brain decides to call a tool itself (Read / Bash / Grep /
+// dispatch_agent). Backend emits one frame with status='running' before the
+// tool dispatches and a second frame with terminal status (complete/error/
+// cancelled) once it returns. The two frames are NOT correlated by id on
+// the backend — both carry the same name + (truncated) args so the FE has
+// to match terminal frames against the most-recent open chip with the same
+// shape. `duration_ms` and `preview` are present on terminal frames only.
+export interface WsToolCallEvent {
+  type: 'tool_call'
+  name: string                       // e.g. 'Read' | 'Bash' | 'Grep' | 'dispatch_agent'
+  args?: Record<string, unknown>     // backend truncates each field to 200 chars
+  status: 'running' | 'complete' | 'error' | 'cancelled'
+  duration_ms?: number               // present on terminal frames only
+  preview?: string                   // first 240 chars of tool output, terminal frames only
+}
+
 export type WsEvent =
   | WsTranscriptEvent
   | WsActiveModelEvent
@@ -339,6 +356,7 @@ export type WsEvent =
   | WsTaskOutputEvent
   | WsTaskCompleteEvent
   | WsTaskCancelledEvent
+  | WsToolCallEvent
 
 export interface SessionUsage {
   session_id: string

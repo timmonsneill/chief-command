@@ -9,6 +9,7 @@ import { UsageMeter } from '../components/UsageMeter'
 import { SessionBadge } from '../components/SessionBadge'
 import { type TaskBubbleStatus } from '../components/TaskBubble'
 import { InlineTaskActivity } from '../components/InlineTaskActivity'
+import { ToolCallChip, type ToolCallStatus } from '../components/ToolCallChip'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
 
 type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
@@ -24,6 +25,23 @@ interface TaskState {
   durationSeconds?: number
   summary?: string
   cancelReason?: string
+}
+
+// Gemini brain tool calls. Backend emits one frame on tool dispatch
+// (status='running') and one on return (status terminal); the frames are
+// NOT correlated by id. We synthesize a stable FE id at running-time and
+// match terminal frames by name + JSON-shape of args, falling back to the
+// most-recent-open chip with the same name. `argsKey` is cached on the
+// running record so we don't re-stringify per terminal frame.
+interface ToolCallState {
+  id: string
+  startedAt: string                  // ISO; controls timeline interleave
+  name: string
+  args?: Record<string, unknown>
+  argsKey: string                    // JSON.stringify(args ?? {})
+  status: ToolCallStatus
+  durationMs?: number
+  preview?: string
 }
 
 function float32ToWav(samples: Float32Array, sampleRate = 16000): ArrayBuffer {
@@ -80,6 +98,7 @@ const STATE_COLORS: Record<VoiceState, string> = {
 export default function VoicePage() {
   const [messages, setMessages] = useState<VoiceMessage[]>([])
   const [tasks, setTasks] = useState<Record<string, TaskState>>({})
+  const [toolCalls, setToolCalls] = useState<ToolCallState[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [textInput, setTextInput] = useState('')
@@ -101,6 +120,10 @@ export default function VoicePage() {
   // from the frame — NOT this ref — so a late output from an older task can't
   // be misattributed to a newer one.
   const activeTaskIdRef = useRef<string | null>(null)
+  // Monotonic counter for synthesizing tool-call chip ids. Backend doesn't
+  // emit one — we generate `${name}#${seq}` at running-time and match terminal
+  // frames by (name, argsKey) against the most-recent-open chip.
+  const toolCallSeqRef = useRef(0)
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
@@ -459,6 +482,83 @@ export default function VoicePage() {
           }
         }
 
+        // Gemini brain tool-call frames (Phase 2). Backend emits one on dispatch
+        // (running) and one on return (complete/error/cancelled). NO id is
+        // shared between the two — we match terminal frames against the most
+        // recent open chip with the same name + argsKey, then fall back to
+        // most-recent-open with same name. New running chips append; terminal
+        // frames mutate the matched chip in place.
+        if (parsed.type === 'tool_call') {
+          const argsKey = JSON.stringify(parsed.args ?? {})
+          if (parsed.status === 'running') {
+            const seq = ++toolCallSeqRef.current
+            const id = `${parsed.name}#${seq}`
+            const startedAt = new Date().toISOString()
+            setToolCalls((prev) => [
+              ...prev,
+              {
+                id,
+                startedAt,
+                name: parsed.name,
+                args: parsed.args,
+                argsKey,
+                status: 'running',
+              },
+            ])
+          } else {
+            // Terminal: complete | error | cancelled. Find the most-recently
+            // appended open chip whose (name, argsKey) match. If args were
+            // mutated (rare — backend truncates so a deep field could differ),
+            // fall back to most-recent open with same name.
+            setToolCalls((prev) => {
+              let matchIdx = -1
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const c = prev[i]
+                if (c.status !== 'running' || c.name !== parsed.name) continue
+                if (c.argsKey === argsKey) {
+                  matchIdx = i
+                  break
+                }
+              }
+              if (matchIdx === -1) {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  const c = prev[i]
+                  if (c.status === 'running' && c.name === parsed.name) {
+                    matchIdx = i
+                    break
+                  }
+                }
+              }
+              if (matchIdx === -1) {
+                // No open chip — render a synthetic terminal-only chip so
+                // late frames after a reload still show context.
+                const seq = ++toolCallSeqRef.current
+                return [
+                  ...prev,
+                  {
+                    id: `${parsed.name}#${seq}`,
+                    startedAt: new Date().toISOString(),
+                    name: parsed.name,
+                    args: parsed.args,
+                    argsKey,
+                    status: parsed.status,
+                    durationMs: parsed.duration_ms,
+                    preview: parsed.preview,
+                  },
+                ]
+              }
+              const next = prev.slice()
+              next[matchIdx] = {
+                ...next[matchIdx],
+                status: parsed.status,
+                durationMs: parsed.duration_ms,
+                preview: parsed.preview,
+              }
+              return next
+            })
+          }
+        }
+
         if (parsed.type === 'error' as string) {
           const err = parsed as unknown as { type: 'error'; message: string }
           setMessages((prev) => [
@@ -665,14 +765,18 @@ export default function VoicePage() {
 
   const workingAgents = agents.filter((a) => a.status === 'working')
 
-  // Interleave messages and task bubbles by timestamp for a single chronological
-  // timeline. task.id === task_id which is the started_at ISO timestamp key.
+  // Interleave messages, task bubbles, and tool-call chips by timestamp for
+  // a single chronological timeline. task.id === task_id which is the
+  // started_at ISO timestamp key. Tool-call startedAt is FE-stamped at
+  // running-time (or terminal-time if a stray late frame).
   type TimelineItem =
     | { kind: 'message'; ts: string; msg: VoiceMessage }
     | { kind: 'task'; ts: string; task: TaskState }
+    | { kind: 'tool'; ts: string; tool: ToolCallState }
   const timeline: TimelineItem[] = [
     ...messages.map((m): TimelineItem => ({ kind: 'message', ts: m.timestamp, msg: m })),
     ...Object.values(tasks).map((t): TimelineItem => ({ kind: 'task', ts: t.startedAt, task: t })),
+    ...toolCalls.map((tc): TimelineItem => ({ kind: 'tool', ts: tc.startedAt, tool: tc })),
   ].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
 
   const handleCancelTask = () => {
@@ -795,6 +899,19 @@ export default function VoicePage() {
                   cancelReason={t.cancelReason}
                   stdoutLines={t.stdoutLines}
                   onCancel={t.status === 'running' ? handleCancelTask : undefined}
+                />
+              )
+            }
+            if (item.kind === 'tool') {
+              const tc = item.tool
+              return (
+                <ToolCallChip
+                  key={`tool-${tc.id}`}
+                  name={tc.name}
+                  args={tc.args}
+                  status={tc.status}
+                  durationMs={tc.durationMs}
+                  preview={tc.preview}
                 />
               )
             }
