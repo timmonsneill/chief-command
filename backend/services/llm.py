@@ -7,9 +7,9 @@ to know which provider is wired in — they pass history + callbacks + scope
 context the same way they always did.
 
 What changed at the API surface vs the legacy Anthropic version:
-  * ``model`` is accepted but ignored for routing — Gemini 2.5 Flash is the
+  * ``model`` is accepted but ignored for routing — Gemini 2.5 Pro is the
     only brain. The returned ``usage_dict["model"]`` reports
-    ``"gemini-2.5-flash"`` (the Phase 2 cost-tracker bucket).
+    ``"gemini-2.5-pro"`` (the Phase 2 cost-tracker bucket).
   * ``system_blocks`` (Anthropic-shaped) is still accepted; we flatten the
     block list to a single string for Gemini's ``system_instruction`` field.
     Callers that pass ``project_scope`` instead get a fresh build via
@@ -80,9 +80,9 @@ async def stream_turn(
     """Run one Gemini turn and stream tokens / TTS sentences / tool-call frames.
 
     Maintains the legacy signature so the WS handler keeps working without
-    changes. ``model`` is accepted but ignored — Gemini 2.5 Flash is the
+    changes. ``model`` is accepted but ignored — Gemini 2.5 Pro is the
     only brain. Returns a usage dict with the same keys legacy callers
-    expect plus ``model`` pinned to ``gemini-2.5-flash``.
+    expect plus ``model`` pinned to ``gemini-2.5-pro``.
 
     See module docstring for the full migration notes.
 

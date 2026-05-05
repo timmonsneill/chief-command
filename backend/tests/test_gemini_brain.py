@@ -279,10 +279,10 @@ class TestTextOnlyStreaming:
         # Usage came from the last chunk.
         assert usage["input_tokens"] == 120
         assert usage["output_tokens"] == 10
-        assert usage["model"] == "gemini-2.5-flash"
+        assert usage["model"] == "gemini-2.5-pro"
         # Cost: billable_input = 120 - 0 = 120; output = 10
-        # cost_dollars = 120/1e6 * 0.30 + 10/1e6 * 2.50 = 6.1e-5
-        # cost_cents = round(6.1e-5 * 100) = 0
+        # cost_dollars = 120/1e6 * 1.25 + 10/1e6 * 10.00 = 2.5e-4
+        # cost_cents = round(2.5e-4 * 100) = 0
         assert usage["cost_cents"] == 0
 
     @pytest.mark.asyncio
@@ -620,13 +620,13 @@ class TestGetClientAuthSelection:
 # ---------------------------------------------------------------------------
 class TestCostComputation:
     def test_cost_with_cached_input(self):
-        # 100k input, 50k cached, 10k output
-        # billable_input = 50k * 0.30 / 1M = $0.015
-        # cached       = 50k * 0.03 / 1M = $0.0015
-        # output       = 10k * 2.50 / 1M = $0.025
-        # total = $0.0415 = 4.15 cents → round to 4
+        # 100k input, 50k cached, 10k output  (Gemini 2.5 Pro pricing)
+        # billable_input = 50k * 1.25  / 1M = $0.0625
+        # cached         = 50k * 0.31  / 1M = $0.0155
+        # output         = 10k * 10.00 / 1M = $0.10
+        # total = $0.178 = 17.8 cents → round to 18
         usage = FakeUsageMetadata(prompt=100_000, candidates=10_000, cached=50_000)
-        assert gemini_brain._compute_cost_cents(usage) == 4
+        assert gemini_brain._compute_cost_cents(usage) == 18
 
     def test_cost_with_no_usage_meta(self):
         assert gemini_brain._compute_cost_cents(None) == 0

@@ -608,14 +608,14 @@ async def _run_llm_turn(
     a final usage block we never received on cancel; STT/TTS legs are
     populated normally so the dashboard reflects what Google actually billed.
     """
-    # Phase 2: Gemini 2.5 Flash is the only brain. The router's "deep"
+    # Phase 2: Gemini 2.5 Pro is the only brain. The router's "deep"
     # signal still fires the bridge-phrase TTS hint for thinkier prompts so
     # the user gets immediate feedback while Gemini formulates a longer
     # reply, but the Anthropic model id it returns is no longer used for
     # routing. The cost row carries whatever ``gemini_brain.stream`` reports
-    # in its usage_dict (currently "gemini-2.5-flash").
+    # in its usage_dict (currently "gemini-2.5-pro").
     _legacy_model, is_deep = classify_and_route(user_text)
-    model = "gemini-2.5-flash"
+    model = "gemini-2.5-pro"
     await ws_send_json(ws, {"type": "active_model", "model": model, "is_deep": is_deep})
 
     tts_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()

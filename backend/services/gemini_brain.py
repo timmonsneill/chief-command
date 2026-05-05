@@ -1,4 +1,4 @@
-"""Gemini 2.5 Flash via Vertex AI — Chief's brain (Phase 2).
+"""Gemini 2.5 Pro via Vertex AI — Chief's brain (Phase 2).
 
 This is the streaming + function-call adapter that turns the Vertex AI
 Gemini SDK into a drop-in for the legacy Anthropic ``stream_turn`` API.
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # Canonical model id used both as the Vertex AI model name AND as the
 # database "model" column for the cost tracker. Keeping a single source of
 # truth here avoids drift between the brain call and the cost row.
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = "gemini-2.5-pro"
 
 # Same sentence-flush regex the legacy llm.py used. Mirrors ``\s+`` after
 # sentence-ending punctuation.
@@ -133,13 +133,12 @@ def _get_client() -> Any:
 
 
 def _compute_cost_cents(usage_meta: Any) -> int:
-    """Compute Gemini 2.5 Flash cost in cents from a usage_metadata block.
+    """Compute Gemini 2.5 Pro cost in cents from a usage_metadata block.
 
-    Pricing per 1M tokens (Vertex AI, May 2026 — see settings/notes):
-        text/image/video input         $0.30
-        cached text/image/video input  $0.03
-        audio input                    $1.00  (we don't use this — text-mode)
-        text output                    $2.50
+    Pricing per 1M tokens (Vertex AI, ≤200k context window, May 2026):
+        text/image/video input         $1.25
+        cached text/image/video input  $0.31
+        text output                    $10.00
 
     We treat any ``cached_content_token_count`` as the cached-input slice and
     bill the remaining input at the full input rate.
@@ -150,9 +149,9 @@ def _compute_cost_cents(usage_meta: Any) -> int:
     output_tokens = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
     cached_tokens = int(getattr(usage_meta, "cached_content_token_count", 0) or 0)
 
-    rates_in = 0.30
-    rates_cached = 0.03
-    rates_out = 2.50
+    rates_in = 1.25
+    rates_cached = 0.31
+    rates_out = 10.00
 
     billable_input = max(0, input_tokens - cached_tokens)
     cost_dollars = (
@@ -284,7 +283,7 @@ async def stream(
 
     Returns:
       UsageRecord with the same keys legacy callers expect plus ``model``
-      pinned to ``gemini-2.5-flash``.
+      pinned to ``gemini-2.5-pro``.
     """
     from google.genai import types
 
@@ -568,9 +567,9 @@ async def stream(
 def _compute_cost_cents_from_dict(usage_dict: dict) -> int:
     """Re-compute cost from a usage_dict (used after _compute_cost_cents that
     takes the SDK metadata object)."""
-    rates_in = 0.30
-    rates_cached = 0.03
-    rates_out = 2.50
+    rates_in = 1.25
+    rates_cached = 0.31
+    rates_out = 10.00
     cached = usage_dict.get("cache_read_input_tokens", 0) or 0
     inp = usage_dict.get("input_tokens", 0) or 0
     out = usage_dict.get("output_tokens", 0) or 0
