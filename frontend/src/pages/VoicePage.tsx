@@ -10,9 +10,24 @@ import { SessionBadge } from '../components/SessionBadge'
 import { type TaskBubbleStatus } from '../components/TaskBubble'
 import { InlineTaskActivity } from '../components/InlineTaskActivity'
 import { ToolCallChip, type ToolCallStatus } from '../components/ToolCallChip'
+import { ThinkingDots } from '../components/ThinkingDots'
 import type { VoiceMessage, Agent, WsEvent, ActiveModel, WsUsageEvent } from '../lib/api'
 
 type VoiceState = 'idle' | 'listening' | 'speaking' | 'thinking'
+
+// Independent of VoiceState. Tracks the *deep-reply* lifecycle so the
+// thinking dots can persist UNDER the bridge-phrase TTS playback (which
+// flips voiceState into 'speaking' the moment the first chunk lands).
+//   awaiting   — owner audio/text was sent; brain hasn't streamed yet
+//   streaming  — first `token` event arrived; dots disappear
+//   idle       — pre-turn or post-message_done
+type ThinkingState = 'idle' | 'awaiting' | 'streaming'
+
+// Transient STT failures the backend used to surface verbatim ("Could
+// not transcribe audio" when wind/noise tripped VAD). Riggs is muting
+// these at the source, but we suppress on the FE too as belt-and-braces
+// so a single stray frame doesn't reach the timeline.
+const TRANSIENT_ERROR_PATTERN = /could not transcribe/i
 
 interface TaskState {
   id: string              // = task_id from backend (ISO timestamp, unique per dispatch)
@@ -101,6 +116,7 @@ export default function VoicePage() {
   const [toolCalls, setToolCalls] = useState<ToolCallState[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
+  const [thinkingState, setThinkingState] = useState<ThinkingState>('idle')
   const [textInput, setTextInput] = useState('')
   const [speed, setSpeed] = useState(1)
   const [conversationActive, setConversationActive] = useState(false)
@@ -124,6 +140,12 @@ export default function VoicePage() {
   // emit one — we generate `${name}#${seq}` at running-time and match terminal
   // frames by (name, argsKey) against the most-recent-open chip.
   const toolCallSeqRef = useRef(0)
+  // Last-seen transient STT error timestamp (ms epoch). Caps visible
+  // "Could not transcribe" chips at 1/min in case backend ever leaks one
+  // through. Mostly defensive — the primary defense is full suppression
+  // for the matching pattern; this dedups the residual non-transient
+  // error if its text happens to repeat back-to-back.
+  const lastErrorAtRef = useRef<{ text: string; at: number } | null>(null)
 
   const audioQueueRef = useRef<ArrayBuffer[]>([])
   const isPlayingAudioRef = useRef(false)
@@ -293,6 +315,10 @@ export default function VoicePage() {
         }
 
         if (parsed.type === 'token') {
+          // First real token from the deep brain — kill the thinking dots.
+          // Bridge-phrase TTS may already be playing; that's fine, dots
+          // were always meant to die at first-token, not at tts_start.
+          setThinkingState('streaming')
           responseBuffer.current += parsed.text
           setMessages((prev) => {
             const last = prev[prev.length - 1]
@@ -321,6 +347,7 @@ export default function VoicePage() {
             )
           )
           responseBuffer.current = ''
+          setThinkingState('idle')
           setVoiceState('listening')
         }
 
@@ -380,6 +407,7 @@ export default function VoicePage() {
           stopAudioPlayback()
           speechStartedDuringTtsRef.current = false
           ttsActiveRef.current = false
+          setThinkingState('idle')
           setVoiceState(conversationActive ? 'listening' : 'idle')
           // Race guard: backend may not emit a terminal tool_call frame for an
           // in-flight chip when the turn is cancelled. Flip any still-running
@@ -567,15 +595,39 @@ export default function VoicePage() {
 
         if (parsed.type === 'error' as string) {
           const err = parsed as unknown as { type: 'error'; message: string }
+          const text = err.message ?? ''
+          // Transient STT failures (wind / silence / mic hiccup) are noise to
+          // the owner. Riggs is muting them at the source; we double-tap on
+          // the FE so a stray frame can't reach the timeline. Logged to
+          // console for diagnosis.
+          if (TRANSIENT_ERROR_PATTERN.test(text)) {
+            console.warn('[voice] suppressed transient STT error:', text)
+            setThinkingState('idle')
+            setVoiceState(conversationActive ? 'listening' : 'idle')
+            return
+          }
+          // Dedup: identical error text within 60s collapses into the prior
+          // chip rather than spamming the timeline. Real distinct errors
+          // (auth, network, model 5xx) flow through.
+          const now = Date.now()
+          const last = lastErrorAtRef.current
+          if (last && last.text === text && now - last.at < 60_000) {
+            console.warn('[voice] deduped repeat error within 60s:', text)
+            setThinkingState('idle')
+            setVoiceState(conversationActive ? 'listening' : 'idle')
+            return
+          }
+          lastErrorAtRef.current = { text, at: now }
           setMessages((prev) => [
             ...prev,
             {
               id: crypto.randomUUID(),
               role: 'assistant',
-              content: `Error: ${err.message}`,
+              content: `Error: ${text}`,
               timestamp: new Date().toISOString(),
             },
           ])
+          setThinkingState('idle')
           setVoiceState(conversationActive ? 'listening' : 'idle')
         }
       } catch {
@@ -618,6 +670,10 @@ export default function VoicePage() {
         send(JSON.stringify({ type: 'interrupt' }))
       }
       setVoiceState('thinking')
+      // Dots arm the moment audio leaves the wire — they'll persist
+      // through the bridge phrase TTS and only die when first deep-reply
+      // token streams (or the turn errors / cancels).
+      setThinkingState('awaiting')
       const wav = float32ToWav(audio)
       send(wav)
     }, [send, stopAudioPlayback]),
@@ -643,6 +699,7 @@ export default function VoicePage() {
     stopAudioPlayback()
     speechStartedDuringTtsRef.current = false
     vadIsSpeakingRef.current = false
+    setThinkingState('idle')
   }, [isConnected, stopAudioPlayback])
 
   // Send project context frame to backend whenever the context changes or WS connects.
@@ -680,6 +737,7 @@ export default function VoicePage() {
     stopAudioPlayback()
     setConversationActive(false)
     setVoiceState('idle')
+    setThinkingState('idle')
   }
 
   async function handleToggleVoice() {
@@ -706,6 +764,7 @@ export default function VoicePage() {
     ])
     setTextInput('')
     setVoiceState('thinking')
+    setThinkingState('awaiting')
   }
 
   async function handleCamera() {
@@ -729,6 +788,7 @@ export default function VoicePage() {
           },
         ])
         setVoiceState('thinking')
+        setThinkingState('awaiting')
       }
       reader.readAsDataURL(file)
     }
@@ -759,6 +819,7 @@ export default function VoicePage() {
         },
       ])
       setVoiceState('thinking')
+      setThinkingState('awaiting')
     } catch {
       // User cancelled or not supported
     }
@@ -943,17 +1004,12 @@ export default function VoicePage() {
             )
           })}
 
-          {voiceState === 'thinking' && (
-            <div className="flex justify-start">
-              <div className="bg-surface-raised rounded-2xl rounded-bl-md px-4 py-3">
-                <div className="flex gap-1">
-                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:0ms]" />
-                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:150ms]" />
-                  <div className="w-2 h-2 bg-ink/30 rounded-full animate-bounce [animation-delay:300ms]" />
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Thinking dots — appear from speech-end through first-token,
+              independent of voiceState. They persist UNDER bridge-phrase
+              TTS playback (voiceState='speaking') because the deep brain
+              is still processing during that window. Disappear the moment
+              the first real token streams. */}
+          {thinkingState === 'awaiting' && <ThinkingDots />}
         </div>
       </div>
 

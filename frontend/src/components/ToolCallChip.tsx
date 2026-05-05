@@ -2,7 +2,6 @@ import { useState } from 'react'
 import {
   Loader2,
   Check,
-  AlertCircle,
   Ban,
   ChevronDown,
   ChevronRight,
@@ -109,11 +108,23 @@ export function ToolCallChip({
   // chip stays one line by default to avoid pushing the assistant reply off
   // screen during voice mode. Click to expand.
   const [expanded, setExpanded] = useState(false)
+  // Rule #9 (no-narration spec): tool failures stay invisible. The owner
+  // saw a red `TOOL Read · error chief-comma… 2ms` chip on a Read failure
+  // — that's a leaked failure surface. State still mutates upstream so
+  // logs / dispatch / retries can react; we just don't render the chip.
+  // Early-return must come AFTER all hooks so render order stays stable
+  // across status transitions (running → error).
+  if (status === 'error') {
+    return null
+  }
   const Icon = iconFor(name)
 
   const argsSummary = truncate(summarizeArgs(name, args), 80)
+  // After the error early-return above, status is 'running' | 'complete' |
+  // 'cancelled'. The preview surface is only meaningful on terminal frames,
+  // and the only terminal status that survives is 'complete'.
   const hasPreview =
-    (status === 'complete' || status === 'error') &&
+    status === 'complete' &&
     typeof preview === 'string' &&
     preview.trim().length > 0
 
@@ -124,18 +135,14 @@ export function ToolCallChip({
       ? 'bg-accent/5 border-accent/25 hover:bg-accent/10'
       : status === 'cancelled'
         ? 'bg-surface-overlay border-surface-border'
-        : status === 'error'
-          ? 'bg-red-50/60 border-red-200/70'
-          : 'bg-emerald-50/60 border-emerald-200/70'
+        : 'bg-emerald-50/60 border-emerald-200/70'
 
   const iconClass =
     status === 'running'
       ? 'text-accent-dark animate-spin'
       : status === 'cancelled'
         ? 'text-ink/50'
-        : status === 'error'
-          ? 'text-red-600'
-          : 'text-emerald-600'
+        : 'text-emerald-600'
 
   // Status badge — leading uppercase tag so the eye locks onto STATE before NAME.
   const statusLabel: Record<ToolCallStatus, string> = {
@@ -145,10 +152,10 @@ export function ToolCallChip({
     cancelled: 'Tool',
   }
 
-  // Right-side meta. Running shows nothing (animation says it all). Complete/
-  // error show duration. Cancelled shows the literal word.
+  // Right-side meta. Running shows nothing (animation says it all). Complete
+  // shows duration. Cancelled shows the literal word.
   let rightMeta = ''
-  if (status === 'complete' || status === 'error') {
+  if (status === 'complete') {
     rightMeta = formatDuration(durationMs)
   } else if (status === 'cancelled') {
     rightMeta = 'cancelled'
@@ -161,9 +168,7 @@ export function ToolCallChip({
       ? 'running'
       : status === 'cancelled'
         ? 'cancelled'
-        : status === 'error'
-          ? 'error'
-          : null
+        : null
 
   return (
     <div className="flex justify-start">
@@ -184,8 +189,6 @@ export function ToolCallChip({
             <Loader2 size={12} aria-hidden="true" className={`shrink-0 ${iconClass}`} />
           ) : status === 'cancelled' ? (
             <Ban size={12} aria-hidden="true" className={`shrink-0 ${iconClass}`} />
-          ) : status === 'error' ? (
-            <AlertCircle size={12} aria-hidden="true" className={`shrink-0 ${iconClass}`} />
           ) : (
             <Check size={12} aria-hidden="true" className={`shrink-0 ${iconClass}`} />
           )}

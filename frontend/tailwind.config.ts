@@ -118,12 +118,22 @@ export default {
           '0%': { transform: 'scale(1)', opacity: '0.3' },
           '100%': { transform: 'scale(1.9)', opacity: '0' },
         },
+        // Claude-style thinking-dot pulse. Three dots ride this keyframe
+        // staggered by 200ms so the eye reads a left-to-right wave, not
+        // three independent bouncers. ~1.4s loop matches a comfortable
+        // breathing cadence — fast enough to feel alive, slow enough not
+        // to nag during a 12s wait.
+        'thinking-dot': {
+          '0%, 60%, 100%': { transform: 'scale(0.7)', opacity: '0.45' },
+          '30%': { transform: 'scale(1)', opacity: '1' },
+        },
       },
       animation: {
         'orb-breathe': 'orb-breathe 3s ease-in-out infinite',
         'orb-pulse-strong': 'orb-pulse-strong 0.8s ease-in-out infinite',
         'orb-ripple': 'orb-ripple 1.8s ease-out infinite',
         'orb-ripple-slow': 'orb-ripple-slow 2.4s ease-out infinite 0.6s',
+        'thinking-dot': 'thinking-dot 1.4s ease-in-out infinite',
       },
     },
   },
