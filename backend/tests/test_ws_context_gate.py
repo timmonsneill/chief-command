@@ -108,3 +108,86 @@ async def test_multiple_waiters_wake_on_single_set() -> None:
     gate.set()
     await asyncio.gather(t1, t2)
     assert results == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: picker-path scope flip skips the no-op when the frame echoes
+# the same scope (e.g. the initial context frame on WS open). The flip
+# helper must NOT fire teardown_other_scopes / persistent-memory reload
+# in that case — otherwise every WS open would needlessly churn the warm
+# CC pool entry that hydrate_persistent_memory just populated at the top
+# of voice_ws.
+# ---------------------------------------------------------------------------
+class _RecordingPool:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def teardown_other_scopes(
+        self, subject: str, keep_scope: str, reason: str = "scope-switch"
+    ) -> None:
+        self.calls.append((subject, keep_scope))
+
+
+def _picker_flip_branch(
+    *,
+    pool: _RecordingPool,
+    old_project: str,
+    new_project: str,
+    history: list[dict],
+    summary_box: list[str | None],
+):
+    """Mirror the picker-path branch in voice_ws() — flip when the new
+    scope differs, no-op otherwise.
+    """
+
+    async def run() -> None:
+        if old_project != new_project:
+            try:
+                await pool.teardown_other_scopes(
+                    subject="owner", keep_scope=new_project,
+                )
+            except Exception:
+                pass
+            history.clear()
+            history.append({"role": "user", "content": f"hello from {new_project}"})
+            summary_box[0] = f"{new_project} summary"
+
+    return run
+
+
+@pytest.mark.asyncio
+async def test_picker_path_no_flip_when_scope_unchanged() -> None:
+    """The initial context frame on WS open echoes the rehydrated scope.
+    That should NOT churn the warm CC pool entry hydrate_persistent_memory
+    populated seconds earlier."""
+    pool = _RecordingPool()
+    history: list[dict] = [{"role": "user", "content": "real Chief turn"}]
+    summary_box: list[str | None] = ["Chief Command summary"]
+
+    run = _picker_flip_branch(
+        pool=pool, old_project="Chief Command", new_project="Chief Command",
+        history=history, summary_box=summary_box,
+    )
+    await run()
+
+    assert pool.calls == []
+    assert history == [{"role": "user", "content": "real Chief turn"}]
+    assert summary_box[0] == "Chief Command summary"
+
+
+@pytest.mark.asyncio
+async def test_picker_path_flips_when_scope_changes() -> None:
+    pool = _RecordingPool()
+    history: list[dict] = [{"role": "user", "content": "real Chief turn"}]
+    summary_box: list[str | None] = ["Chief Command summary"]
+
+    run = _picker_flip_branch(
+        pool=pool, old_project="Chief Command", new_project="Arch",
+        history=history, summary_box=summary_box,
+    )
+    await run()
+
+    assert pool.calls == [("owner", "Arch")]
+    # In-place clear+append — closure refs survive.
+    assert history == [{"role": "user", "content": "hello from Arch"}]
+    assert summary_box[0] == "Arch summary"

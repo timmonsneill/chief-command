@@ -13,6 +13,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from services.auth import verify_token
 from services import stt_service, tts_service
 from services.audio_utils import convert_webm_to_wav, get_audio_duration
+from services import cc_session
 from services.chief_context import build_chief_system
 # Phase 2: classifier preflight retired. The Gemini brain self-routes to
 # tool calls (Bash/Grep/Read/dispatch_agent) when work is needed, so the
@@ -362,6 +363,66 @@ async def voice_ws(ws: WebSocket) -> None:
                 pass
         current_turn_task = None
 
+    async def _handle_scope_flip(old_project: str, new_project: str) -> None:
+        """Shared bookkeeping for any scope flip — voice-intent or picker.
+
+        Phase 4: a scope flip has to do four things in order, all best-effort
+        so a single backend hiccup never blocks the UI from updating:
+
+          1. Tear down the CC subprocess pool entries for any *other* scope
+             this subject was using. Frees memory + drops crash-loop state
+             for scopes we're no longer talking to. Same JWT subject that
+             ``_run_llm_turn`` keys on, so the kept scope's warm session
+             survives. Wrapped in try/except — UI flip must not depend on
+             pool cleanup success.
+          2. Reload persistent memory for the new scope: rolling summary +
+             recent raw turns. We mutate ``history`` in place
+             (``clear()`` + ``extend()``) so every closure that already
+             captured the list reference (``_gated_text_turn``,
+             ``_gated_audio_turn``, narration helpers) sees the swap. The
+             nonlocal rebind on ``current_summary`` is fine because the
+             gated turns re-read the variable inside the task body, after
+             the gate, before snapshotting.
+          3. (Caller's job) push the ``context_switched`` frame.
+        """
+        nonlocal current_summary
+        try:
+            await cc_session.get_pool().teardown_other_scopes(
+                subject=client_id,
+                keep_scope=new_project,
+                reason="scope-switch",
+            )
+        except Exception as exc:
+            logger.warning(
+                "teardown_other_scopes failed during scope flip "
+                "subject=%s old=%s new=%s: %s",
+                client_id, old_project, new_project, exc,
+            )
+
+        # Reload persistent memory for the new scope. ``clear() + extend()``
+        # so closures over ``history`` (the gated turn wrappers) see the
+        # swap; rebinding ``history = ...`` would leave stale references.
+        try:
+            new_summary, new_turns = await load_persistent_memory(
+                new_project, raw_limit=20,
+            )
+            history.clear()
+            history.extend(new_turns)
+            current_summary = new_summary
+            logger.info(
+                "Voice WS scope flip rehydrated subject=%s old=%s new=%s "
+                "history_turns=%d summary=%s",
+                client_id, old_project, new_project, len(history),
+                "yes" if current_summary else "no",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice WS scope flip rehydrate failed subject=%s new=%s: %s",
+                client_id, new_project, exc,
+            )
+            history.clear()
+            current_summary = None
+
     async def _maybe_switch_project(user_text: str) -> None:
         """Run switch-intent detection on user text; update scope + notify client.
 
@@ -374,7 +435,10 @@ async def voice_ws(ws: WebSocket) -> None:
           2. Persist the canonical value into ``_context_store`` so subsequent
              reads by any other caller (HTTP /context GET, status summary, etc.)
              see the same scope the voice path just applied.
-          3. Push a ``context_switched`` frame to the client so the UI
+          3. Tear down other-scope CC pool entries + reload persistent memory
+             for the new scope (history.clear+extend so closures see the
+             swap). See ``_handle_scope_flip``.
+          4. Push a ``context_switched`` frame to the client so the UI
              ``ProjectContextProvider`` can update the picker in real time —
              the UI was stale before this was wired up.
         """
@@ -384,12 +448,14 @@ async def voice_ws(ws: WebSocket) -> None:
             return
         if detected == current_project:
             return
+        old_project = current_project
         current_project = detected
         _context_store[context_key] = current_project
         logger.info(
             "Voice WS project-switch intent detected text=%r -> project=%s",
             user_text[:80], current_project,
         )
+        await _handle_scope_flip(old_project, current_project)
         try:
             await ws_send_json(ws, {
                 "type": MSG_CONTEXT_SWITCHED,
@@ -421,9 +487,11 @@ async def voice_ws(ws: WebSocket) -> None:
                     # Scope is always concrete; unknown values fall back to default.
                     raw_proj = _migrate_dissolved_scope(data.get("project") or None)
                     if raw_proj in AVAILABLE_PROJECTS:
-                        current_project = raw_proj
+                        new_proj = raw_proj
                     else:
-                        current_project = DEFAULT_PROJECT
+                        new_proj = DEFAULT_PROJECT
+                    old_project = current_project
+                    current_project = new_proj
                     # Persist keyed by JWT subject so per-session scope doesn't
                     # stomp on other tabs / devices / restarts. See context_key
                     # note above.
@@ -433,6 +501,13 @@ async def voice_ws(ws: WebSocket) -> None:
                         "Voice WS context updated subject=%s project=%s",
                         context_key, current_project,
                     )
+                    # Phase 4: picker-path scope flip — same teardown +
+                    # history reload as the voice-intent path. No-op when the
+                    # frame echoes the same scope (e.g. the initial frame on
+                    # WS open) so we don't churn the warm CC session for
+                    # nothing.
+                    if old_project != current_project:
+                        await _handle_scope_flip(old_project, current_project)
                     # Confirm the (possibly migrated) scope to the client so the
                     # Provider pill reflects the authoritative server value.
                     try:
@@ -641,6 +716,20 @@ async def _run_llm_turn(
     a final usage block we never received on cancel; STT/TTS legs are
     populated normally so the dashboard reflects what Google actually billed.
     """
+    # Phase 4 defensive assert: catch upstream scope plumbing regressions at
+    # the entry point of every turn so an empty/whitespace scope can't reach
+    # ``build_chief_system`` (which would silently fall back to DEFAULT_SCOPE
+    # — see chief_context._build_chief_system). Logged turn scope helps
+    # forensics when a wrong-scope reply is reported.
+    assert project_scope and project_scope.strip(), (
+        f"_run_llm_turn invoked with empty scope: "
+        f"client_id={subject}, session_id={session_id}"
+    )
+    logger.info(
+        "Voice WS turn scope=%s session=%s subject=%s",
+        project_scope, session_id, subject,
+    )
+
     # Phase 2: Gemini is the only brain. The router's "deep" signal still
     # fires the bridge-phrase TTS hint for thinkier prompts so the user gets
     # immediate feedback while Gemini formulates a longer reply, but the

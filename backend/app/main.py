@@ -18,7 +18,7 @@ from slowapi.util import get_remote_address
 from app.websockets import router as ws_router
 from config.settings import settings
 from db import get_setting_float, init_db
-from services import gemini_brain, stt_service, tts_service
+from services import cc_session, gemini_brain, stt_service, tts_service
 from services.auth import create_token, require_auth, verify_password, hash_password
 from services.agent_tracker import get_agents as tracker_get_agents
 from services.project_context import get_context, set_context
@@ -511,6 +511,15 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    # Phase 4: defensive teardown of every CC subprocess this app owned.
+    # uvicorn --reload otherwise orphans the SDK clients across reload
+    # boundaries — they pile up as zombie processes until the OS reaps them.
+    # Best-effort: a teardown failure must not block shutdown logging.
+    try:
+        await cc_session.get_pool().teardown_all(reason="app-shutdown")
+        logger.info("CC pool torn down on shutdown")
+    except Exception as exc:
+        logger.warning("pool teardown_all failed during shutdown: %s", exc)
     logger.info("Chief Command Center stopped")
 
 
