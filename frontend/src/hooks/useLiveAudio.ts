@@ -16,6 +16,21 @@
 // Sample-rate quirk: iOS Safari has historically ignored the requested
 // sampleRate on AudioContext and given you 48000. We detect this and
 // downsample with linear interpolation before posting to the consumer.
+//
+// Self-barge-in gate (iPhone fix): browser AEC (`echoCancellation: true`)
+// only cancels echo when capture and playback share the same AudioContext.
+// We deliberately use two contexts (16 kHz cap / 24 kHz play) so AEC can't
+// see Chief's TTS as a reference signal — on iPhone the speaker bleeds into
+// the mic, server-side VAD on the Live API hears it, fires `interrupted`,
+// and Chief barges in on himself mid-syllable. While Chief is speaking we
+// disconnect the capture source from the mic worklet entirely (no PCM
+// crosses the worklet boundary, no frames are posted to the WS). The gate
+// reopens when the playback ring drains AND there's been a quiet gap with
+// no new audio chunks (debounce protects against tiny inter-chunk dips),
+// or immediately on `flushPlayback()` (manual barge-in / server interrupt /
+// WS reconnect). Disconnect/reconnect was chosen over zeroing PCM in the
+// worklet because it's the cleanest semantic: while gated, the audio graph
+// genuinely has no path from mic to consumer.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -24,6 +39,12 @@ const TARGET_PLAYBACK_RATE = 24000
 const CAPTURE_WINDOW_SAMPLES = 320 // 20 ms @ 16 kHz
 const MIC_WORKLET_URL = '/audio-worklets/mic-capture.js'
 const PLAYBACK_WORKLET_URL = '/audio-worklets/playback.js'
+
+// Self-barge-in gate: how long the playback ring must be empty AND no new
+// audio chunks have arrived before we treat Chief as "done speaking" and
+// reopen the mic. ~180 ms is short enough that the user can take their turn
+// snappily, long enough to ride out tiny inter-chunk dips on slow networks.
+const SPEAKING_GATE_RELEASE_MS = 180
 
 export type UseLiveAudioOptions = {
   /**
@@ -130,6 +151,56 @@ export function useLiveAudio(opts: UseLiveAudioOptions): UseLiveAudioApi {
   // Track started-ness so stop() is idempotent and re-entrant.
   const startedRef = useRef(false)
 
+  // ---- Self-barge-in gate state ------------------------------------------
+  // True while Chief is speaking AND the capture source has been
+  // disconnected from the mic worklet. Mirrors `isSpeaking` for the most
+  // part but is a ref so we can read it synchronously from playPcmChunk +
+  // the buffer-state telemetry handler without state-update races.
+  const speakingGateRef = useRef(false)
+  // Wall-clock timestamp (ms) of the most recent inbound audio chunk. Used
+  // to debounce the gate-release condition: ring drained, no new chunks for
+  // SPEAKING_GATE_RELEASE_MS.
+  const lastAppendAtRef = useRef(0)
+
+  // ---------- self-barge-in gate -------------------------------------------
+
+  // Engage the gate: disconnect mic source from worklet so no PCM frames
+  // are posted to the consumer (and therefore none reach the WS) while
+  // Chief is speaking. Idempotent — safe to call repeatedly per chunk.
+  const engageSpeakingGate = useCallback(() => {
+    if (speakingGateRef.current) return
+    const source = captureSourceRef.current
+    const worklet = captureWorkletRef.current
+    if (!source || !worklet) {
+      // Either start() hasn't completed or teardown() ran. Mark the gate
+      // engaged anyway so we don't try to disconnect later when we
+      // shouldn't, but there's nothing to physically detach.
+      speakingGateRef.current = true
+      return
+    }
+    try {
+      source.disconnect(worklet)
+    } catch {
+      // Already disconnected — fine. The graph state matches our intent.
+    }
+    speakingGateRef.current = true
+  }, [])
+
+  // Release the gate: reconnect mic source to worklet so frames flow
+  // again. Idempotent; safe whether or not the gate was actually engaged.
+  const releaseSpeakingGate = useCallback(() => {
+    if (!speakingGateRef.current) return
+    speakingGateRef.current = false
+    const source = captureSourceRef.current
+    const worklet = captureWorkletRef.current
+    if (!source || !worklet) return
+    try {
+      source.connect(worklet)
+    } catch {
+      // Already connected — graph is fine.
+    }
+  }, [])
+
   // ---------- start ---------------------------------------------------------
 
   const start = useCallback(async () => {
@@ -235,8 +306,20 @@ export function useLiveAudio(opts: UseLiveAudioOptions): UseLiveAudioApi {
 
       playbackNode.port.onmessage = (e) => {
         const msg = e.data as { type: string; samples?: number }
-        if (msg.type === 'buffer-state') {
-          setIsSpeaking((msg.samples ?? 0) > 0)
+        if (msg.type !== 'buffer-state') return
+        const queued = msg.samples ?? 0
+        setIsSpeaking(queued > 0)
+        // Gate-release: ring is drained AND we haven't appended in a while.
+        // The lastAppendAtRef debounce protects against tiny inter-chunk
+        // dips where the ring momentarily empties before the next chunk
+        // arrives — without it, the gate would flap and a few frames of
+        // mic audio could leak out between syllables.
+        if (
+          queued === 0 &&
+          speakingGateRef.current &&
+          performance.now() - lastAppendAtRef.current >= SPEAKING_GATE_RELEASE_MS
+        ) {
+          releaseSpeakingGate()
         }
       }
 
@@ -331,6 +414,11 @@ export function useLiveAudio(opts: UseLiveAudioOptions): UseLiveAudioApi {
     setIsMicActive(false)
     setIsSpeaking(false)
     setAudioLevel(0)
+
+    // Reset gate state. The capture graph is gone, but a subsequent
+    // start() will rebuild it and read these fresh.
+    speakingGateRef.current = false
+    lastAppendAtRef.current = 0
   }, [])
 
   const stop = useCallback(() => {
@@ -345,25 +433,45 @@ export function useLiveAudio(opts: UseLiveAudioOptions): UseLiveAudioApi {
 
   // ---------- playback API --------------------------------------------------
 
-  const playPcmChunk = useCallback((pcm: ArrayBuffer) => {
-    const node = playbackWorkletRef.current
-    if (!node) {
-      // Silently drop chunks that arrive before start() — Stage 2 should
-      // never call playPcmChunk before start() resolves, but we don't want
-      // a stray chunk to throw and kill the WS handler.
-      return
-    }
-    const samples = float32FromInt16(pcm)
-    // Transfer the underlying buffer to the worklet to avoid a copy.
-    node.port.postMessage({ type: 'append', samples }, [samples.buffer])
-  }, [])
+  const playPcmChunk = useCallback(
+    (pcm: ArrayBuffer) => {
+      const node = playbackWorkletRef.current
+      if (!node) {
+        // Silently drop chunks that arrive before start() — Stage 2 should
+        // never call playPcmChunk before start() resolves, but we don't want
+        // a stray chunk to throw and kill the WS handler.
+        return
+      }
+      // Self-barge-in gate: first chunk of a Chief turn engages the gate
+      // so the mic is silenced for the duration of his audio. Stamp the
+      // timestamp on every chunk so the buffer-state drain handler knows
+      // when it's safe to release.
+      lastAppendAtRef.current = performance.now()
+      engageSpeakingGate()
+      const samples = float32FromInt16(pcm)
+      // Transfer the underlying buffer to the worklet to avoid a copy.
+      node.port.postMessage({ type: 'append', samples }, [samples.buffer])
+    },
+    [engageSpeakingGate]
+  )
 
   const flushPlayback = useCallback(() => {
     const node = playbackWorkletRef.current
-    if (!node) return
+    if (!node) {
+      // No playback context — but we may still be holding the gate from a
+      // race where start() partially failed. Always release.
+      releaseSpeakingGate()
+      return
+    }
     node.port.postMessage({ type: 'flush' })
     setIsSpeaking(false)
-  }, [])
+    // flushPlayback is the universal "stop suppressing mic" trigger:
+    //   - manual interrupt button calls it
+    //   - server `interrupted` frame routes to it
+    //   - WS disconnect / reconnect routes to it
+    // In all cases the user should immediately be able to speak.
+    releaseSpeakingGate()
+  }, [releaseSpeakingGate])
 
   // Cleanup on unmount.
   useEffect(() => {
