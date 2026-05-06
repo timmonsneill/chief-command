@@ -186,17 +186,59 @@ def _build_live_config(
     # detects user speech, instead of letting Chief's reply finish before
     # processing the new turn. Mandatory for natural duplex feel; without
     # it a barge-in waits ~half-second-to-multi-second to take effect.
+    #
+    # iPhone Safari speakerphone duplex bleed: with the most-aggressive VAD
+    # default, Chief's own audio leaking back into the mic was tripping
+    # false barge-ins mid-response. We keep the START_OF_ACTIVITY_INTERRUPTS
+    # mode (real user voice should still cut Chief off) but tighten the
+    # automatic VAD so it ignores brief speaker-bleed transients:
+    #   * start_of_speech_sensitivity = LOW    → only stronger evidence flips
+    #     the server into "user speaking"
+    #   * end_of_speech_sensitivity   = LOW    → don't end-turn on a brief gap
+    #   * prefix_padding_ms           = 200    → ~200 ms of sustained speech
+    #     required before "user spoke" is declared (kills speaker-bleed
+    #     transients which are typically <100 ms before the AGC reacts)
+    #   * silence_duration_ms         = 800    → longer trailing silence
+    #     required before turn-end, giving the speaker more time to finish
+    # Pairs with the FE mic-mute-during-playback gate (Finn). DO NOT set
+    # ``disabled=True`` — that turns server VAD OFF entirely; we still want
+    # it on, just less twitchy.
+    #
     # Some SDK builds expose ActivityHandling/RealtimeInputConfig only on
     # newer versions; we attempt-and-skip so an older google-genai still
-    # imports clean. (Stage 1A quirk #4 from Riggs.)
+    # imports clean. AutomaticActivityDetection / StartSensitivity /
+    # EndSensitivity were verified present on google-genai 1.75.0.
     realtime_input_config = None
     activity_handling_enum = getattr(types, "ActivityHandling", None)
     realtime_cfg_cls = getattr(types, "RealtimeInputConfig", None)
+    auto_vad_cls = getattr(types, "AutomaticActivityDetection", None)
+    start_sens_enum = getattr(types, "StartSensitivity", None)
+    end_sens_enum = getattr(types, "EndSensitivity", None)
     if activity_handling_enum is not None and realtime_cfg_cls is not None:
         try:
-            realtime_input_config = realtime_cfg_cls(
-                activity_handling=activity_handling_enum.START_OF_ACTIVITY_INTERRUPTS,
-            )
+            rt_kwargs: dict[str, Any] = {
+                "activity_handling": (
+                    activity_handling_enum.START_OF_ACTIVITY_INTERRUPTS
+                ),
+            }
+            # Build the relaxed-VAD detector if all the relevant SDK symbols
+            # exist; otherwise fall through to SDK default sensitivity.
+            if (
+                auto_vad_cls is not None
+                and start_sens_enum is not None
+                and end_sens_enum is not None
+            ):
+                rt_kwargs["automatic_activity_detection"] = auto_vad_cls(
+                    start_of_speech_sensitivity=(
+                        start_sens_enum.START_SENSITIVITY_LOW
+                    ),
+                    end_of_speech_sensitivity=(
+                        end_sens_enum.END_SENSITIVITY_LOW
+                    ),
+                    prefix_padding_ms=200,
+                    silence_duration_ms=800,
+                )
+            realtime_input_config = realtime_cfg_cls(**rt_kwargs)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "gemini_live: RealtimeInputConfig construction failed: %s "
