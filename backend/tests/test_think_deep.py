@@ -125,8 +125,13 @@ async def test_execute_think_deep_returns_assistant_text(fake_chief_context, fak
 
 
 @pytest.mark.asyncio
-async def test_execute_think_deep_default_model_is_sonnet(fake_chief_context, fake_record_cost):
-    """No model arg → defaults to claude-sonnet-4-6."""
+async def test_execute_think_deep_default_model_is_opus(fake_chief_context, fake_record_cost):
+    """No model arg → defaults to claude-opus-4-7 (flipped 2026-05-05).
+
+    Owner uses think_deep almost exclusively for hard reasoning where Opus's
+    depth gap matters more than Sonnet's ~1s latency win. The bridge-phrase
+    rule (chief_context #13) covers the perceived latency.
+    """
     from services import agent_tools
 
     fake_cls = _make_fake_anthropic()
@@ -148,14 +153,45 @@ async def test_execute_think_deep_default_model_is_sonnet(fake_chief_context, fa
         result = await agent_tools.execute_think_deep("walk me through it", scope="Arch")
     assert result.error is False
     assert captured["model"] == agent_tools.THINK_DEEP_DEFAULT_MODEL
-    assert captured["model"] == "claude-sonnet-4-6"
+    assert captured["model"] == "claude-opus-4-7"
     # System prompt carries the active scope.
     assert "scope=Arch" in captured["system"]
 
 
 @pytest.mark.asyncio
-async def test_execute_think_deep_opus_path(fake_chief_context, fake_record_cost):
-    """Opus is a valid model; the executor forwards it verbatim."""
+async def test_execute_think_deep_sonnet_opt_in(fake_chief_context, fake_record_cost):
+    """Sonnet is a valid opt-in model; the executor forwards it verbatim.
+
+    Used by the Live brain when the ask is light enough that 1-2s pacing
+    matters more than reasoning depth.
+    """
+    from services import agent_tools
+
+    captured: dict = {}
+
+    class _CapturingClient:
+        def __init__(self, *, api_key=None):
+            self.messages = self
+
+        async def create(self, *, model, max_tokens, system, messages):
+            captured["model"] = model
+            return _FakeMessage("sonnet answer")
+
+    fake_module = types.SimpleNamespace(AsyncAnthropic=_CapturingClient)
+    with patch.dict(sys.modules, {"anthropic": fake_module}):
+        result = await agent_tools.execute_think_deep(
+            "lighter quick reasoning",
+            scope="Chief Command",
+            model="claude-sonnet-4-6",
+        )
+    assert result.output == "sonnet answer"
+    assert captured["model"] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_execute_think_deep_opus_explicit(fake_chief_context, fake_record_cost):
+    """Explicit Opus call still works (matches the new default but the
+    executor forwards the explicit value verbatim)."""
     from services import agent_tools
 
     captured: dict = {}
@@ -180,11 +216,12 @@ async def test_execute_think_deep_opus_path(fake_chief_context, fake_record_cost
 
 
 @pytest.mark.asyncio
-async def test_execute_think_deep_invalid_model_falls_back_to_sonnet(
+async def test_execute_think_deep_invalid_model_falls_back_to_default(
     fake_chief_context, fake_record_cost,
 ):
-    """A model not in the allowlist is silently downgraded to Sonnet
-    (defense-in-depth — the schema enum should already catch it server-side).
+    """A model not in the allowlist is silently downgraded to the default
+    (Opus, post-2026-05-05 flip — defense-in-depth; the schema enum should
+    already catch it server-side).
     """
     from services import agent_tools
 
@@ -206,7 +243,8 @@ async def test_execute_think_deep_invalid_model_falls_back_to_sonnet(
             model="claude-haiku-4-5",  # not in allowlist
         )
     assert result.error is False
-    assert captured["model"] == "claude-sonnet-4-6"
+    assert captured["model"] == agent_tools.THINK_DEEP_DEFAULT_MODEL
+    assert captured["model"] == "claude-opus-4-7"
 
 
 @pytest.mark.asyncio
@@ -220,7 +258,8 @@ async def test_execute_think_deep_records_cost(fake_chief_context, fake_record_c
         await agent_tools.execute_think_deep("plan it", scope="Arch")
     assert len(fake_record_cost) == 1
     call = fake_record_cost[0]
-    assert call["model"] == "claude-sonnet-4-6"
+    # Default flipped to Opus 2026-05-05 — cost rows should reflect.
+    assert call["model"] == "claude-opus-4-7"
     assert call["scope"] == "Arch"
     assert call["input_tokens"] == 100
     assert call["output_tokens"] == 200

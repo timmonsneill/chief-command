@@ -57,16 +57,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # When the owner asks for spec walkthrough, planning, tradeoff analysis, or
 # "think this through carefully," the Live brain (Flash native-audio, fast
-# but conversational) escalates to Sonnet (or Opus for the hardest asks)
+# but conversational) escalates to Opus (default, deeper) or Sonnet (lighter)
 # via the direct Anthropic API. Forge measured Sonnet TTFT ~0.56s and Opus
 # ~0.79s on the prior Anthropic-streamed pipeline — meaningfully faster
 # than Pro on Vertex (1-3s warm, 12-14s cold).
 #
+# Default flipped to Opus 2026-05-05: owner uses think_deep almost
+# exclusively for hard reasoning (spec walkthroughs, architecture, tradeoff
+# tournaments). The reasoning-depth gap matters more than the ~1s latency
+# gap, and the bridge-phrase rule (chief_context #13) covers the perceived
+# latency by speaking before the tool fires. Sonnet stays opt-in for lighter
+# quick-reasoning calls where pacing wins. Pricing impact: Opus is ~5x
+# Sonnet per token; the owner is on Max plan (flat-rate Anthropic), so the
+# real cost lever is the daily-cap math in usage_tracker.
+#
 # Pricing rows already exist in usage_tracker.PRICING_PER_MTOK for both
 # Sonnet and Opus; the executor records the turn so the dashboard sees
 # escalation cost alongside Live audio cost.
-THINK_DEEP_DEFAULT_MODEL: str = "claude-sonnet-4-6"
 THINK_DEEP_OPUS_MODEL: str = "claude-opus-4-7"
+THINK_DEEP_SONNET_MODEL: str = "claude-sonnet-4-6"
+# Default = Opus. To use Sonnet, callers pass model=THINK_DEEP_SONNET_MODEL
+# (or the Live brain emits the Sonnet enum value via the tool schema).
+THINK_DEEP_DEFAULT_MODEL: str = THINK_DEEP_OPUS_MODEL
 THINK_DEEP_MAX_TOKENS: int = 2048
 THINK_DEEP_TIMEOUT_S: float = 30.0
 # Allowlist guards against the Live brain emitting an arbitrary string —
@@ -74,8 +86,8 @@ THINK_DEEP_TIMEOUT_S: float = 30.0
 # in the executor stops a misbehaving model from spending against an
 # unintended pricing row.
 _THINK_DEEP_ALLOWED_MODELS: frozenset[str] = frozenset({
-    THINK_DEEP_DEFAULT_MODEL,
     THINK_DEEP_OPUS_MODEL,
+    THINK_DEEP_SONNET_MODEL,
 })
 
 
@@ -211,9 +223,13 @@ THINK_DEEP_TOOL = ToolSchema(
         "walkthrough, planning, tradeoff analysis, architecture, or 'think "
         "this through.' Use this when the user wants careful reasoning, "
         "NOT for quick chat. The output is read back to the user as Chief's "
-        "reply. Sonnet is the default (faster); pick Opus only for the "
-        "hardest asks. While this runs (~1-2s), say something brief like "
-        "'thinking on it' so the silence isn't dead."
+        "reply. Opus is the default (deeper, ~3-5s); pass model=Sonnet for "
+        "lighter quick-reasoning asks (~1-2s). "
+        "MANDATORY: BEFORE calling this tool, you MUST first speak a short "
+        "1-3 second bridge phrase out loud (e.g. 'Give me a second,' 'Let "
+        "me map this out,' 'Hold on, working on it'). Speak first, tool "
+        "fires second — never both at once, never tool with no preceding "
+        "speech. Vary the phrase so it doesn't sound canned."
     ),
     parameters={
         "type": "object",
@@ -227,10 +243,12 @@ THINK_DEEP_TOOL = ToolSchema(
             },
             "model": {
                 "type": "string",
-                "enum": [THINK_DEEP_DEFAULT_MODEL, THINK_DEEP_OPUS_MODEL],
+                "enum": [THINK_DEEP_OPUS_MODEL, THINK_DEEP_SONNET_MODEL],
                 "description": (
-                    "Sonnet for most asks (faster); Opus for the hardest "
-                    "ones (architecture choices, tradeoff tournaments)."
+                    "Opus (default) for the hard asks — architecture "
+                    "choices, tradeoff tournaments, multi-step reasoning. "
+                    "Sonnet for lighter quick-reasoning where 1-2s pacing "
+                    "matters more than reasoning depth."
                 ),
             },
         },
@@ -247,7 +265,12 @@ CODE_REVIEW_TOOL = ToolSchema(
         "architecture review, performance pass. NOT for open-ended "
         "thinking — use think_deep for that. Pro on Vertex handles the "
         "actual analysis (deep, structured); the result is read back to "
-        "the user as Chief's reply."
+        "the user as Chief's reply. "
+        "MANDATORY: BEFORE calling this tool, you MUST first speak a short "
+        "1-3 second bridge phrase out loud (e.g. 'Let me have Glass take a "
+        "look,' 'One sec, sending this to Glass,' 'Let me dig in'). Glass "
+        "can take 1-15s warm/cold — dead silence in that window feels "
+        "broken. Speak first, tool fires second."
     ),
     parameters={
         "type": "object",
@@ -283,10 +306,14 @@ DISPATCH_AGENT_TOOL = ToolSchema(
     description=(
         "Spawn a Claude Code subprocess to handle a complex multi-step task "
         "that needs subagents, MCP servers, or a full agent loop. Slower "
-        "(typically ~10 seconds) than a direct Read/Bash/Grep call. Use "
+        "(typically 5-10 seconds) than a direct Read/Bash/Grep call. Use "
         "ONLY when the task genuinely needs an agent — e.g. 'audit the auth "
         "module' or 'find all places we mutate this state'. For single-file "
-        "reads or simple greps, use the direct tools instead."
+        "reads or simple greps, use the direct tools instead. "
+        "MANDATORY: BEFORE calling this tool, you MUST first speak a short "
+        "1-3 second bridge phrase out loud (e.g. 'Sending Riggs at it,' "
+        "'Finn on that,' 'Hold on, dispatching'). 5-10s of dead silence "
+        "feels broken; speak first, tool fires second."
     ),
     parameters={
         # ``scope`` is intentionally NOT exposed to the model. Cwd resolution
@@ -1423,6 +1450,7 @@ __all__ = [
     "THINK_DEEP_TOOL",
     "THINK_DEEP_DEFAULT_MODEL",
     "THINK_DEEP_OPUS_MODEL",
+    "THINK_DEEP_SONNET_MODEL",
     "THINK_DEEP_TIMEOUT_S",
     "TOOL_DISPLAY_NAMES",
     "ToolResult",
