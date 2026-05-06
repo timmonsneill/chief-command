@@ -618,11 +618,14 @@ def _enforce_budget_by_file(
     while kept and _estimate_tokens(_assemble_blocks(kept, project_scope)) > budget:
         kept.pop()  # drop oldest (last after sort)
 
-    # If we dropped >20% of files, surface as INFO so the eviction stays
-    # visible in logs even though the routine "always-evicts" case is quiet.
+    # If we dropped >50% of files, surface as INFO so the eviction stays
+    # visible in logs for genuinely surprising cases (e.g. Arch's 86 files
+    # truncated to ~20). The routine Chief Command case (38 files → 24,
+    # ~37% dropped) is expected under the 28K Live budget and stays at
+    # DEBUG to keep the log signal-to-noise ratio sane.
     total = len(files)
     drop_ratio = (total - len(kept)) / total if total else 0.0
-    if drop_ratio > 0.20:
+    if drop_ratio > 0.50:
         logger.info(
             "chief_context: aggressive truncation — kept %d of %d scoped "
             "files (dropped %.0f%%, scope=%s, budget=%d)",
