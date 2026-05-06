@@ -40,7 +40,28 @@ DEFAULT_SCOPE: Final[str] = DEFAULT_PROJECT
 
 # Rough token budget — ~4 chars/token heuristic gives us a cheap estimate.
 _CHARS_PER_TOKEN_ESTIMATE: Final[int] = 4
-_MAX_PROMPT_TOKENS: Final[int] = 40_000
+
+# Live brain budget — Gemini Live's ``system_instruction`` is sub-capped at
+# ~32K tokens (a hard server-side limit; exceeding it gets the WS closed
+# with code 1007 on the first audio frame). We hold ~5K headroom under that
+# for the always-on framing (identity prompt, scope hint, prior_summary,
+# tools schema baked into the request). Dropping below 32K is required;
+# the chat brain can carry more context because it isn't subject to the
+# Live sub-cap.
+_MAX_PROMPT_TOKENS_LIVE: Final[int] = 28_000
+
+# Chat brain budget — used by think_deep escalations and the legacy
+# Anthropic streaming path. Bigger than the Live cap because the chat APIs
+# don't enforce a system_instruction sub-cap; the only ceiling is the
+# overall context window, which is far larger than what we'd ever pack
+# into a single Chief prompt.
+_MAX_PROMPT_TOKENS_CHAT: Final[int] = 60_000
+
+# Backcompat alias. Kept as the chat-brain default so any importer that
+# reaches into the module for ``_MAX_PROMPT_TOKENS`` keeps the larger
+# (less-restrictive) budget. Live callsites should pass ``for_live=True``
+# (or use the ``_LIVE`` constant directly) to opt into the tighter cap.
+_MAX_PROMPT_TOKENS: Final[int] = _MAX_PROMPT_TOKENS_CHAT
 
 # ---------------------------------------------------------------------------
 # Canonical project-name mapping (project dir slug -> Chief scope name)
@@ -390,6 +411,8 @@ def _estimate_tokens(blocks: list[dict]) -> int:
 def build_chief_system(
     project_scope: str,
     prior_summary: str | None = None,
+    *,
+    for_live: bool = False,
 ) -> list[dict]:
     """Return Anthropic system-message blocks that make Claude into Chief.
 
@@ -404,6 +427,15 @@ def build_chief_system(
     instruction. When ``None`` (no prior summary written yet for this
     project) the block is omitted entirely; the existing 4-block layout is
     unchanged.
+
+    ``for_live`` selects the token budget for the eviction step:
+      * ``False`` (default) — chat-brain budget (``_MAX_PROMPT_TOKENS_CHAT``).
+        Used by think_deep escalations and the legacy Anthropic path. The
+        chat APIs don't sub-cap system_instruction, so this can be large.
+      * ``True``           — Live brain budget (``_MAX_PROMPT_TOKENS_LIVE``).
+        Gemini Live closes the WS with code 1007 if system_instruction
+        exceeds ~32K tokens. We hold ~5K headroom under that and evict
+        oldest scoped files until the prompt fits.
 
     Anthropic caps us at **4 cache_control breakpoints** per request, so we
     group the content into up to 4 logical cached blocks:
@@ -444,18 +476,24 @@ def build_chief_system(
     scoped_files.sort(key=lambda e: e[1], reverse=True)  # newest first
 
     total_scoped = len(scoped_files)
-    kept_files = _enforce_budget_by_file(scoped_files, project_scope)
+    budget = _MAX_PROMPT_TOKENS_LIVE if for_live else _MAX_PROMPT_TOKENS_CHAT
+    kept_files = _enforce_budget_by_file(
+        scoped_files, project_scope, budget=budget,
+    )
     blocks = _assemble_blocks(kept_files, project_scope, prior_summary=prior_summary)
     total_tokens = _estimate_tokens(blocks)
     logger.info(
         "chief_context: built %d system blocks, ~%d tokens "
-        "(scope=%s, %d/%d scoped files kept, prior_summary=%s)",
+        "(scope=%s, %d/%d scoped files kept, prior_summary=%s, "
+        "budget=%d for_live=%s)",
         len(blocks),
         total_tokens,
         project_scope,
         len(kept_files),
         total_scoped,
         "yes" if prior_summary else "no",
+        budget,
+        for_live,
     )
     return blocks
 
@@ -542,6 +580,8 @@ def _assemble_blocks(
 def _enforce_budget_by_file(
     files: list[tuple[Path, float]],
     project_scope: str,
+    *,
+    budget: int = _MAX_PROMPT_TOKENS_CHAT,
 ) -> list[tuple[Path, float]]:
     """Return the subset of scoped files that fit within the token budget.
 
@@ -549,27 +589,50 @@ def _enforce_budget_by_file(
     ``files`` is newest-first). This preserves recent notes when a scope has
     more memory than the budget allows.
 
+    ``budget`` controls the cap. Live callers pass
+    ``_MAX_PROMPT_TOKENS_LIVE`` (28K) to stay under Gemini Live's ~32K
+    system_instruction sub-cap; chat callers default to
+    ``_MAX_PROMPT_TOKENS_CHAT`` (60K) since the chat APIs don't enforce a
+    sub-cap.
+
     NOTE: budgeting is deliberately computed against ``_assemble_blocks(...)``
     WITHOUT ``prior_summary`` injection. The summary is at most ~600 tokens
-    (``MAX_SUMMARY_TOKENS``), which is well under the 40k budget headroom we
+    (``MAX_SUMMARY_TOKENS``), which is well under the budget headroom we
     leave per scope, and fluctuating its presence per call would otherwise
     cause file-eviction churn between turns.
+
+    Logging note: the eviction-fired message is at DEBUG, not WARNING.
+    On the Live budget Chief Command + Arch always evict (their memory
+    trees are larger than 28K), so the old WARNING would spam every turn.
+    The post-truncation summary stays at INFO and exposes the kept-vs-total
+    ratio so an unusually-aggressive truncation is still visible in logs.
     """
     kept = list(files)
-    if _estimate_tokens(_assemble_blocks(kept, project_scope)) <= _MAX_PROMPT_TOKENS:
+    if _estimate_tokens(_assemble_blocks(kept, project_scope)) <= budget:
         return kept
 
-    logger.warning(
+    logger.debug(
         "chief_context: scope=%s prompt >%dk tokens; evicting oldest scoped files",
-        project_scope, _MAX_PROMPT_TOKENS // 1_000,
+        project_scope, budget // 1_000,
     )
-    while kept and _estimate_tokens(_assemble_blocks(kept, project_scope)) > _MAX_PROMPT_TOKENS:
+    while kept and _estimate_tokens(_assemble_blocks(kept, project_scope)) > budget:
         kept.pop()  # drop oldest (last after sort)
 
-    logger.info(
-        "chief_context: truncation settled — kept %d of %d scoped files",
-        len(kept), len(files),
-    )
+    # If we dropped >20% of files, surface as INFO so the eviction stays
+    # visible in logs even though the routine "always-evicts" case is quiet.
+    total = len(files)
+    drop_ratio = (total - len(kept)) / total if total else 0.0
+    if drop_ratio > 0.20:
+        logger.info(
+            "chief_context: aggressive truncation — kept %d of %d scoped "
+            "files (dropped %.0f%%, scope=%s, budget=%d)",
+            len(kept), total, drop_ratio * 100, project_scope, budget,
+        )
+    else:
+        logger.debug(
+            "chief_context: truncation settled — kept %d of %d scoped files",
+            len(kept), total,
+        )
     return kept
 
 
@@ -581,6 +644,8 @@ def estimate_prompt_tokens(project_scope: str) -> int:
 def build_chief_system_string(
     project_scope: str,
     prior_summary: str | None = None,
+    *,
+    for_live: bool = False,
 ) -> str:
     """Flatten the Anthropic-shaped block list into a single string.
 
@@ -590,9 +655,15 @@ def build_chief_system_string(
     optimization, so concatenating with ``\\n\\n`` between blocks preserves
     everything Gemini needs to be Chief.
 
+    ``for_live`` forwards to :func:`build_chief_system` and selects the
+    Live (~28K) vs chat (~60K) token budget. The voice WS path passes
+    ``True``; think_deep / Anthropic chat callers leave it ``False``.
+
     Identical to calling ``build_chief_system(project_scope, prior_summary=...)``
     and joining each block's ``text`` field. We keep the underlying builder
     unchanged so Anthropic-cached calls still hit identical bytes.
     """
-    blocks = build_chief_system(project_scope, prior_summary=prior_summary)
+    blocks = build_chief_system(
+        project_scope, prior_summary=prior_summary, for_live=for_live,
+    )
     return "\n\n".join(b.get("text", "") for b in blocks if b.get("text"))

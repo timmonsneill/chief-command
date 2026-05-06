@@ -260,7 +260,7 @@ def patched_ws(monkeypatch):
     # Build the system prompt deterministically with the scope embedded so
     # we can assert that the new LiveSession on a flip carries the new
     # scope's prompt.
-    def fake_build_prompt(scope: str, prior_summary=None) -> str:
+    def fake_build_prompt(scope: str, prior_summary=None, *, for_live=False) -> str:
         return f"[CHIEF scope={scope} summary={prior_summary or 'none'}]"
     monkeypatch.setattr(ws_mod, "build_chief_system_string", fake_build_prompt)
 

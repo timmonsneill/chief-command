@@ -192,7 +192,7 @@ def patched_ws(monkeypatch):
     monkeypatch.setattr(ws_mod, "load_persistent_memory", fake_load_memory)
     monkeypatch.setattr(
         ws_mod, "build_chief_system_string",
-        lambda scope, prior_summary=None: f"[CHIEF scope={scope}]",
+        lambda scope, prior_summary=None, for_live=False: f"[CHIEF scope={scope}]",
     )
 
     async def _noop_async(*a, **k):

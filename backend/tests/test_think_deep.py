@@ -84,7 +84,7 @@ def _make_fake_anthropic(reply_text: str = "Sonnet's careful answer.", *, raises
 @pytest.fixture
 def fake_chief_context(monkeypatch):
     """Stub build_chief_system_string so the test isn't tied to memory dirs."""
-    def _fake(scope, prior_summary=None):
+    def _fake(scope, prior_summary=None, *, for_live=False):
         return f"[CHIEF system scope={scope}]"
     # Patch BOTH the module level and the import target inside agent_tools.
     import services.chief_context as cc_mod

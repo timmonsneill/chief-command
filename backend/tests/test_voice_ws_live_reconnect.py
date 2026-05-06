@@ -67,6 +67,7 @@ class FakeWebSocket:
         self.query_params = {"token": "test-token"}
         self.accepted = False
         self.closed_with: Optional[int] = None
+        self.close_reason: str = ""
         self.outbound_json: list[dict] = []
         self.outbound_bytes: list[bytes] = []
         self._inbound: asyncio.Queue = asyncio.Queue()
@@ -99,8 +100,9 @@ class FakeWebSocket:
     async def send_bytes(self, data: bytes) -> None:
         self.outbound_bytes.append(bytes(data))
 
-    async def close(self, code: int = 1000) -> None:
+    async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed_with = code
+        self.close_reason = reason
 
 
 class FakeLiveSession:
@@ -175,7 +177,7 @@ def patched_ws(monkeypatch):
 
     monkeypatch.setattr(
         ws_mod, "build_chief_system_string",
-        lambda scope, prior_summary=None: f"[CHIEF scope={scope}]",
+        lambda scope, prior_summary=None, for_live=False: f"[CHIEF scope={scope}]",
     )
 
     async def fake_maybe_rollup(scope: str):
@@ -390,6 +392,203 @@ async def test_clean_turn_resets_reconnect_counter(patched_ws, monkeypatch):
 
     await ws.finish()
     await task
+
+
+@pytest.mark.asyncio
+async def test_prompt_oversize_pump_crash_short_circuits(patched_ws):
+    """A pump crash carrying the Live "system_instruction over sub-cap"
+    error class is non-retryable. We must NOT spawn a reconnect, MUST
+    emit a structured ``prompt_too_large`` error frame, MUST drop the
+    cached resumption handle, and MUST close the WS with code 4004 so
+    the FE auto-reconnect engages.
+    """
+    ws = FakeWebSocket()
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+
+    await _wait_for_instance(1)
+    s0 = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if s0.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    # Cache a handle so we can verify it gets dropped (a fresh open with
+    # a smaller prompt MUST NOT reuse a handle bound to the oversized one).
+    await s0.on_session_resumed("server-handle-doomed")
+
+    # Fire a pump-crash carrying the Live oversize error class. The reason
+    # text the SDK surfaces typically reads:
+    #   "received 1007 (invalid frame payload data) the system instruction
+    #    has 94 tokens, user system instruction has 41942 tokens, and user
+    #    footer has 0 tokens. The sum is ab..."
+    oversize_exc = RuntimeError(
+        "received 1007 (invalid frame payload data) the system instruction "
+        "has 94 tokens, user system instruction has 41942 tokens, and user "
+        "footer has 0 tokens. The sum is ab"
+    )
+    await s0.on_pump_crash(oversize_exc)
+    # Give the WS layer a tick to react.
+    await asyncio.sleep(0.05)
+
+    # No second LiveSession was opened — non-retryable.
+    assert len(FakeLiveSession.instances) == 1, (
+        "prompt-oversize crash incorrectly triggered a reconnect — got "
+        f"{len(FakeLiveSession.instances)} sessions"
+    )
+
+    # Structured error frame went out.
+    err_frames = [
+        f for f in ws.outbound_json
+        if f.get("type") == "error"
+        and f.get("code") == "prompt_too_large"
+    ]
+    assert err_frames, (
+        f"expected a prompt_too_large error frame; got {ws.outbound_json}"
+    )
+    assert "system prompt too large" in err_frames[0]["message"].lower()
+
+    # WS was closed with the dedicated 4004 code.
+    assert ws.closed_with == 4004, (
+        f"expected ws.close(code=4004); got {ws.closed_with}"
+    )
+
+    # Wait for the voice_ws task to wind down naturally.
+    await ws.finish()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_prompt_oversize_recognized_with_alt_phrasing(patched_ws):
+    """The oversize-detector matches the truncated 'sum is ab' tail too.
+
+    The Live API close-frame reason is truncated mid-word — the wire often
+    shows "sum is ab" without "above". The detector must still classify it
+    as the oversize error class so we don't fall into the (broken) retry path.
+    """
+    ws = FakeWebSocket()
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+
+    await _wait_for_instance(1)
+    s0 = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if s0.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    # Reason variant — only the "sum is ab" tail, no "system instruction"
+    # phrase. Must still trip the detector (the regex has both alternations).
+    await s0.on_pump_crash(RuntimeError("close: 1007 reason='The sum is ab'"))
+    await asyncio.sleep(0.05)
+
+    assert len(FakeLiveSession.instances) == 1, (
+        "alt-phrased oversize error didn't short-circuit reconnect"
+    )
+    assert ws.closed_with == 4004
+
+    await ws.finish()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cap_exhaustion_closes_ws_with_4004(
+    patched_ws, monkeypatch,
+):
+    """When ``LIVE_RECONNECT_MAX_RETRIES`` is exhausted, the WS must be
+    closed with code 4004 so the FE's auto-reconnect engages — not
+    silently left open with a dead live_session_box (the original bug).
+    """
+    monkeypatch.setattr(
+        patched_ws.ws_mod.settings, "LIVE_RECONNECT_MAX_RETRIES", 1,
+    )
+
+    ws = FakeWebSocket()
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+
+    await _wait_for_instance(1)
+    s0 = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if s0.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    # Crash 1 — burns the only retry.
+    await s0.on_pump_crash(RuntimeError("c1"))
+    await _wait_for_instance(2)
+    s1 = FakeLiveSession.instances[1]
+
+    # Crash 2 — over the cap. WS must close with 4004.
+    await s1.on_pump_crash(RuntimeError("c2"))
+    await asyncio.sleep(0.1)
+
+    # No third instance.
+    assert len(FakeLiveSession.instances) == 2
+
+    # 4004 close + structured error frame.
+    assert ws.closed_with == 4004, (
+        f"expected ws.close(code=4004) on cap exhaustion; got {ws.closed_with}"
+    )
+    err_frames = [
+        f for f in ws.outbound_json
+        if f.get("type") == "error"
+        and f.get("code") == "live_session_unrecoverable"
+    ]
+    assert err_frames, (
+        f"expected live_session_unrecoverable error frame; "
+        f"got {ws.outbound_json}"
+    )
+
+    await ws.finish()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_prompt_oversize_does_not_burn_retry_budget(patched_ws):
+    """A non-retryable oversize crash must NOT bump the retry counter.
+
+    Otherwise a recovered turn would have a smaller-than-expected budget
+    available for genuine transient crashes later.
+    """
+    ws = FakeWebSocket()
+    await ws.push_bytes(b"\x00\x01")
+    task = asyncio.create_task(patched_ws.ws_mod.voice_ws(ws))
+
+    await _wait_for_instance(1)
+    s0 = FakeLiveSession.instances[0]
+    for _ in range(50):
+        if s0.sent_audio:
+            break
+        await asyncio.sleep(0.01)
+
+    # Snapshot the counter before the oversize crash.
+    # (We can't grab the inner ``reconnect_attempts`` list directly, but
+    # the test_reconnect_caps test would catch a bumped-to-cap counter.)
+
+    # Trip oversize — this closes the WS with 4004, no reconnect.
+    await s0.on_pump_crash(RuntimeError(
+        "1007 the system instruction has 94 tokens, sum is ab"
+    ))
+    await asyncio.sleep(0.05)
+
+    assert len(FakeLiveSession.instances) == 1
+    assert ws.closed_with == 4004
+
+    await ws.finish()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
 
 
 @pytest.mark.asyncio

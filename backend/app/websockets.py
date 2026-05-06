@@ -28,6 +28,7 @@ button still triggers ``LiveSession.cancel_current_turn``.
 import asyncio
 import json
 import logging
+import re
 import signal
 import uuid
 from typing import Optional
@@ -85,6 +86,37 @@ MSG_CONTEXT_SWITCHED = "context_switched"
 # remapped to "Arch" on read. Helper is idempotent — values already canonical
 # pass through unchanged.
 # ---------------------------------------------------------------------------
+
+# Pattern that flags a Live API "system_instruction is over the sub-cap"
+# error class. The reason text on the wire is something like:
+#   "the system instruction has 94 tokens, user system instruction has
+#    41942 tokens, and user footer has 0 tokens. The sum is ab[ove ...]"
+# The reason gets truncated mid-word ("ab..." not "above") in the WS close
+# frame, so we match a forgiving pattern that covers both "system instruction"
+# substring variants and the truncated "sum is ab" / "sum is above" tail.
+# Treated as non-retryable — opening a fresh Live session with the same
+# oversized prompt would just hit the same close on the first audio frame.
+_PROMPT_OVERSIZE_PATTERN = re.compile(
+    r"system\s+instruction|sum\s+is\s+ab", re.IGNORECASE,
+)
+
+
+def _is_prompt_oversize_error(exc: BaseException) -> bool:
+    """Return True iff ``exc`` looks like a Live system_instruction overflow.
+
+    Detects via substring on ``str(exc)`` because the google-genai SDK
+    surfaces the underlying close reason inside the exception message
+    rather than as a structured close-code attribute. Matching is liberal
+    on purpose — false positives short-circuit a (broken) reconnect that
+    would have failed anyway, and false negatives just take the slower
+    retry path. Either way nobody loses correctness.
+    """
+    text = str(exc) if exc else ""
+    if not text:
+        return False
+    return bool(_PROMPT_OVERSIZE_PATTERN.search(text))
+
+
 def _migrate_dissolved_scope(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -433,7 +465,43 @@ async def voice_ws(ws: WebSocket) -> None:
         Latch set SYNCHRONOUSLY before ``create_task`` so a second crash
         callback firing in the same loop tick doesn't slip past the check
         inside ``_reconnect_after_crash`` and spawn a parallel rebuild.
+
+        Special case — Live close 1007 "system_instruction over sub-cap":
+        Live closes the WS with code 1007 on the first audio frame when the
+        system_instruction tokens exceed the ~32K sub-cap. The error class
+        is non-retryable: opening a fresh session with the same oversized
+        prompt re-trips the same close. We surface a structured FE error,
+        drop any cached resumption handle (it's bound to the oversized
+        prompt), close the WS with code 4004, and skip the reconnect path
+        entirely so the FE's auto-reconnect can kick in with a fresh
+        connection (which, until the prompt itself is trimmed, will hit
+        the same wall — but the loud close beats a silent dead mic).
         """
+        if _is_prompt_oversize_error(exc):
+            logger.error(
+                "voice_ws (Live) pump crashed with prompt-oversize error "
+                "(non-retryable) — closing WS with 4004: %s", exc,
+            )
+            # Drop the cached handle — a fresh open with a smaller prompt
+            # must NOT reuse a handle bound to the oversized version.
+            cached_resumption_handle[0] = None
+            cached_resumption_handle_at[0] = 0.0
+            try:
+                await ws_send_json(ws, {
+                    "type": "error",
+                    "code": "prompt_too_large",
+                    "message": "system prompt too large for live audio",
+                })
+            except Exception:
+                pass
+            try:
+                await ws.close(
+                    code=4004, reason="live_session_unrecoverable",
+                )
+            except Exception:
+                pass
+            return
+
         logger.warning(
             "voice_ws (Live) pump crashed: %s — attempting resumption rebuild",
             exc,
@@ -873,7 +941,9 @@ async def voice_ws(ws: WebSocket) -> None:
         the slot).
         """
         system_prompt = build_chief_system_string(
-            current_project, prior_summary=current_summary,
+            current_project,
+            prior_summary=current_summary,
+            for_live=True,
         )
         return LiveSession(
             model=LIVE_MODEL,
@@ -949,25 +1019,37 @@ async def voice_ws(ws: WebSocket) -> None:
         Caller (``_on_pump_crash``) has already set ``reconnect_in_progress``
         synchronously. We just need to clear it on exit. Bumped attempt
         counter is checked against ``settings.LIVE_RECONNECT_MAX_RETRIES``;
-        past the cap we surface an error frame and leave the WS for the
-        FE to close.
+        past the cap we surface an error frame and close the WS with
+        code 4004 so the FE's auto-reconnect kicks in with a fresh JWT
+        rather than sitting on a half-dead session with no live brain.
         """
         try:
             attempt = reconnect_attempts[0] + 1
             if attempt > settings.LIVE_RECONNECT_MAX_RETRIES:
                 logger.warning(
-                    "voice_ws (Live) reconnect cap reached (%d) — giving up",
+                    "voice_ws (Live) reconnect cap reached (%d) — "
+                    "closing WS with 4004 so FE auto-reconnect engages",
                     settings.LIVE_RECONNECT_MAX_RETRIES,
                 )
                 try:
                     await ws_send_json(ws, {
                         "type": "error",
-                        "message": "voice connection lost — please refresh",
+                        "code": "live_session_unrecoverable",
+                        "message": "voice connection lost — reconnecting",
                     })
                 except Exception:
                     pass
-                # Don't proactively close the WS — receive loop will exit
-                # next time the FE sends a frame and saw no live session.
+                # Distinct from 4001 (auth) / 4002 (open-failure) /
+                # 4003 (cap exceeded). 4004 = retry budget exhausted on
+                # a session that started healthy. FE's useWebSocket
+                # treats any close as a reconnect signal, so the next
+                # connection comes up fresh.
+                try:
+                    await ws.close(
+                        code=4004, reason="live_session_unrecoverable",
+                    )
+                except Exception:
+                    pass
                 return
             reconnect_attempts[0] = attempt
             handle = _resumption_handle_if_fresh()

@@ -189,7 +189,7 @@ def patched_ws(monkeypatch):
         ]
     monkeypatch.setattr(ws_mod, "load_persistent_memory", fake_load_memory)
 
-    def fake_build_prompt(scope: str, prior_summary=None) -> str:
+    def fake_build_prompt(scope: str, prior_summary=None, *, for_live=False) -> str:
         return f"[CHIEF scope={scope} summary={prior_summary or 'none'}]"
     monkeypatch.setattr(ws_mod, "build_chief_system_string", fake_build_prompt)
 
