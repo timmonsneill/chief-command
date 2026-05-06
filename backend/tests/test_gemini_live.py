@@ -873,3 +873,123 @@ async def test_close_without_open_is_safe():
     sess = LiveSession(system_prompt="x", on_audio_chunk=_noop)
     # Should not raise even though open() was never called.
     await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn pump survival
+# ---------------------------------------------------------------------------
+class _PerTurnAsyncSession:
+    """Fake AsyncSession whose ``receive()`` is single-turn — matches the
+    real google-genai SDK shape (live.py:454-460), where the iterator
+    breaks after each ``turn_complete``.
+
+    The pump must call ``receive()`` again for every subsequent turn.
+    """
+
+    def __init__(self, turns: list[list]):
+        # ``turns`` is a list of turns; each turn is a list of messages
+        # the pump will receive before that iterator ends.
+        self._turns = list(turns)
+        self.receive_call_count = 0
+        self.sent_audio: list = []
+        self.sent_client_content: list = []
+        self._closed = False
+
+    async def send_realtime_input(self, *, audio=None, **_kw):
+        if audio is not None:
+            self.sent_audio.append(audio)
+
+    async def send_client_content(self, *, turns=None, turn_complete=True):
+        self.sent_client_content.append({"turns": turns, "turn_complete": turn_complete})
+
+    async def send_tool_response(self, *, function_responses):
+        pass
+
+    async def receive(self):
+        self.receive_call_count += 1
+        if self._closed:
+            # Block forever once exhausted — pump exits via cancellation.
+            while not self._closed:
+                await asyncio.sleep(0.01)
+            return
+        if self._turns:
+            turn = self._turns.pop(0)
+            for msg in turn:
+                yield msg
+            # Iterator ends here — mimics real SDK's per-turn behavior.
+            return
+        # No more scripted turns: park until cancelled.
+        while not self._closed:
+            await asyncio.sleep(0.01)
+
+    async def close(self):
+        self._closed = True
+
+
+@pytest.mark.asyncio
+async def test_pump_survives_single_turn_receive_iterator_end():
+    """Regression: when ``session.receive()`` is a single-turn iterator
+    (real SDK behavior), the pump must call it again for turn 2 instead
+    of exiting silently after turn 1.
+    """
+    turn_one = [
+        _LiveServerMessage(
+            server_content=_ServerContent(
+                output_transcription=_Transcription(text="turn one reply", finished=True),
+            )
+        ),
+        _LiveServerMessage(
+            server_content=_ServerContent(generation_complete=True),
+        ),
+    ]
+    turn_two = [
+        _LiveServerMessage(
+            server_content=_ServerContent(
+                output_transcription=_Transcription(text="turn two reply", finished=True),
+            )
+        ),
+        _LiveServerMessage(
+            server_content=_ServerContent(generation_complete=True),
+        ),
+    ]
+    fake_session = _PerTurnAsyncSession([turn_one, turn_two])
+    client = _FakeClient(lambda: fake_session)
+    gemini_live._client = client
+
+    out_tx: list[tuple[str, bool]] = []
+    turn_done_count = {"n": 0}
+
+    async def on_out(t, is_final): out_tx.append((t, is_final))
+    async def on_done(_usage): turn_done_count["n"] += 1
+
+    sess = LiveSession(
+        system_prompt="x",
+        on_audio_chunk=_noop,
+        on_output_transcript=on_out,
+        on_turn_complete=on_done,
+    )
+    await sess.open()
+    try:
+        # Wait long enough for both turns to drain (each generation_complete
+        # has a USAGE_METADATA_DRAIN_DELAY_S ~200ms before firing on_done).
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while turn_done_count["n"] < 2:
+            if asyncio.get_event_loop().time() > deadline:
+                break
+            await asyncio.sleep(0.05)
+
+        assert turn_done_count["n"] == 2, (
+            f"pump exited after first turn — only {turn_done_count['n']} "
+            f"on_turn_complete fired (expected 2). receive_call_count="
+            f"{fake_session.receive_call_count}"
+        )
+        assert out_tx == [
+            ("turn one reply", True),
+            ("turn two reply", True),
+        ]
+        assert fake_session.receive_call_count >= 2
+        # Pump still alive after both turns.
+        assert sess._pump_task is not None
+        assert not sess._pump_task.done()
+    finally:
+        await sess.close()

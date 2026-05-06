@@ -575,8 +575,10 @@ class LiveSession:
             return  # close() raced open() — nothing to do
 
         try:
-            async for response in sess.receive():
-                await self._dispatch(response)
+            # session.receive() is a single-turn iterator; loop to span turns.
+            while True:
+                async for response in sess.receive():
+                    await self._dispatch(response)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
