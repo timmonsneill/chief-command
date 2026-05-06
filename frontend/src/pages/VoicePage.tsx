@@ -229,7 +229,7 @@ export default function VoicePage() {
                 ...prev.slice(0, -1),
                 {
                   ...last,
-                  content: text,
+                  content: (last.content ?? '') + text,
                   ...(isFinal ? { id: crypto.randomUUID() } : {}),
                 },
               ]
