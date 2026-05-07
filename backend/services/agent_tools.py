@@ -260,17 +260,20 @@ THINK_DEEP_TOOL = ToolSchema(
 CODE_REVIEW_TOOL = ToolSchema(
     name="code_review",
     description=(
-        "Review a specific code artifact and return structured feedback. "
-        "Use this for: PR review, spec sanity-check, security audit, "
-        "architecture review, performance pass. NOT for open-ended "
-        "thinking — use think_deep for that. Pro on Vertex handles the "
-        "actual analysis (deep, structured); the result is read back to "
-        "the user as Chief's reply. "
-        "MANDATORY: BEFORE calling this tool, you MUST first speak a short "
-        "1-3 second bridge phrase out loud (e.g. 'Let me have Glass take a "
-        "look,' 'One sec, sending this to Glass,' 'Let me dig in'). Glass "
-        "can take 1-15s warm/cold — dead silence in that window feels "
-        "broken. Speak first, tool fires second."
+        "Review ONE bounded code artifact and return structured feedback. "
+        "Use for a SINGLE target: one file, one git diff, one git range, "
+        "one pasted snippet/spec. Hard-capped at 100KB — the tool will "
+        "fail on anything larger. NOT for open-ended thinking (use "
+        "think_deep) and NOT for sweeping/multi-file work (use "
+        "dispatch_agent). If the user asks for a 'whole-codebase' or "
+        "'sweeping' review, route to `dispatch_agent` instead — "
+        "`code_review` is bounded to a single artifact under 100KB. "
+        "Pro on Vertex handles the analysis; result is read back as "
+        "Chief's reply. "
+        "MANDATORY: BEFORE calling, speak a short 1-3s bridge phrase "
+        "(e.g. 'Let me have Glass take a look,' 'One sec'). Glass can "
+        "take 1-15s warm/cold — dead silence feels broken. Speak first, "
+        "tool fires second. Do NOT narrate the plan before firing."
     ),
     parameters={
         "type": "object",
@@ -304,16 +307,22 @@ CODE_REVIEW_TOOL = ToolSchema(
 DISPATCH_AGENT_TOOL = ToolSchema(
     name="dispatch_agent",
     description=(
-        "Spawn a Claude Code subprocess to handle a complex multi-step task "
-        "that needs subagents, MCP servers, or a full agent loop. Slower "
-        "(typically 5-10 seconds) than a direct Read/Bash/Grep call. Use "
-        "ONLY when the task genuinely needs an agent — e.g. 'audit the auth "
-        "module' or 'find all places we mutate this state'. For single-file "
-        "reads or simple greps, use the direct tools instead. "
-        "MANDATORY: BEFORE calling this tool, you MUST first speak a short "
-        "1-3 second bridge phrase out loud (e.g. 'Sending Riggs at it,' "
-        "'Finn on that,' 'Hold on, dispatching'). 5-10s of dead silence "
-        "feels broken; speak first, tool fires second."
+        "Spawn a Claude Code subprocess for tasks that require READING "
+        "ACROSS MANY FILES — full audits, multi-file refactors, sweeping "
+        "reviews ('review the whole system,' 'review the codebase,' "
+        "'audit the X module,' 'find all the places we do X'). The CC "
+        "subprocess can spawn subagents (Sable/Hawke/Pax/Vera/Quill, "
+        "Forge), grep across the repo, and run a coordinated sweep. "
+        "Use this for ANY 'review the codebase' / 'audit X' / 'full "
+        "review' / 'sweeping review' intent — that's NOT a code_review "
+        "(which is capped at one 100KB artifact). Slower than direct "
+        "Read/Bash/Grep (typically 5-10s). For a single-file read or "
+        "simple grep, use the direct tools instead. "
+        "MANDATORY: BEFORE calling, speak a short 1-3s bridge phrase "
+        "(e.g. 'Sending Riggs at it,' 'Finn on that'). 5-10s of dead "
+        "silence feels broken; speak first, tool fires second. Do NOT "
+        "narrate the dispatch plan before firing — narration replaces "
+        "execution."
     ),
     parameters={
         # ``scope`` is intentionally NOT exposed to the model. Cwd resolution
