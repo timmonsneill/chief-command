@@ -38,7 +38,7 @@ module.exports = {
     {
       name: "chief-backend",
       script: VENV_PYTHON,
-      args: "-m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir services --reload-dir config",
+      args: "-m uvicorn app.main:app --host 0.0.0.0 --port 8000",
       cwd: path.join(PROJECT_DIR, "backend"),
       autorestart: true,
       restart_delay: 2000,
