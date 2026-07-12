@@ -1,0 +1,100 @@
+// Chief Command v2 — seat definitions (spec §4)
+//
+// Providers sit behind NAMED ROLES so any of them can be swapped without touching
+// orchestration logic. Nothing below should be referenced by provider name anywhere
+// else in the harness — only by seat id.
+//
+// Hardware note (Phase 0 RAM check, spec §2): this machine is an M2 Pro with 16 GB.
+// That is BELOW the spec's 36 GB threshold for a 30B-class local model, so the
+// grinder is sized down to a 7B coder. See `grinder` below.
+
+// ---------------------------------------------------------------------------
+// HEAD — the conversational Talker (added post-spec; see docs/OSS_RESEARCH §1b)
+//
+// This seat did not exist in the original spec, which had the voice layer talking
+// straight to the orchestrator. That was the design flaw: GPT-5.6-sol measures ~13s
+// to first token, against a 1.5s budget. The head is deliberately FAST and NOT SMART
+// — it is ears, mouth, and dispatcher. It never does the thinking; it spawns the
+// seats that do, non-blockingly, and narrates the result.
+//
+// DECISION PENDING: Spike C (TTFT bake-off). Grok fast is the leading candidate but
+// its time-to-first-token is unverified and that is the one call here that is
+// expensive to reverse. Do not hardcode a winner before the bake-off runs.
+// ---------------------------------------------------------------------------
+[seats.head]
+provider = "xai"                # candidate 1 — pending Spike C
+model = "grok-4.1-fast-non-reasoning"
+tier = "metered"
+reasoning_effort = "none"       # a reasoning head is a dead voice loop
+daily_cap_cents = 200
+notes = "Talker. Fast + tool-calling, NOT smart. Never blocks. See Spike C."
+
+// ---------------------------------------------------------------------------
+// ORCHESTRATOR — deep planning, task decomposition, running the gauntlet.
+// Slow BY DESIGN and that is fine: it is a dispatch target, never a conversation
+// partner. Its 13s TTFT is invisible because you are never waiting on it.
+// ---------------------------------------------------------------------------
+[seats.orchestrator]
+provider = "codex"
+model = "gpt-5.6-sol"
+tier = "subscription"
+reasoning_effort = "high"
+max_threads = 6                 // NOT 8 — spec said 8; the real default is 6
+max_depth = 1
+notes = "Reasoner. OAuth is TOLERATED, not sanctioned — keep API-key swap ready."
+
+// ---------------------------------------------------------------------------
+// WORKHORSE — volume autonomous coding. Migrations, test backfills, refactors.
+// Worktree-isolated so parallel edits cannot collide.
+// ---------------------------------------------------------------------------
+[seats.workhorse]
+provider = "xai"
+model = "grok-build"
+tier = "subscription"
+worktree_isolated = true
+notes = "UNVERIFIED: $30 SuperGrok may 403 (backend appears gated to Heavy). Test the tier."
+
+// ---------------------------------------------------------------------------
+// GRINDER — the free local junior. Overnight scaffolding, boilerplate, first drafts.
+//
+// Sized for 16 GB (Phase 0 check): a 7B coder, not the 30B the spec hoped for.
+// It is a junior dev either way, and the DB enforces that its output can never
+// reach `done` without a higher-tier review (schema.sql, guard 1).
+// ---------------------------------------------------------------------------
+[seats.grinder]
+provider = "ollama"
+model = "qwen2.5-coder:7b"
+tier = "local"
+endpoint = "http://127.0.0.1:11434"
+notes = "16GB host. Bump to qwen3-coder:30b on the Studio (§8 phase 5)."
+
+// ---------------------------------------------------------------------------
+// REVIEWER — highest-judgment escalation seat. Optional and droppable;
+// the system must run fully without it (spec §4.4).
+//
+// CORRECTION: the spec's monthly "agent credit pool" does not exist — Anthropic
+// announced it, then PAUSED it before it took effect. `claude -p` currently draws
+// on normal subscription limits. The cap below is forward-proofing, not a
+// current necessity.
+//
+// Do NOT put this seat at the head: the claude-cli runtime spawns a subprocess per
+// call (3-5s), which is fatal in a voice loop and irrelevant in the background.
+// ---------------------------------------------------------------------------
+[seats.reviewer]
+provider = "claude-cli"
+model = "claude-fable-5"
+tier = "metered"
+daily_cap_cents = 500
+optional = true
+notes = "Escalation only. CLI subprocess = 3-5s/call. Background-only, never the head."
+
+// ---------------------------------------------------------------------------
+// GAUNTLET (spec §6) — reviewers run in PARALLEL against one frozen bundle.
+// The model-diversity rule is recorded per-verdict in the DB so it is auditable
+// rather than merely asserted.
+// ---------------------------------------------------------------------------
+[gauntlet]
+reviewers = ["orchestrator", "workhorse", "grinder"]
+min_model_families = 2          // §6: different models miss different bugs
+escalate_to = "reviewer"        // contested verdicts go here...
+escalate_to_human_on = ["needs_human"]  // ...or to Neill's queue
