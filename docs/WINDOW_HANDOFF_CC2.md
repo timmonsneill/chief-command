@@ -42,3 +42,7 @@ You are a fresh Claude Code session opened in `~/code-projects/chief-command`. T
 2. Run the open-source research sweep (OpenClaw ecosystem + prior art for voice-front-end harnesses + Codex TOML agent-porting tools). Owner explicitly wants this before any scaffolding.
 3. Bring Neill: (a) research findings + recommendation, (b) the v1-backend archive-or-salvage question, (c) Phase-0 RAM check on his MacBook (sizes the Ollama model), (d) naming — he said "rename at will."
 4. Only then scaffold Phase 1 (text harness).
+
+## Sequencing decision (Neill, 2026-07-11 night)
+
+Builder first, then Jess: "I will probably build out the builder system first. Then maybe use that to go ham with building Jess." Plan of record: reach Phase 1 acceptance (text harness dispatching + recording jobs), then take the Jess pickup specs (`~/code-projects/personal-assist/docs/`) as the Builder's FIRST real workload — the shakedown cargo. Do not gate Jess on later CC phases; if CC stalls, Jess falls back to a plain Claude Code window.
