@@ -1,100 +1,197 @@
 // Chief Command v2 — seat definitions (spec §4)
 //
 // Providers sit behind NAMED ROLES so any of them can be swapped without touching
-// orchestration logic. Nothing below should be referenced by provider name anywhere
-// else in the harness — only by seat id.
+// orchestration logic. Nothing else in the harness may reference a provider by name —
+// only by seat id. Vendor policy drift is risk #1 on this project (§9).
 //
-// Hardware note (Phase 0 RAM check, spec §2): this machine is an M2 Pro with 16 GB.
-// That is BELOW the spec's 36 GB threshold for a 30B-class local model, so the
-// grinder is sized down to a 7B coder. See `grinder` below.
+// Hardware (Phase 0 RAM check, §2): M2 Pro, 16 GB. BELOW the spec's 36 GB threshold,
+// so the free grinder is a 7B coder, not the hoped-for 30B.
+//
+// ===========================================================================
+// THE ORGANIZING PRINCIPLE
+//
+// Every seat answers ONE of two questions: "how fast does it talk?" or "how well
+// does it think?" Nothing is good at both, because thinking well MEANS taking time.
+// So we don't fight the tension — we seat around it:
+//
+//   MOUTH   fast, dumb, never blocks. Dispatches and narrates.
+//   BRAIN   slow, deep. A dispatch target you are never waiting on.
+//   WORKHORSE  the best autonomous coder we can buy. Volume + quality.
+//   GRINDERS   cheap parallel attempts. Output NEVER ships unreviewed (DB-enforced).
+//   REVIEWER   escalation, highest judgment. Optional and droppable.
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
-// HEAD — the conversational Talker (added post-spec; see docs/OSS_RESEARCH §1b)
+// MOUTH — the Talker. What Neill actually talks to.
 //
-// This seat did not exist in the original spec, which had the voice layer talking
-// straight to the orchestrator. That was the design flaw: GPT-5.6-sol measures ~13s
-// to first token, against a 1.5s budget. The head is deliberately FAST and NOT SMART
-// — it is ears, mouth, and dispatcher. It never does the thinking; it spawns the
-// seats that do, non-blockingly, and narrates the result.
+// Speech-to-speech: audio in, audio out, ONE model, native tool calling. This is
+// what deletes the Whisper + Kokoro + Pipecat-plumbing stack that killed v1.
 //
-// DECISION PENDING: Spike C (TTFT bake-off). Grok fast is the leading candidate but
-// its time-to-first-token is unverified and that is the one call here that is
-// expensive to reverse. Do not hardcode a winner before the bake-off runs.
+// DECISION DEFERRED ON PURPOSE. Both candidates are GA, sub-second, and speak the
+// SAME wire protocol (xAI is OpenAI-Realtime-compatible — you change the base URL).
+// So: build against the OpenAI Realtime event schema, keep base_url in config, and
+// the other becomes a ONE-LINE swap. Do not marry either one.
+//
+// Price is a WASH — do not choose on it:
+//   grok-voice-think-fast-1.0  $3.00/hr flat  (~$0.05/min)
+//   gpt-realtime-2.1-mini      ~$0.04/min real-world once prompt caching kicks in
+//                              (and it will — a voice head resends the same system
+//                              prompt + tool defs every single turn)
+// The "Grok is 6x cheaper" claim compares against the FLAGSHIP gpt-realtime, not mini.
+//
+// Choose on tool-calling reliability instead. Grok wins on native MCP + session
+// resumption; OpenAI wins on configurable reasoning effort + a longer tool-calling
+// track record. Settle it with Spike C (bake-off), not with a blog post.
 // ---------------------------------------------------------------------------
-[seats.head]
-provider = "xai"                # candidate 1 — pending Spike C
-model = "grok-4.1-fast-non-reasoning"
+[seats.mouth]
+provider = "xai-realtime"
+model = "grok-voice-think-fast-1.0"
+base_url = "wss://api.x.ai/v1/realtime"     // swap to OpenAI's and it still works
 tier = "metered"
-reasoning_effort = "none"       # a reasoning head is a dead voice loop
-daily_cap_cents = 200
-notes = "Talker. Fast + tool-calling, NOT smart. Never blocks. See Spike C."
+turn_detection = "semantic_vad"             // NOT push-to-talk. Owner override.
+eagerness = "low"                           // a driver pauses mid-sentence to merge
+interrupt_response = true                   // barge-in
+daily_cap_cents = 300
+notes = "Fast + dumb BY DESIGN. Never blocks. Fallback: gpt-realtime-2.1-mini."
 
 // ---------------------------------------------------------------------------
-// ORCHESTRATOR — deep planning, task decomposition, running the gauntlet.
-// Slow BY DESIGN and that is fine: it is a dispatch target, never a conversation
-// partner. Its 13s TTFT is invisible because you are never waiting on it.
+// BRAIN — deep reasoning, planning, decomposition, judging the gauntlet.
+// SLOW BY DESIGN and that is fine: it is a dispatch target, never a conversation
+// partner. Its ~13s time-to-first-token is invisible because you are never waiting.
+//
+// Ultra mode is literally an orchestrator: it decomposes the task and spawns
+// parallel subagents trained to coordinate MID-task rather than merge at the end.
+// That is the reviewer-gauntlet shape (§6), native.
+//   Terminal-Bench 2.1: 88.8% single-agent / 91.9% Ultra — SOTA for agentic work.
 // ---------------------------------------------------------------------------
-[seats.orchestrator]
+[seats.brain]
 provider = "codex"
 model = "gpt-5.6-sol"
 tier = "subscription"
 reasoning_effort = "high"
-max_threads = 6                 // NOT 8 — spec said 8; the real default is 6
+mode = "ultra"                              // coordinated subagent decomposition
+max_threads = 6                             // spec said 8; the real default is 6
 max_depth = 1
-notes = "Reasoner. OAuth is TOLERATED, not sanctioned — keep API-key swap ready."
+notes = "OAuth is TOLERATED, not sanctioned. Most likely seat to break. Keep API-key swap ready."
 
 // ---------------------------------------------------------------------------
-// WORKHORSE — volume autonomous coding. Migrations, test backfills, refactors.
-// Worktree-isolated so parallel edits cannot collide.
+// WORKHORSE — volume autonomous coding. Migrations, refactors, test backfills.
+//
+// OWNER DECISION (2026-07-13): OpenAI, not Claude. Rationale below — and note the
+// reason is NOT the one in the spec.
+//
+// ⚠️ THE SPEC'S REASON IS WRONG. It says Claude headless draws from a metered credit
+// pool. It does NOT — Anthropic announced that, then PAUSED it before it took effect.
+// `claude -p` runs on normal subscription limits TODAY. Claude-as-workhorse would not
+// cost extra dollars.
+//
+// ✅ THE REAL REASON, which nobody had written down: RATE LIMITS, not cost. Running a
+// workhorse hard (unattended overnight builds, migrations, backfills) burns Max plan
+// usage caps — and it's the SAME bucket as interactive use. The failure mode is nasty:
+// your autonomous builder silently eats the model you were going to review its work
+// with. So Claude stays OUT of the high-volume seat, and stays IN as low-volume
+// escalation (see [seats.reviewer]).
+//
+// GPT-5.6-sol is not a consolation prize here: 88.8% Terminal-Bench 2.1 (91.9% Ultra),
+// SOTA for agentic coding. Flat subscription, predictable, bounded.
+//
+// For the record, since it may matter on the Studio later:
+//     Claude Opus  87.6% SWE-bench Verified   (best autonomous coder available)
+//     GPT-5.6-sol  64.6% SWE-bench Pro / 88.8% Terminal-Bench  (top-tier agentic)
+//     Grok Build   70.8% SWE-bench Verified   (weak model, great harness)
 // ---------------------------------------------------------------------------
 [seats.workhorse]
-provider = "xai"
-model = "grok-build"
+provider = "codex"
+model = "gpt-5.6-sol"
 tier = "subscription"
 worktree_isolated = true
-notes = "UNVERIFIED: $30 SuperGrok may 403 (backend appears gated to Heavy). Test the tier."
+notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK below."
 
 // ---------------------------------------------------------------------------
-// GRINDER — the free local junior. Overnight scaffolding, boilerplate, first drafts.
+// PAID GRINDER — cheap parallel attempts, always reviewed.
 //
-// Sized for 16 GB (Phase 0 check): a 7B coder, not the 30B the spec hoped for.
-// It is a junior dev either way, and the DB enforces that its output can never
-// reach `done` without a higher-tier review (schema.sql, guard 1).
+// ⚠️ ALSO CHANGED. Grok Build has a BEST-IN-CLASS HARNESS wrapped around a MEDIOCRE
+// MODEL: 8 parallel subagents in isolated git worktrees, plan-first, native MCP,
+// 256K context — but 70.8% SWE-bench. So use it for what it's actually good at:
+// throw 8 attempts at a migration in parallel and let the gauntlet pick the winner.
+//
+// That is a grinder contract, not a workhorse contract. Its output can never ship
+// unreviewed anyway — and the DB enforces that, not a prompt.
+//
+// 🚩 UNVERIFIED: $30 SuperGrok may 403 (backend appears gated to Heavy, $300/mo).
+//    Also: pricing is reported inconsistently ($1/$2 vs $0.20/$1.50 per 1M). Check live.
 // ---------------------------------------------------------------------------
-[seats.grinder]
+[seats.grinder_paid]
+provider = "xai"
+model = "grok-build-0.1"
+tier = "subscription"
+worktree_isolated = true
+parallel_subagents = 8
+notes = "Great harness, weak model. Volume attempts, gauntlet picks. TEST THE TIER."
+
+// ---------------------------------------------------------------------------
+// FREE GRINDER — the local junior. Overnight scaffolding, boilerplate, first drafts.
+// Sized for 16 GB. A junior dev, and treated as one: guard 1 in schema.sql makes it
+// STRUCTURALLY IMPOSSIBLE for its output to reach `done` unreviewed.
+// ---------------------------------------------------------------------------
+[seats.grinder_local]
 provider = "ollama"
 model = "qwen2.5-coder:7b"
 tier = "local"
 endpoint = "http://127.0.0.1:11434"
-notes = "16GB host. Bump to qwen3-coder:30b on the Studio (§8 phase 5)."
+notes = "Bump to qwen3-coder:30b on the Studio (§8 phase 5). One line."
 
 // ---------------------------------------------------------------------------
-// REVIEWER — highest-judgment escalation seat. Optional and droppable;
-// the system must run fully without it (spec §4.4).
+// REVIEWER — escalation only. Highest judgment: architecture calls, contested
+// verdicts, the bug the local model looped on three times.
 //
-// CORRECTION: the spec's monthly "agent credit pool" does not exist — Anthropic
-// announced it, then PAUSED it before it took effect. `claude -p` currently draws
-// on normal subscription limits. The cap below is forward-proofing, not a
-// current necessity.
+// Claude stays in the hierarchy HERE, deliberately. At escalation volume (a handful
+// of calls a day) it will not dent the Max rate limits that disqualify it from the
+// workhorse seat — and it is already paid for.
 //
-// Do NOT put this seat at the head: the claude-cli runtime spawns a subprocess per
-// call (3-5s), which is fatal in a voice loop and irrelevant in the background.
+// It earns its seat twice over: it is the strongest model on the board (87.6%
+// SWE-bench Verified), AND it is a FOURTH model family in the gauntlet. §6 exists
+// because different models miss different bugs. Claude catching what GPT and Grok
+// both missed is the entire point of keeping it.
+//
+// Per spec §4.4 this seat is optional and droppable — the system must run without it.
+// Never at the mouth: claude-cli spawns a subprocess per call (3-5s).
 // ---------------------------------------------------------------------------
 [seats.reviewer]
-provider = "claude-cli"
-model = "claude-fable-5"
-tier = "metered"
-daily_cap_cents = 500
+provider = "claude-cli"                     // sanctioned path; subscription OAuth is NOT
+model = "claude-opus-4-8"
+tier = "subscription"                       // NOT credits — the pool was paused, never shipped
 optional = true
-notes = "Escalation only. CLI subprocess = 3-5s/call. Background-only, never the head."
+max_calls_per_day = 25                      // keeps escalation from eating interactive headroom
+notes = "Low-volume escalation. Strongest model + 4th model family. Droppable by design."
+
+// ===========================================================================
+// ⚠️ CONCENTRATION RISK — read before changing anything above
+//
+// [seats.brain] and [seats.workhorse] BOTH run on the Codex OAuth path. That path is
+// TOLERATED, NOT SANCTIONED: no OpenAI doc blesses third-party OAuth, and their ToS
+// forbids sharing account credentials. Anthropic closed this exact door in Feb/Apr
+// 2026; Google closed it in Feb–June 2026 WITH ACCOUNT BANS. OpenAI is the last
+// vendor standing, and that is a TIMING position, not a policy position.
+//
+// If it closes, we lose the brain AND the builder in the same morning.
+//
+// Mitigation (cheap, and worth having ready rather than improvised under pressure):
+// both seats must swap to a paid API key by changing `provider`/`tier` here and
+// NOTHING else. That is what the seat abstraction is for. Test the swap before we
+// need it.
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
-// GAUNTLET (spec §6) — reviewers run in PARALLEL against one frozen bundle.
-// The model-diversity rule is recorded per-verdict in the DB so it is auditable
-// rather than merely asserted.
+// GAUNTLET (§6) — reviewers run in PARALLEL against one frozen bundle.
+// The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE
+// rather than merely asserted. Different models miss different bugs.
+//
+// Four families available: gpt (brain/workhorse), claude (reviewer),
+// grok (grinder_paid), qwen (grinder_local).
 // ---------------------------------------------------------------------------
 [gauntlet]
-reviewers = ["orchestrator", "workhorse", "grinder"]
-min_model_families = 2          // §6: different models miss different bugs
-escalate_to = "reviewer"        // contested verdicts go here...
-escalate_to_human_on = ["needs_human"]  // ...or to Neill's queue
+reviewers = ["brain", "grinder_paid", "grinder_local"]
+min_model_families = 2                      // §6 floor; we can reach 4
+escalate_to = "reviewer"                    // contested verdicts → Claude...
+escalate_to_human_on = ["needs_human"]      // ...or Neill's queue
