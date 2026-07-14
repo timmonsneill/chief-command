@@ -3,7 +3,7 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
-Last updated: 2026-07-14
+Last updated: 2026-07-14 (session 2 — commits landed, exploits verified, arch rewritten, Sol re-review running)
 
 ---
 
@@ -57,14 +57,17 @@ start of a session if they're still open.
 Neill's instruction: *"stop building new shit until we have this all nailed down, and
 sol has reviewed it and approved it as well."*
 
-- [ ] **Verify Sol's exploits against the schema.** It says "I proved that…" for:
-      deletable fail verdicts, a fake screenshot path accepted, an approval created
-      already-granted. **Specific and checkable.** This project's whole lesson is not to
-      take a model's word for it. Transcript: `scratchpad/sol_out2.txt`.
-- [ ] **Rewrite `ARCHITECTURE_v2_2026-07-14.md`** to close every gap in
-      `SOL_VERDICT_2026-07-14.md`.
-- [ ] **Send it back to Sol** (`bash ask-sol.sh`, may need `chmod +x`). Iterate:
-      attack → fix → re-attack, **until Sol has nothing left.**
+- [x] **Verify Sol's exploits against the schema.** DONE 2026-07-14. All three
+      reproduced against the real schema. Two fixed in `schema.sql` (verdicts now
+      un-deletable; approvals can't be born granted) with regression tests in
+      `test_sol_attacks.py` — 79 tests pass. The third (nonexistent screenshot path) is
+      unfixable by a trigger and became a gatekeeper requirement in the arch doc.
+      Transcripts now in `docs/sol/` (survive reboot).
+- [x] **Rewrite `ARCHITECTURE_v2_2026-07-14.md`** DONE 2026-07-14. Restructured around
+      Sol's 8 review questions; added the seam table, the plain-file-DB trust answer, the
+      credential-absence-via-separate-user answer, and folded in the verified exploits.
+- [~] **Send it back to Sol** (`./ask-sol.sh`). IN PROGRESS — round 4 review running.
+      Iterate attack → fix → re-attack **until Sol has nothing left.**
 - [ ] **Only then build.**
 
 ---
