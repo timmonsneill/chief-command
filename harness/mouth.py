@@ -193,6 +193,19 @@ def cover_the_gap() -> str:
 # ask for it. Invert it. The list below is the whole of what the mouth may keep.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ⚠️ Sol's cross-family review (round 2) BROKE this list:
+#
+#     "The allow-list is not safe. It accepts any short message beginning with words
+#      such as 'do', 'fix', 'run', 'go', or 'make'. Therefore 'Do you think this is
+#      safe?', 'Fix it however you think best,' and 'Run production without a backup'
+#      stay with the shallow path."
+#
+# He's right, and "Do you think this is safe?" is the perfect example — it's a
+# COMMAND-SHAPED QUESTION. The verb at the front is a disguise.
+#
+# So an allow-list of *verbs* was never enough. A dispatch is an IMPERATIVE — it has an
+# object and no question in it. The moment there's a question mark, a "you", a hedge,
+# or an opinion word, it stops being an order and becomes a conversation.
 _MAY_ANSWER_ALONE = [
     r"^(kick|start|run|go|do|build|fix|add|make|put|dispatch|queue)\b",   # dispatch
     r"(status|how'?s it going|what'?s .* doing|is it (done|finished)|any update)",
@@ -202,26 +215,61 @@ _MAY_ANSWER_ALONE = [
     r"^(hi|hey|hello|morning|thanks|thank you|cheers|good ?night)\b",     # chitchat
 ]
 
+# If ANY of these appear, it is not an order — it's a conversation wearing an order's
+# clothes. These override the allow-list entirely.
+_NOT_ACTUALLY_A_COMMAND = [
+    r"\?",                                    # a question mark ends the argument
+    r"\byou\b", r"\byour\b",                 # "do YOU think…"
+    r"\bthink\b", r"\bfeel\b", r"\bopinion\b", r"\breckon\b",
+    r"\bshould\b", r"\bcould\b", r"\bwould\b", r"\bmight\b",
+    r"\bwhy\b", r"\bhow come\b", r"\bwhat if\b",
+    r"\bbut\b", r"\bactually\b", r"\bthough\b", r"\bhowever\b",
+    r"\bworried\b", r"\bconcerned\b", r"\bnot sure\b", r"\bunsure\b",
+    r"\bhowever you\b", r"\bwhatever you\b", r"\bhowever it\b",  # "fix it however you think best"
+    r"\bbest way\b", r"\bbetter\b", r"\bworth\b",
+    r"\bmake sense\b", r"\bright\?*$",
+]
+
 
 def needs_the_brain(utterance: str) -> bool:
     """Should this reach the smarter mind?
 
-    DEFAULT: YES. The mouth keeps a job only if it matches the short allow-list above.
+    DEFAULT: YES. The mouth keeps a job only if it matches the allow-list, contains
+    nothing that gives it away as a conversation, AND isn't dangerous.
 
-    Note the deliberate asymmetry in the failure modes:
+    The asymmetry is the whole design:
       - escalating needlessly costs ~8 seconds
       - answering something it shouldn't have costs Neill's trust in the whole thing
     Those are not close. Bias all the way toward reaching.
     """
     u = utterance.strip().lower()
 
+    # A question, a hedge, or an opinion word — it's a conversation, whatever it starts with.
+    if any(re.search(p, u) for p in _NOT_ACTUALLY_A_COMMAND):
+        return True
+
+    # A DANGEROUS ORDER DESERVES A MOMENT'S THOUGHT BEFORE IT IS OBEYED.
+    #
+    # Sol's review caught "Run production without a backup" sailing straight through as
+    # a routine dispatch. It's command-shaped, so the grammar checks all pass — but a
+    # fast model that cheerfully obeys that is not a feature, it's a loaded gun.
+    #
+    # So anything touching auth, money, patient data, deletion, migrations or production
+    # goes upstairs first. Not to refuse it — to think for eight seconds and, if it's
+    # alarming, say so before doing it.
+    from tiering import _RISKY  # noqa: PLC0415  (single source of truth for "dangerous")
+    if any(re.search(p, u) for p in _RISKY):
+        return True
+
+    # "go deep", "think hard", "be careful" — he's explicitly asking for the good brain.
+    from tiering import _HE_ASKED  # noqa: PLC0415
+    if any(re.search(p, u) for p in _HE_ASKED):
+        return True
+
     if not any(re.search(p, u) for p in _MAY_ANSWER_ALONE):
         return True
 
-    # It matched — but a matched pattern buried in a longer thought is him THINKING,
-    # not commanding. "kick off the rate limiter" is a dispatch.
-    # "kick off the rate limiter, but actually I'm worried we're doing this backwards"
-    # is a conversation, and it must go.
+    # A matched command buried in a longer thought is him THINKING, not commanding.
     return len(u.split()) > 14
 
 
@@ -254,12 +302,28 @@ THINK_FAST = "claude"   # ~8s   — the default. Smart, plain-spoken, free.
 THINK_HARD = "sol"      # slow  — earned by pushback, never guessed at.
 
 # He told us exactly what pushback sounds like.
+# ⚠️ Sol, round 2, #11: "Pushback detection loses ordinary dissatisfaction. Phrases
+# such as 'I disagree', 'you misunderstood me', 'that misses the point', 'I'm not
+# convinced', 'why would we do that?', 'that worries me', and 'no, because…' are missed."
+#
+# He's right — I'd only caught the loud, obvious pushback. Most disagreement is quieter
+# than that, and a quiet correction that gets a shallow answer is worse than a loud one,
+# because Neill won't push twice.
 _PUSHBACK = [
+    # loud
     r"not (that )?smart", r"doesn'?t make sense", r"that'?s not right", r"that'?s wrong",
     r"think (harder|again|more)", r"try again", r"you'?re missing", r"that'?s not it",
     r"doesn'?t work", r"not (good|great) enough", r"go deeper", r"really think",
-    r"i don'?t (buy|believe) (that|it)", r"are you sure", r"that'?s (shallow|thin|weak|lazy)",
-    r"come on", r"do better", r"dig in",
+    r"are you sure", r"that'?s (shallow|thin|weak|lazy)", r"come on", r"do better",
+    r"dig in", r"nah\b",
+    # quiet — the ones Sol caught me missing
+    r"\bi disagree\b", r"\bi don'?t (agree|buy|believe|think)\b",
+    r"\bnot convinced\b", r"\byou misunderstood\b", r"\bmisses the point\b",
+    r"\bthat'?s not what i (meant|said|asked)\b", r"\byou'?re not (getting|hearing)\b",
+    r"\bworries me\b", r"\bthat concerns me\b", r"\bhmm\b.*\bbut\b",
+    r"^no,? (but|because|i|that|it)\b", r"\bi'?d push back\b",
+    r"\bfeels? (off|wrong|thin|shallow)\b", r"\bis that really\b",
+    r"\bwhy would we\b", r"\bsurely\b",
 ]
 
 

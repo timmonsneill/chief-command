@@ -38,6 +38,50 @@ def db():
     return c
 
 
+# ── The plain-English layer. He must never see a machine word. ───────────────
+#
+# Sol caught the UI leaking filenames and shell commands straight into the detail view.
+# This is the translation layer that stops it. The rule from AGENTS.md:
+#
+#     "If you cannot explain what you did without jargon, you do not yet understand
+#      what you did."
+
+_EVENT_ENGLISH = {
+    "dispatched": "Picked it up",
+    "read":       "Read through the existing code",
+    "thinking":   "Worked out how to do it",
+    "edit":       "Changed the code",
+    "write":      "Wrote new code",
+    "command":    "Ran something",
+    "test_run":   "Ran the tests",
+    "browse":     "Clicked through it like a user",
+    "verdict":    "Gave a verdict",
+    "done":       "Finished",
+    "error":      "Hit a problem",
+}
+
+
+def _in_plain_english(e: dict) -> dict:
+    """Translate one line of machine activity into something a person can read.
+
+    NOTE the deliberate asymmetry: we keep the OUTCOME of a test run ("6 passed") but
+    drop the COMMAND that produced it ("pytest -q"). The outcome is a fact about the
+    work. The command is a fact about the tooling, and Neill doesn't use the tooling.
+    """
+    kind = e.get("kind", "")
+    what = _EVENT_ENGLISH.get(kind, "Worked on it")
+    out = {"what": what, "kind": kind}
+
+    detail = (e.get("detail") or "").strip()
+    # Keep a detail ONLY if it reads like a RESULT, not a machine artifact — and not if
+    # it's just restating the line it's attached to.
+    looks_technical = any(c in detail for c in ("/", "\\", ".py", ".ts", ".sql", "()", "--"))
+    is_redundant = detail.lower().strip(".") == what.lower().strip(".")
+    if detail and not looks_technical and not is_redundant:
+        out["note"] = detail
+    return out
+
+
 # ── Plain-English status. He should never see a machine word. ────────────────
 STATUS_WORDS = {
     "todo":        ("Queued",      "waiting"),
@@ -83,7 +127,17 @@ def state():
         )]
         for v in j["verdicts"]:
             v["color"] = FAMILY_COLOR.get(v["model_family"], "#7E90A8")
-        j["events"] = [dict(e) for e in c.execute(
+        # ⚠️ Sol's review: "The web app explicitly leaks filenames, commands, model
+        # names, and jargon. The detailed work view displays raw event type, target,
+        # and detail. Those fields are DESIGNED to contain filenames, commands, web
+        # addresses, and machine output. The plain-English requirement is contradicted
+        # by the interface itself."
+        #
+        # He's right, and it broke the one promise that matters most. So the API now
+        # TRANSLATES events before they leave the server. The raw fields still exist in
+        # the database — they're what an engineer would need — but they never reach
+        # Neill's screen.
+        j["events"] = [_in_plain_english(dict(e)) for e in c.execute(
             "SELECT kind, target, detail, lane, model FROM events WHERE job_id=? ORDER BY id",
             (j["id"],)
         )]
@@ -132,6 +186,25 @@ def _why_blocked(c, j) -> str | None:
         if need and got < need:
             return f"Waiting on the others — {got} of {need} have looked at it."
     return None
+
+
+@app.get("/api/willthink")
+async def will_think(q: str = ""):
+    """Will this need thinking? Asked BEFORE we start, so the UI knows whether to show a
+    holding line at all.
+
+    Sol, round 2, #17: "The browser always says 'Let me think about that' before it knows
+    whether thinking is needed, including for 'stop', 'cancel', greetings, and status
+    checks. This makes instant commands feel delayed and falsely implies that
+    cancellation is being processed."
+
+    Dead right, and it's a nasty little bug — telling a man you're pondering his "stop"
+    is exactly the wrong impression to give.
+    """
+    from mouth import needs_the_brain, cover_the_gap
+    if needs_the_brain(q or ""):
+        return {"thinking": True, "holding": cover_the_gap()}
+    return {"thinking": False}
 
 
 @app.post("/api/say")

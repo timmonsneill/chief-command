@@ -359,12 +359,28 @@ CREATE INDEX IF NOT EXISTS idx_usage_seat_day ON usage(seat_id, day);
 -- instead of trusting whatever the writer put in the row.
 -- ===========================================================================
 
--- A job may never be BORN finished. (Sol #1 — the worst one.)
+-- A job may never be BORN finished. (Sol, round 1, #1 — the worst one.)
 CREATE TRIGGER IF NOT EXISTS guard_no_job_is_born_done
 BEFORE INSERT ON jobs
 WHEN NEW.status IN ('done', 'shipped')
 BEGIN
     SELECT RAISE(ABORT, 'guard: a job cannot be created already finished — it must earn it');
+END;
+
+-- A job may not LIE ABOUT WHO BUILT IT AT BIRTH. (Sol, round 2, #1 — critical.)
+--
+-- I froze the builder's identity AFTER creation, so it couldn't be rewritten. But I
+-- never checked it AT creation. Sol: "A direct database write can label local work as
+-- subscription work, then complete it without the required higher-quality review. The
+-- identity is frozen only after creation; the initial lie is never caught."
+--
+-- Freezing a lie just makes it a permanent lie.
+CREATE TRIGGER IF NOT EXISTS guard_builder_identity_must_be_real
+BEFORE INSERT ON jobs
+WHEN NEW.builder_tier   <> (SELECT tier   FROM seats WHERE id = NEW.builder_seat)
+  OR NEW.builder_family <> (SELECT family FROM seats WHERE id = NEW.builder_seat)
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a job cannot misrepresent who built it');
 END;
 
 -- The builder's tier/family are snapshotted at creation and are then HISTORY.
@@ -499,9 +515,54 @@ WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
 BEGIN
     SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
     WHERE (
+        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+        -- the panel could be "filled" by the wrong kinds of check entirely.
         SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
-        WHERE v.job_id = NEW.id AND v.verdict = 'pass'
+        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
     ) < NEW.required_reviews;
+END;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GUARD 10 — A FAILING REVIEW STOPS THE JOB. (Sol, round 2, #5 — and this one is bad.)
+--
+-- My panel guard counted PASSES and never looked at FAILS. So three passes and one
+-- serious failure satisfied it. A reviewer could scream that the thing was broken and
+-- be outvoted by colleagues who hadn't noticed.
+--
+-- That is the opposite of what a gauntlet is FOR. One reviewer finding a real bug is
+-- the whole point — it isn't a democracy, it's a set of independent smoke detectors.
+-- Any one of them going off stops the job.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE TRIGGER IF NOT EXISTS guard_a_failing_review_stops_it
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a reviewer failed this — it does not get outvoted')
+    WHERE EXISTS (
+        SELECT 1 FROM verdicts v WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+    );
+END;
+
+-- Sol, round 2, #6: an objection raised AFTER 'done' could still be outrun, because
+-- the escalation guard only fired on the transition INTO done — not on done -> shipped.
+CREATE TRIGGER IF NOT EXISTS guard_late_escalation_still_blocks_shipping
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status = 'shipped' AND OLD.status <> 'shipped'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: someone raised an objection — it has to be answered first')
+    WHERE EXISTS (
+        SELECT 1 FROM verdicts v
+        WHERE v.job_id = NEW.id AND v.verdict IN ('needs_human', 'fail')
+    );
+END;
+
+-- Sol, round 2, #4: evidence could be an EMPTY STRING. A path of '' satisfied
+-- "COALESCE(path, value) IS NOT NULL" perfectly well.
+CREATE TRIGGER IF NOT EXISTS guard_evidence_cannot_be_empty
+BEFORE INSERT ON artifacts
+WHEN TRIM(COALESCE(NEW.path, NEW.value, '')) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'guard: evidence with nothing in it is not evidence');
 END;
 
 -- ===========================================================================

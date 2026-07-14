@@ -106,12 +106,17 @@ def test_a_tester_cannot_pass_on_a_url_somebody_pasted(conn):
         record_verdict(conn, job, "sol", verdict="pass", role="tester")
 
 
-def test_a_tester_cannot_pass_on_an_empty_artifact_row(conn):
+def test_evidence_with_nothing_in_it_is_not_evidence(conn):
+    """Sol, round 2: 'A direct writer can insert a made-up screenshot path — even an
+    empty string.' An empty path satisfied "IS NOT NULL" perfectly well. Now the
+    artifact itself is refused, so the tester never even gets a foothold."""
     job = create_job(conn, "the login form", builder_seat="riggs")
-    conn.execute("INSERT INTO artifacts (job_id, kind, captured_by) VALUES (?, 'screenshot', 'harness')",
-                 (job,))  # no path, no value — an empty claim
-    with pytest.raises(BLOCKED, match="no screenshot, no verdict"):
-        record_verdict(conn, job, "sol", verdict="pass", role="tester")
+    for bad in ("", "   ", None):
+        with pytest.raises(BLOCKED, match="nothing in it is not evidence"):
+            conn.execute(
+                "INSERT INTO artifacts (job_id, kind, path, captured_by) "
+                "VALUES (?, 'screenshot', ?, 'harness')", (job, bad)
+            )
 
 
 def test_a_tester_passes_on_real_captured_evidence(conn):

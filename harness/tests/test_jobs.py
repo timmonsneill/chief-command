@@ -269,16 +269,34 @@ def test_nothing_ships_straight_out_of_review(conn):
         set_status(conn, job, "shipped")
 
 
-def test_a_failing_tester_stops_the_ship(conn):
+def test_a_failing_tester_stops_the_job_dead(conn):
+    """A failing review isn't a vote — it's a smoke detector going off.
+
+    Sol's round-2 review caught that my panel counted PASSES and ignored FAILS, so
+    three passes could outvote one reviewer screaming that the thing was broken. That's
+    the opposite of what a gauntlet is for. Now a single fail stops it, and it stops it
+    at 'done' — it never even reaches the ship gate.
+    """
     upsert_seat(conn, Seat("gpt_tester", "codex", "gpt-5.6-sol", "gpt", "subscription"))
     job = create_job(conn, "add the login form", builder_seat="reviewer")
     record_artifact(conn, job, kind="screenshot", path="/tmp/broken.png")
     record_verdict(conn, job, "gpt_tester", verdict="fail", role="tester",
                    severity="p1", summary="500 on submit")
-    set_status(conn, job, "done")
 
-    with pytest.raises(GuardViolation):
-        set_status(conn, job, "shipped")
+    with pytest.raises(GuardViolation, match="does not get outvoted"):
+        set_status(conn, job, "done")
+
+
+def test_a_failing_review_cannot_be_outvoted_by_passes(conn):
+    upsert_seat(conn, Seat("gpt2", "codex", "gpt-5.6-sol", "gpt", "subscription"))
+    job = create_job(conn, "the migration", builder_seat="workhorse")
+    record_verdict(conn, job, "orchestrator", verdict="pass")
+    record_verdict(conn, job, "gpt2", verdict="pass")
+    record_verdict(conn, job, "reviewer", verdict="fail", severity="p1",
+                   summary="this drops rows")
+
+    with pytest.raises(GuardViolation, match="does not get outvoted"):
+        set_status(conn, job, "done")
 
 
 # ---------------------------------------------------------------------------

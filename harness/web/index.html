@@ -160,9 +160,14 @@ $('#ask').onsubmit = async e => {
   $('#in').value = ''; $('#send').disabled = true;
   bubble('you', 'You', text);
 
-  // Optimistic holding line — this is the whole trick. It lands instantly while the
-  // real thinking happens, so you never sit in silence wondering if it died.
-  const hold = bubble('holding', 'Chief', 'Let me think about that.');
+  // Ask FIRST whether this needs thinking, so we only show a holding line when we're
+  // actually going to make him wait. Saying "let me think about that" in response to
+  // "stop" is a lie, and a slightly insulting one.
+  let hold = null;
+  try {
+    const pre = await fetch('/api/willthink?q=' + encodeURIComponent(text)).then(r => r.json());
+    if (pre.thinking) hold = bubble('holding', 'Chief', pre.holding);
+  } catch (e) { /* if the check fails, just don't pretend */ }
 
   try {
     const r = await fetch('/api/say', {
@@ -170,13 +175,13 @@ $('#ask').onsubmit = async e => {
       body: JSON.stringify({text, last_question: LAST_Q, last_answer: LAST_A})
     }).then(r => r.json());
 
-    hold.remove();
+    if (hold) hold.remove();
     const tag = r.tier === 'deep' ? `dug in · ${r.seconds}s`
               : r.tier === 'think' ? `thought · ${r.seconds}s` : '';
     bubble('chief', 'Chief', r.reply, tag);
     LAST_Q = text; LAST_A = r.reply;
   } catch (err) {
-    hold.remove();
+    if (hold) hold.remove();
     bubble('chief', 'Chief', "Couldn't reach the machine. Is it still running?");
   }
   $('#send').disabled = false; $('#in').focus();
@@ -197,7 +202,7 @@ async function refresh() {
       </div>
       ${j.blocked_because ? `<div class="blocked">${esc(j.blocked_because)}</div>` : ''}
       <div class="detail">
-        ${j.events.map(e => `<div class="ev"><b>${e.kind}</b> ${esc(e.target||'')} ${esc(e.detail||'')}</div>`).join('') || '<div class="ev">nothing logged yet</div>'}
+        ${j.events.map(e => `<div class="ev"><b>${esc(e.what)}</b>${e.note ? ' — ' + esc(e.note) : ''}</div>`).join('') || '<div class="ev">nothing yet</div>'}
         ${j.verdicts.length ? `<div class="vs">${j.verdicts.map(v => `
           <span class="v" style="border-color:${v.color};color:${v.color}">
             ${v.verdict==='pass'?'✓':v.verdict==='fail'?'✗':'?'} ${v.reviewer_seat} · ${v.role}
