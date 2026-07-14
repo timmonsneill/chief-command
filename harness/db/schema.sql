@@ -243,6 +243,130 @@ CREATE TABLE IF NOT EXISTS verdicts (
 
 CREATE INDEX IF NOT EXISTS idx_verdicts_job ON verdicts(job_id);
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- CAPABILITIES — what an agent is PHYSICALLY ALLOWED to do.
+--
+-- This exists because Sol reviewed the architecture and demolished the previous
+-- safety story. The plan had been: the voice can act fast, and Chief watches and
+-- kills anything dumb. Sol's verdict:
+--
+--     "'Builders take minutes' measures how long they take to FINISH. What matters
+--      is how long they take to do their FIRST DAMAGING THING. That can be seconds.
+--      Chief and the builder would be RACING. There is no guarantee Chief wins."
+--
+--     "A fast supervisor is still only a fast witness if the builder can act first."
+--
+--     "A smarter model is not a security boundary."
+--
+-- He's right, and it's the difference between a bank with a vault and a bank with an
+-- attentive guard. You do not stop a robbery by watching carefully.
+--
+-- SO: agents get NO dangerous powers. Not "Chief will stop them" — THEY CANNOT.
+-- Reading code, writing code in their own worktree, running tests: always fine, and
+-- that's 95% of the work. Everything that touches the real world is denied by
+-- default and needs a signed, single-use permission slip for that exact act.
+-- ═══════════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS capabilities (
+    seat_id       TEXT NOT NULL REFERENCES seats(id) ON DELETE CASCADE,
+    capability    TEXT NOT NULL CHECK (capability IN (
+                      -- SAFE. Granted to every builder. This is the actual job.
+                      'read_code', 'write_worktree', 'run_tests', 'open_pr',
+                      -- DANGEROUS. Denied to everyone by default. Each needs a
+                      -- fresh, single-use approval naming the exact action.
+                      'touch_production', 'delete_data', 'run_migration',
+                      'deploy', 'merge_to_main', 'force_push',
+                      'read_secrets', 'send_external', 'spend_money'
+                  )),
+    PRIMARY KEY (seat_id, capability)
+);
+
+-- The safe set. Everything an agent needs to actually build software, and nothing
+-- that can hurt you. Note what ISN'T here — that's the whole point.
+CREATE VIEW IF NOT EXISTS safe_capabilities AS
+SELECT 'read_code' AS capability UNION ALL SELECT 'write_worktree'
+UNION ALL SELECT 'run_tests' UNION ALL SELECT 'open_pr';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- APPROVALS — a signed, single-use permission slip for ONE exact dangerous act.
+--
+-- Sol on why a "yes" cannot be trusted on its own:
+--
+--     Chief: "First make a backup, then remove the old accounts."
+--     Neill: "Yes — skip the first one."
+--
+--     "That LOOKS like a confirmation, but it changes the safe plan into a dangerous
+--      one. Sending it directly recreates the original classification problem."
+--
+-- So an approval is not a word. It is a ROW: a numbered, one-time permission for a
+-- specific action, with the consequence written out in plain English and READ BACK to
+-- Neill before he can agree. It expires the moment the plan changes.
+--
+--     "A bare 'yes' should never approve something that was not just read back
+--      exactly." — which also handles the fact that a car is a terrible place to be
+--      understood correctly.
+-- ═══════════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS approvals (
+    id            INTEGER PRIMARY KEY,
+    job_id        INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+    capability    TEXT NOT NULL,            -- the ONE dangerous thing this permits
+    -- Exactly what will happen. Not a category — the actual act.
+    action        TEXT NOT NULL,            -- "delete 4,200 accounts inactive since 2024-01-01"
+    -- What Chief SAID OUT LOUD to Neill before he agreed. If this is empty, nothing
+    -- was read back, and a 'yes' means nothing.
+    read_back     TEXT NOT NULL,
+    -- Is this undoable, and how? Sol: "Anything irreversible needs a tested recovery
+    -- method BEFORE it starts."
+    reversible    INTEGER NOT NULL DEFAULT 0 CHECK (reversible IN (0,1)),
+    recovery      TEXT,                     -- "restore from the snapshot taken at 09:14"
+
+    granted_by    TEXT NOT NULL DEFAULT 'owner' CHECK (granted_by = 'owner'),
+    granted_at    TEXT,
+    expires_at    TEXT NOT NULL,            -- short. Minutes, not hours.
+    used_at       TEXT,                     -- single use. Once spent, it's spent.
+    revoked_at    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_job ON approvals(job_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- GUARD 12 — a dangerous act needs a live, unused, read-back approval.
+-- No approval, no action. Not "Chief said it was fine" — a signed slip, or nothing.
+-- ═══════════════════════════════════════════════════════════════════════════════
+CREATE VIEW IF NOT EXISTS live_approvals AS
+SELECT * FROM approvals
+ WHERE granted_at IS NOT NULL
+   AND used_at    IS NULL
+   AND revoked_at IS NULL
+   AND expires_at > datetime('now')
+   AND TRIM(read_back) <> '';
+
+-- An approval cannot be granted without something having been read back.
+CREATE TRIGGER IF NOT EXISTS guard_no_approval_without_readback
+BEFORE UPDATE OF granted_at ON approvals
+WHEN NEW.granted_at IS NOT NULL AND TRIM(COALESCE(NEW.read_back, '')) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'guard: nothing was read back to him — a yes to nothing is not a yes');
+END;
+
+-- An irreversible act cannot be approved without a recovery plan.
+-- Sol: "'Kill' must never be presented as 'undo.'"
+CREATE TRIGGER IF NOT EXISTS guard_irreversible_needs_a_way_back
+BEFORE UPDATE OF granted_at ON approvals
+WHEN NEW.granted_at IS NOT NULL AND NEW.reversible = 0
+     AND TRIM(COALESCE(NEW.recovery, '')) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'guard: this cannot be undone and has no way back — not without a recovery plan');
+END;
+
+-- Single use. A permission slip is spent when it is used.
+CREATE TRIGGER IF NOT EXISTS guard_an_approval_is_used_once
+BEFORE UPDATE OF used_at ON approvals
+WHEN OLD.used_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'guard: that permission was already spent');
+END;
+
 -- ---------------------------------------------------------------------------
 -- Events: the live activity stream. What an agent is doing RIGHT NOW.
 --
@@ -341,6 +465,56 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_seat_day ON usage(seat_id, day);
+CREATE INDEX IF NOT EXISTS idx_usage_month ON usage(day);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- THE MONEY. Owner (2026-07-14): "$100/mo limit, notify me at $50."
+--
+-- TWO LAYERS, deliberately:
+--
+--   1. OpenAI's OWN monthly budget cap ($100), set in their dashboard. That is the
+--      REAL ceiling — it physically stops them serving requests, and no bug in this
+--      codebase can defeat it. It is also a terrible way to find out, because it
+--      cuts you off mid-sentence.
+--
+--   2. THIS. A softer, earlier layer that warns at $50 and refuses to spend past a
+--      budget we set ourselves — so we stop gracefully, say why, and never hit
+--      their wall at all.
+--
+-- Belt and braces. The dashboard cap is the thing that saves you if I'm wrong.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS budget (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),   -- exactly one row
+    monthly_cap_cents  INTEGER NOT NULL DEFAULT 10000,    -- $100
+    warn_at_cents      INTEGER NOT NULL DEFAULT 5000,     -- $50
+    warned_this_month  TEXT,                              -- 'YYYY-MM' so we warn once
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO budget (id, monthly_cap_cents, warn_at_cents) VALUES (1, 10000, 5000);
+
+-- The month's spend, all seats. This is the number that matters.
+CREATE VIEW IF NOT EXISTS month_spend AS
+SELECT
+    COALESCE(SUM(cost_cents), 0)                                   AS spent_cents,
+    (SELECT monthly_cap_cents FROM budget WHERE id = 1)            AS cap_cents,
+    (SELECT warn_at_cents     FROM budget WHERE id = 1)            AS warn_cents
+FROM usage
+WHERE strftime('%Y-%m', day) = strftime('%Y-%m', 'now');
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GUARD 11 — the month's budget is hard. It refuses the entry that would breach it.
+--
+-- Same principle as every other guard here: this is not a policy an agent is asked
+-- to respect, it is a write that fails.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE TRIGGER IF NOT EXISTS guard_monthly_budget_is_hard
+BEFORE INSERT ON usage
+BEGIN
+    SELECT RAISE(ABORT, 'guard: this would blow the monthly budget')
+    WHERE (SELECT spent_cents FROM month_spend) + NEW.cost_cents
+        > (SELECT monthly_cap_cents FROM budget WHERE id = 1);
+END;
 
 -- ===========================================================================
 -- THE GUARDS

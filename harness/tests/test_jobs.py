@@ -411,8 +411,14 @@ def test_claims_are_fifo(conn):
 # ---------------------------------------------------------------------------
 # Budget caps — OpenClaw core has none, so these must hold here
 # ---------------------------------------------------------------------------
-def test_uncapped_seat_never_blocks(conn):
-    record_usage(conn, "orchestrator", cost_cents=100_000)
+def test_a_seat_with_no_daily_cap_never_blocks_on_its_own_cap(conn):
+    """A seat with no daily cap has no daily cap. But the MONTHLY budget still binds —
+    it binds on everything, which is the point of a ceiling.
+
+    (The old version of this spent $1,000 to prove the seat was uncapped, and the new
+    monthly-budget guard rightly refused. That test was asserting we had no brakes.)
+    """
+    record_usage(conn, "orchestrator", cost_cents=900)   # $9, well under the $100 month
     assert over_budget(conn, "orchestrator") is False
 
 

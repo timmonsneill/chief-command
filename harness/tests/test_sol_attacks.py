@@ -280,12 +280,25 @@ def test_grok_runs_out_of_building_budget_but_can_still_review(conn):
     ).fetchone()[0] == 60
 
 
-def test_the_seats_we_already_pay_for_build_freely(conn):
-    """Claude and Sol are flat-rate. Uncapped by design — a build there is free."""
+def test_the_seats_we_already_pay_for_cost_nothing_marginal(conn):
+    """Claude and Sol are FLAT-RATE. A build on those seats costs zero MARGINAL money —
+    you already paid for it this month.
+
+    The old version of this test recorded real dollars against them, which was simply
+    wrong, and the new monthly-budget guard caught it: it tried to bill $500 to seats
+    that cost nothing extra to use, and blew through the $100 cap doing it.
+
+    What flat-rate seats actually consume is RATE LIMIT, not money — and you cannot buy
+    your way out of a weekly cap. That's tracked as tokens, not cents.
+    """
     for _ in range(50):
-        record_usage(conn, "riggs", cost_cents=500, role="build")
-        record_usage(conn, "sol", cost_cents=500, role="build")
-    assert conn.execute("SELECT SUM(cost_cents) FROM usage").fetchone()[0] == 50_000
+        record_usage(conn, "riggs", cost_cents=0, output_tokens=5000, role="build")
+        record_usage(conn, "sol", cost_cents=0, output_tokens=5000, role="build")
+
+    money = conn.execute("SELECT SUM(cost_cents) FROM usage").fetchone()[0]
+    tokens = conn.execute("SELECT SUM(output_tokens) FROM usage").fetchone()[0]
+    assert money == 0, "flat-rate seats must not bill money"
+    assert tokens == 500_000, "but they DO burn rate limit, and that's what we watch"
 
 
 def test_the_hard_ceiling_still_wins_over_the_role_budgets(conn):

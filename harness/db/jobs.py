@@ -370,3 +370,54 @@ def can_build(conn: sqlite3.Connection, seat_id: str) -> bool:
         "WHERE seat_id=? AND day=date('now') AND role='build'", (seat_id,)
     ).fetchone()["c"]
     return int(spent) < int(row["build_cap_cents"])
+
+
+# ---------------------------------------------------------------------------
+# The money
+# ---------------------------------------------------------------------------
+def month_spend(conn: sqlite3.Connection) -> dict[str, int]:
+    """What have we spent this month, and how close are we?"""
+    r = conn.execute("SELECT * FROM month_spend").fetchone()
+    spent, cap, warn = int(r["spent_cents"]), int(r["cap_cents"]), int(r["warn_cents"])
+    return {
+        "spent_cents": spent,
+        "cap_cents": cap,
+        "warn_cents": warn,
+        "remaining_cents": max(0, cap - spent),
+        "pct": round(100 * spent / cap, 1) if cap else 0.0,
+        "over_warn": spent >= warn,
+    }
+
+
+def set_budget(conn: sqlite3.Connection, monthly_cap_cents: int, warn_at_cents: int) -> None:
+    conn.execute(
+        "UPDATE budget SET monthly_cap_cents=?, warn_at_cents=?, updated_at=datetime('now') "
+        "WHERE id=1", (monthly_cap_cents, warn_at_cents)
+    )
+
+
+def budget_warning(conn: sqlite3.Connection) -> str | None:
+    """Should we tell Neill about the money right now?
+
+    Warns ONCE per month at the threshold, then goes quiet — a warning you see every
+    day is a warning you stop reading. Speaks up again only when the cap is actually
+    hit, because at that point work is stopping and he needs to know why.
+    """
+    m = month_spend(conn)
+    if m["spent_cents"] >= m["cap_cents"]:
+        return (f"You've hit the ${m['cap_cents']/100:.0f} monthly limit. "
+                f"I've stopped spending until you raise it or the month rolls over.")
+
+    if not m["over_warn"]:
+        return None
+
+    from datetime import datetime
+    this_month = datetime.now().strftime("%Y-%m")
+    row = conn.execute("SELECT warned_this_month FROM budget WHERE id=1").fetchone()
+    if row["warned_this_month"] == this_month:
+        return None   # already told him. Don't nag.
+
+    conn.execute("UPDATE budget SET warned_this_month=? WHERE id=1", (this_month,))
+    return (f"Heads up — you're at ${m['spent_cents']/100:.2f} of your "
+            f"${m['cap_cents']/100:.0f} monthly budget. About "
+            f"${m['remaining_cents']/100:.2f} left.")
