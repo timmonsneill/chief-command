@@ -311,3 +311,52 @@ def test_the_hard_ceiling_still_wins_over_the_role_budgets(conn):
     # The review budget still has room (70 of 90) — but the DAY does not.
     with pytest.raises(BLOCKED, match="over its daily cap"):
         record_usage(conn, "grok", cost_cents=10, role="review")
+
+
+# ── Sol round 3 (2026-07-14) — two holes of the same old shape ────────────
+# Verified with live exploits before fixing. Both were the exact bugs Sol had
+# already found ELSEWHERE — "append-only" and "born done" — that had simply never
+# been applied to the verdicts and approvals tables.
+def test_a_failing_verdict_cannot_be_deleted_to_unblock_a_job(conn):
+    """"Append-only" was enforced against UPDATE only. A failing review that couldn't be
+    EDITED into a pass could just be DELETED — after which the failing-review guard, which
+    asks 'does a fail exist?', saw nothing and let the job complete. Proven, then locked."""
+    job = create_job(conn, "the billing change", builder_seat="riggs")
+    vid = record_verdict(conn, job, "sol", verdict="fail", summary="it's broken")
+
+    with pytest.raises(BLOCKED, match="cannot be deleted"):
+        conn.execute("DELETE FROM verdicts WHERE id=?", (vid,))
+
+    # And the fail still does its job: the objection blocks completion.
+    with pytest.raises(BLOCKED, match="does not get outvoted"):
+        set_status(conn, job, "done")
+
+
+def test_an_approval_cannot_be_born_granted(conn):
+    """Every approval guard fired on UPDATE OF granted_at — the same 'born done' hole Sol
+    found on jobs in round 1, never applied here. So a row inserted with granted_at already
+    set, reversible=0 and no recovery plan sailed straight into live_approvals. Now an
+    approval must be born ungranted and be granted through a read-back, where the recovery
+    and read-back guards actually fire."""
+    job = create_job(conn, "delete the old accounts", builder_seat="riggs")
+    with pytest.raises(BLOCKED, match="cannot be created already granted"):
+        conn.execute(
+            "INSERT INTO approvals "
+            "(job_id, capability, action, read_back, reversible, recovery, granted_at, expires_at) "
+            "VALUES (?, 'delete_data', 'delete 4200 accounts', 'I will delete 4200 accounts', "
+            "0, '', datetime('now'), datetime('now','+10 minutes'))", (job,)
+        )
+
+
+def test_an_approval_granted_the_right_way_still_needs_a_recovery_plan(conn):
+    """Don't over-lock: the legitimate path still works, and still enforces recovery.
+    Born ungranted, then an UPDATE to grant an irreversible act with no way back is
+    refused by the existing guard."""
+    job = create_job(conn, "delete the old accounts", builder_seat="riggs")
+    conn.execute(
+        "INSERT INTO approvals (job_id, capability, action, read_back, reversible, expires_at) "
+        "VALUES (?, 'delete_data', 'delete 4200 accounts', 'I will delete 4200 accounts', 0, "
+        "datetime('now','+10 minutes'))", (job,)
+    )
+    with pytest.raises(BLOCKED, match="no way back"):
+        conn.execute("UPDATE approvals SET granted_at=datetime('now') WHERE job_id=?", (job,))

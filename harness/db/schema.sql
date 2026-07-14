@@ -341,6 +341,20 @@ SELECT * FROM approvals
    AND expires_at > datetime('now')
    AND TRIM(read_back) <> '';
 
+-- An approval may never be BORN granted. (Sol, round 3 — verified 2026-07-14.)
+--
+-- Every approval guard fired on UPDATE OF granted_at only — the exact "born done" hole
+-- Sol found on the jobs table in round 1, never applied here. Confirmed with a live
+-- exploit: an INSERT with granted_at already set, reversible=0 and no recovery plan sailed
+-- straight into the live_approvals view. An approval must be born ungranted and become
+-- granted through an UPDATE, where the read-back and recovery guards below actually fire.
+CREATE TRIGGER IF NOT EXISTS guard_no_approval_is_born_granted
+BEFORE INSERT ON approvals
+WHEN NEW.granted_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'guard: an approval cannot be created already granted — it must be granted through a read-back');
+END;
+
 -- An approval cannot be granted without something having been read back.
 CREATE TRIGGER IF NOT EXISTS guard_no_approval_without_readback
 BEFORE UPDATE OF granted_at ON approvals
@@ -592,6 +606,18 @@ WHEN OLD.role <> NEW.role OR OLD.model_family <> NEW.model_family
   OR OLD.reviewer_seat <> NEW.reviewer_seat OR OLD.reviewer_tier <> NEW.reviewer_tier
 BEGIN
     SELECT RAISE(ABORT, 'guard: who reviewed this cannot be rewritten after the fact');
+END;
+
+-- A verdict cannot be DELETED. (Sol, round 3 — verified 2026-07-14.)
+--
+-- "Append-only" was enforced only against UPDATE, so a failing review that couldn't be
+-- EDITED into a pass could simply be DELETED — after which guard_a_failing_review_stops_it
+-- (which asks "does a fail EXIST?") saw nothing and let the job complete. Confirmed with a
+-- live exploit: fail deleted, then done. A verdict is a fact; facts are not retractable.
+CREATE TRIGGER IF NOT EXISTS guard_verdicts_cannot_be_deleted
+BEFORE DELETE ON verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a verdict is a fact on the record — it cannot be deleted');
 END;
 
 -- A reviewer cannot LIE about who it is. (Sol #4 — the DB took the row's word for it.)
