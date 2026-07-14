@@ -108,26 +108,48 @@ worktree_isolated = true
 notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK below."
 
 // ---------------------------------------------------------------------------
-// PAID GRINDER — cheap parallel attempts, always reviewed.
+// GROK — builder + cross-family reviewer.
 //
-// ⚠️ ALSO CHANGED. Grok Build has a BEST-IN-CLASS HARNESS wrapped around a MEDIOCRE
-// MODEL: 8 parallel subagents in isolated git worktrees, plan-first, native MCP,
-// 256K context — but 70.8% SWE-bench. So use it for what it's actually good at:
-// throw 8 attempts at a migration in parallel and let the gauntlet pick the winner.
+// ⚠️ TWO EARLIER CLAIMS OF MINE WERE WRONG. Correcting both, on the record:
 //
-// That is a grinder contract, not a workhorse contract. Its output can never ship
-// unreviewed anyway — and the DB enforces that, not a prompt.
+//   1. "Grok Build is weak (70.8% SWE-bench)." FALSE. That was grok-build-0.1, a
+//      legacy option nobody runs. Grok Build now DEFAULTS to grok-4.5. On a single
+//      consistent agentic-coding index: Grok 4.5 = 76, Codex = 76, Claude Code = 78.
+//      It is not the weak sibling. It matches Codex at ~half the cost/task ($2.49).
 //
-// 🚩 UNVERIFIED: $30 SuperGrok may 403 (backend appears gated to Heavy, $300/mo).
-//    Also: pricing is reported inconsistently ($1/$2 vs $0.20/$1.50 per 1M). Check live.
+//   2. "The 403 is a Heavy-only tier gate." FALSE. It's an UNDISCLOSED MONTHLY QUOTA
+//      on standard SuperGrok. The 403 body lies — it says "you do not have an active
+//      Grok subscription" when you do and have merely run out. Users have been locked
+//      out after ~3 days of LIGHT cron use. Nobody publishes the quota.
+//
+// I also invented a workload ("throw 8 parallel attempts, let the gauntlet pick") to
+// compensate for a weakness that was my own measurement error. Dropped. Grok is just
+// a good, cheap builder. No exotic volume pattern needed.
+//
+// THE ANSWER TO THE HIDDEN QUOTA: don't choose between sub and API — run BOTH.
+// Subscription primary, metered API key as fallback on the same seat. When the
+// mystery quota dies at 2am mid-build, the seat fails over to the key and KEEPS
+// GOING instead of stalling the run. Subscription economics, metered reliability.
+//
+// HARD CEILING: $30 sub + $30/mo API cap = $60/mo maximum, no surprises.
+// (daily_cap_cents 100 x ~30 days = ~$30/mo of fallback.)
 // ---------------------------------------------------------------------------
-[seats.grinder_paid]
+[seats.grok]
 provider = "xai"
-model = "grok-build-0.1"
-tier = "subscription"
+model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
+tier = "subscription"                       // $30 SuperGrok, primary
+family = "grok"
 worktree_isolated = true
-parallel_subagents = 8
-notes = "Great harness, weak model. Volume attempts, gauntlet picks. TEST THE TIER."
+daily_cap_cents = 100                       // the FALLBACK's cap: ~$30/mo ceiling
+notes = "Sub primary, API fallback. Hard ceiling $60/mo total. Quota is undisclosed — expect the 403."
+
+  // Failover target. Same model, metered. This is what makes the hidden quota a
+  // speed bump instead of a dead stop.
+  [seats.grok.fallback]
+  provider = "xai-api"
+  auth = "XAI_API_KEY"
+  tier = "metered"
+  notes = "Engages when the sub 403s. Capped by daily_cap_cents above."
 
 // ---------------------------------------------------------------------------
 // FREE GRINDER — the local junior. Overnight scaffolding, boilerplate, first drafts.

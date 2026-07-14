@@ -29,6 +29,7 @@ class Seat:
     id: str
     provider: str
     model: str
+    family: str  # gpt | claude | grok | qwen — what determines shared blind spots
     tier: str  # local | subscription | metered
     daily_cap_cents: Optional[int] = None
     enabled: bool = True
@@ -66,17 +67,18 @@ def _guarded(fn):
 def upsert_seat(conn: sqlite3.Connection, seat: Seat) -> None:
     conn.execute(
         """
-        INSERT INTO seats (id, provider, model, tier, daily_cap_cents, enabled, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO seats (id, provider, model, family, tier, daily_cap_cents, enabled, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             provider = excluded.provider,
             model = excluded.model,
+            family = excluded.family,
             tier = excluded.tier,
             daily_cap_cents = excluded.daily_cap_cents,
             enabled = excluded.enabled,
             notes = excluded.notes
         """,
-        (seat.id, seat.provider, seat.model, seat.tier,
+        (seat.id, seat.provider, seat.model, seat.family, seat.tier,
          seat.daily_cap_cents, int(seat.enabled), seat.notes),
     )
 
@@ -178,32 +180,68 @@ def set_status(
     )
 
 
+def record_artifact(
+    conn: sqlite3.Connection,
+    job_id: int,
+    kind: str,
+    path: str | None = None,
+    value: str | None = None,
+    flow: str | None = None,
+    captured_by: str = "playwright",
+) -> int:
+    """Record GROUND TRUTH the harness captured.
+
+    Only the harness or Playwright may write here — never a model. This is what
+    makes "I ran it and it worked" unsayable: the tester interprets artifacts it
+    did not produce and cannot forge.
+    """
+    if captured_by not in ("harness", "playwright"):
+        raise ValueError("artifacts are captured by the harness, never claimed by a model")
+    cur = conn.execute(
+        """
+        INSERT INTO artifacts (job_id, kind, path, value, flow, captured_by)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (job_id, kind, path, value, flow, captured_by),
+    )
+    return int(cur.lastrowid)
+
+
+@_guarded
 def record_verdict(
     conn: sqlite3.Connection,
     job_id: int,
     reviewer_seat: str,
     verdict: str,
-    model_family: str,
     severity: str | None = None,
     summary: str | None = None,
     detail: str | None = None,
+    role: str = "reviewer",
 ) -> int:
-    """Record one reviewer's verdict.
+    """Record one seat's verdict.
 
-    reviewer_tier is snapshotted from the seat at write time, so re-tiering a seat
-    later cannot retroactively legitimize a job that was never properly reviewed.
+    role='reviewer' reads the diff and judges it.
+    role='tester'   drove the app (Playwright) and judges what it observed. Two guards
+                    apply: it must cite captured artifacts, and its family must differ
+                    from the builder's — Playwright stops a tester fabricating what
+                    happened; only a different mind stops it rationalizing it.
+
+    tier and family are snapshotted from the seat at write time, so re-tiering or
+    re-pointing a seat later cannot retroactively legitimize a job.
     """
     row = seat(conn, reviewer_seat)
     if row is None:
-        raise ValueError(f"unknown reviewer seat: {reviewer_seat}")
+        raise ValueError(f"unknown seat: {reviewer_seat}")
 
     cur = conn.execute(
         """
         INSERT INTO verdicts
-            (job_id, reviewer_seat, reviewer_tier, model_family, verdict, severity, summary, detail)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (job_id, reviewer_seat, reviewer_tier, role, model_family,
+             verdict, severity, summary, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (job_id, reviewer_seat, row["tier"], model_family, verdict, severity, summary, detail),
+        (job_id, reviewer_seat, row["tier"], role, row["family"],
+         verdict, severity, summary, detail),
     )
     return int(cur.lastrowid)
 
