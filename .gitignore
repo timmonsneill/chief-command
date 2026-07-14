@@ -56,3 +56,10 @@ logs/
 # Local tool state
 .playwright-mcp/
 openclaw-workspace-state.json
+
+# OpenClaw agent workspace scaffolding (runtime state, dropped in repo root)
+/SOUL.md
+/IDENTITY.md
+/USER.md
+/HEARTBEAT.md
+/TOOLS.md
