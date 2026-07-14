@@ -48,3 +48,11 @@ backend/data/voice_history.db
 # Local Netlify folder
 .netlify
 logs/
+
+# SQLite sidecar files (the DB's temporary journal — never meaningful to commit)
+*.db-shm
+*.db-wal
+
+# Local tool state
+.playwright-mcp/
+openclaw-workspace-state.json
