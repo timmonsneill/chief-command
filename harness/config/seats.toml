@@ -47,12 +47,18 @@
 provider = "xai-realtime"
 model = "grok-voice-think-fast-1.0"
 base_url = "wss://api.x.ai/v1/realtime"     // swap to OpenAI's and it still works
+family = "grok"
 tier = "metered"
 turn_detection = "semantic_vad"             // NOT push-to-talk. Owner override.
 eagerness = "low"                           // a driver pauses mid-sentence to merge
 interrupt_response = true                   // barge-in
+
+// VOICE HAS ITS OWN BUDGET, separate from Grok-the-builder. Owner: "we need to do
+// more than $30 cap. that was for when we go over with grok stuff."
+// $3/hr, so 300c/day = ~1 hour of talking a day = ~$90/mo worst case.
+// Start here and tune once we see real usage — the meter only runs while you talk.
 daily_cap_cents = 300
-notes = "Fast + dumb BY DESIGN. Never blocks. Fallback: gpt-realtime-2.1-mini."
+notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok]."
 
 // ---------------------------------------------------------------------------
 // BRAIN — deep reasoning, planning, decomposition, judging the gauntlet.
@@ -134,14 +140,31 @@ notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK b
 // HARD CEILING: $30 sub + $30/mo API cap = $60/mo maximum, no surprises.
 // (daily_cap_cents 100 x ~30 days = ~$30/mo of fallback.)
 // ---------------------------------------------------------------------------
+// GROK BUILDS LESS THAN THE OTHERS — deliberately. Owner (2026-07-13):
+//     "it can review as much as it wants more or less, but shouldn't build as much
+//      as claude and chat"
+//
+// He's right, and the economics agree. Claude and OpenAI are FLAT-RATE — a build on
+// those seats costs nothing marginal, it's already bought. Grok is METERED, so every
+// build is real money leaving the account. And builds are the EXPENSIVE kind of work
+// (token-heavy) while reviews are CHEAP (read-heavy, ~1/10 the tokens).
+//
+//     BUILD on the seats you already pay for.
+//     REVIEW on the metered one, because reviewing is cheap.
+//
+// Which lands Grok exactly where it's most valuable anyway. Its worth was never being
+// the strongest coder — it isn't. It's being a DIFFERENT MIND that catches what Claude
+// and GPT both miss. And that job costs pennies.
 [seats.grok]
 provider = "xai"
 model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
 tier = "subscription"                       // $30 SuperGrok, primary
 family = "grok"
 worktree_isolated = true
-daily_cap_cents = 100                       // $1/day = ~$30/mo HARD CEILING (owner, 2026-07-13)
-notes = "Sub primary, API fallback. Hard ceiling $60/mo total. Quota is undisclosed — expect the 403."
+daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
+build_cap_cents  = 25                       // ~25c/day of building — a RATION
+review_cap_cents = 75                       // reviewing is cheap; let it look at everything
+notes = "Reviews freely. Builds sparingly. Sub primary, API fallback."
 
   // Failover target. Same model, metered. This is what makes the hidden quota a
   // speed bump instead of a dead stop.

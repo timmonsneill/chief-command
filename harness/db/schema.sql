@@ -27,8 +27,23 @@ CREATE TABLE IF NOT EXISTS seats (
     family        TEXT NOT NULL,             -- 'gpt' | 'claude' | 'grok' | 'qwen'
     -- tier drives the review guard below. 'local' output is never trusted on its own.
     tier          TEXT NOT NULL CHECK (tier IN ('local', 'subscription', 'metered')),
-    -- NULL = uncapped. Cents/day, checked against the usage table.
-    daily_cap_cents INTEGER,
+    -- CAPS ARE PER-ROLE, not just per-seat. Owner's call (2026-07-13):
+    --     "it can review as much as it wants more or less, but shouldn't build as
+    --      much as claude and chat"
+    --
+    -- The economics say the same thing. Claude and OpenAI are FLAT-RATE — a build on
+    -- those seats costs nothing marginal, it's already paid for. Grok is METERED, so
+    -- every build is real money. And builds are the expensive kind of work (token-heavy)
+    -- while reviews are cheap (read-heavy, ~1/10 the tokens).
+    --
+    -- So: BUILD on the seats you've already bought. REVIEW on the metered one, because
+    -- reviewing is cheap — and reviewing is what Grok is actually best at anyway. Its
+    -- value was never being the strongest coder. It's being a DIFFERENT MIND.
+    --
+    -- NULL = uncapped.
+    daily_cap_cents        INTEGER,   -- total across all roles (the hard ceiling)
+    build_cap_cents        INTEGER,   -- ration the expensive work
+    review_cap_cents       INTEGER,   -- reviewing is cheap; be generous
     enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     notes         TEXT
 );
@@ -221,6 +236,10 @@ CREATE TABLE IF NOT EXISTS usage (
     id            INTEGER PRIMARY KEY,
     seat_id       TEXT NOT NULL REFERENCES seats(id),
     job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    -- What kind of work this spend was. Lets us ration building separately from
+    -- reviewing — the whole point of the per-role caps above.
+    role          TEXT NOT NULL DEFAULT 'build'
+                  CHECK (role IN ('build', 'review', 'test', 'research', 'voice')),
     day           TEXT NOT NULL DEFAULT (date('now')),
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -459,6 +478,35 @@ BEGIN
          WHERE seat_id = NEW.seat_id AND day = date('now')
       ) + NEW.cost_cents
       > (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id);
+END;
+
+-- Ration the EXPENSIVE work separately. A seat can be generous on reviewing and
+-- stingy on building — which is exactly how you want a metered seat to behave when
+-- you already pay flat-rate for two better builders.
+CREATE TRIGGER IF NOT EXISTS guard_build_cap_is_hard
+BEFORE INSERT ON usage
+WHEN NEW.role = 'build'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: this seat has used up its building budget for today — it can still review')
+    WHERE (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+      AND (
+        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+         WHERE seat_id = NEW.seat_id AND day = date('now') AND role = 'build'
+      ) + NEW.cost_cents
+      > (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS guard_review_cap_is_hard
+BEFORE INSERT ON usage
+WHEN NEW.role IN ('review', 'test')
+BEGIN
+    SELECT RAISE(ABORT, 'guard: this seat is over its reviewing budget for today')
+    WHERE (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+      AND (
+        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+         WHERE seat_id = NEW.seat_id AND day = date('now') AND role IN ('review','test')
+      ) + NEW.cost_cents
+      > (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id);
 END;
 
 -- Keep updated_at honest.

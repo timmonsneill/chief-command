@@ -248,3 +248,48 @@ def test_a_model_may_still_cite_a_source(conn):
     conn.execute("UPDATE jobs SET kind='research' WHERE id=?", (job,))
     record_artifact(conn, job, kind="source", path="https://docs.x.ai", captured_by="model")
     assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE job_id=?", (job,)).fetchone()[0] == 1
+
+
+# ── Per-role rationing (owner, 2026-07-13) ───────────────────────────────
+# "it can review as much as it wants more or less, but shouldn't build as much
+#  as claude and chat"
+#
+# The economics agree: Claude and OpenAI are flat-rate (a build costs nothing
+# marginal — already bought), Grok is metered (every build is real money). And
+# builds are token-heavy while reviews are read-heavy. So build on what you own,
+# review on what you meter.
+def test_grok_runs_out_of_building_budget_but_can_still_review(conn):
+    upsert_seat(conn, Seat("grok", "xai", "grok-4.5", "grok", "metered",
+                           daily_cap_cents=100, build_cap_cents=25, review_cap_cents=75))
+
+    record_usage(conn, "grok", cost_cents=25, role="build")   # ration spent
+
+    with pytest.raises(BLOCKED, match="used up its building budget"):
+        record_usage(conn, "grok", cost_cents=5, role="build")
+
+    # ...but the thing it's actually best at is still wide open.
+    record_usage(conn, "grok", cost_cents=40, role="review")
+    record_usage(conn, "grok", cost_cents=20, role="test")
+    assert conn.execute(
+        "SELECT SUM(cost_cents) FROM usage WHERE seat_id='grok' AND role IN ('review','test')"
+    ).fetchone()[0] == 60
+
+
+def test_the_seats_we_already_pay_for_build_freely(conn):
+    """Claude and Sol are flat-rate. Uncapped by design — a build there is free."""
+    for _ in range(50):
+        record_usage(conn, "riggs", cost_cents=500, role="build")
+        record_usage(conn, "sol", cost_cents=500, role="build")
+    assert conn.execute("SELECT SUM(cost_cents) FROM usage").fetchone()[0] == 50_000
+
+
+def test_the_hard_ceiling_still_wins_over_the_role_budgets(conn):
+    """Role caps ration WITHIN the total. They can never add up to more than it."""
+    upsert_seat(conn, Seat("grok", "xai", "grok-4.5", "grok", "metered",
+                           daily_cap_cents=100, build_cap_cents=25, review_cap_cents=90))
+    record_usage(conn, "grok", cost_cents=25, role="build")
+    record_usage(conn, "grok", cost_cents=70, role="review")   # 95 of 100 spent
+
+    # The review budget still has room (70 of 90) — but the DAY does not.
+    with pytest.raises(BLOCKED, match="over its daily cap"):
+        record_usage(conn, "grok", cost_cents=10, role="review")

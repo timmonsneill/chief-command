@@ -31,7 +31,9 @@ class Seat:
     model: str
     family: str  # gpt | claude | grok | qwen — what determines shared blind spots
     tier: str  # local | subscription | metered
-    daily_cap_cents: Optional[int] = None
+    daily_cap_cents: Optional[int] = None   # hard ceiling across everything
+    build_cap_cents: Optional[int] = None   # ration the EXPENSIVE work
+    review_cap_cents: Optional[int] = None  # reviewing is cheap — be generous
     enabled: bool = True
     notes: str = ""
 
@@ -67,19 +69,23 @@ def _guarded(fn):
 def upsert_seat(conn: sqlite3.Connection, seat: Seat) -> None:
     conn.execute(
         """
-        INSERT INTO seats (id, provider, model, family, tier, daily_cap_cents, enabled, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO seats (id, provider, model, family, tier, daily_cap_cents,
+                           build_cap_cents, review_cap_cents, enabled, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             provider = excluded.provider,
             model = excluded.model,
             family = excluded.family,
             tier = excluded.tier,
             daily_cap_cents = excluded.daily_cap_cents,
+            build_cap_cents = excluded.build_cap_cents,
+            review_cap_cents = excluded.review_cap_cents,
             enabled = excluded.enabled,
             notes = excluded.notes
         """,
         (seat.id, seat.provider, seat.model, seat.family, seat.tier,
-         seat.daily_cap_cents, int(seat.enabled), seat.notes),
+         seat.daily_cap_cents, seat.build_cap_cents, seat.review_cap_cents,
+         int(seat.enabled), seat.notes),
     )
 
 
@@ -326,6 +332,7 @@ def record_usage(
     job_id: int | None = None,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    role: str = "build",
 ) -> None:
     """Record spend. The DATABASE refuses an entry that would breach the daily cap.
 
@@ -335,8 +342,20 @@ def record_usage(
     """
     conn.execute(
         """
-        INSERT INTO usage (seat_id, job_id, input_tokens, output_tokens, cost_cents)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO usage (seat_id, job_id, role, input_tokens, output_tokens, cost_cents)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (seat_id, job_id, input_tokens, output_tokens, cost_cents),
+        (seat_id, job_id, role, input_tokens, output_tokens, cost_cents),
     )
+
+
+def can_build(conn: sqlite3.Connection, seat_id: str) -> bool:
+    """Has this seat used up its BUILDING budget? (It may still be able to review.)"""
+    row = seat(conn, seat_id)
+    if row is None or row["build_cap_cents"] is None:
+        return True
+    spent = conn.execute(
+        "SELECT COALESCE(SUM(cost_cents),0) c FROM usage "
+        "WHERE seat_id=? AND day=date('now') AND role='build'", (seat_id,)
+    ).fetchone()["c"]
+    return int(spent) < int(row["build_cap_cents"])
