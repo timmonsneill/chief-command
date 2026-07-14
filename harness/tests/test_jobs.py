@@ -282,6 +282,89 @@ def test_a_failing_tester_stops_the_ship(conn):
 
 
 # ---------------------------------------------------------------------------
+# Guards 7 & 8 — Atlas. A researcher must show you where it got that.
+#
+# These exist because of a real failure IN THIS PROJECT. Researching the seat
+# hierarchy, Atlas confidently reported Grok Build scored 70.8% on a coding
+# benchmark — wrong model entirely. It also said a web-view app can't get
+# background mic access — also wrong. Both fluent, both sourced-sounding, both
+# false. Neill caught them by pushing back; nothing in the system would have.
+#
+# A confident wrong answer is worse than no answer, because you ACT on it. Neill
+# nearly made a purchasing decision on the first one.
+# ---------------------------------------------------------------------------
+def _research_job(conn, seat="orchestrator"):
+    job = create_job(conn, "Is Grok Build worth buying?", builder_seat=seat,
+                     task_name="the Grok question")
+    conn.execute("UPDATE jobs SET kind='research' WHERE id=?", (job,))
+    return job
+
+
+def test_a_research_answer_without_sources_cannot_land(conn):
+    job = _research_job(conn)
+    set_status(conn, job, "review", result="Grok scores 70.8%. Not worth it.")
+
+    with pytest.raises(GuardViolation, match="no source, no answer"):
+        set_status(conn, job, "done")
+
+
+def test_a_research_answer_with_sources_can_land(conn):
+    job = _research_job(conn)
+    record_artifact(conn, job, kind="source", path="https://docs.x.ai/build/overview",
+                    captured_by="model")
+    set_status(conn, job, "done")
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
+
+
+def test_a_model_may_cite_a_source_but_not_forge_a_screenshot(conn):
+    """The asymmetry that makes this work.
+
+    A researcher's job IS to hand you a URL — it may write one down. But no model
+    may claim it took a screenshot, because then 'I ran it and it worked' becomes
+    sayable again.
+    """
+    job = _research_job(conn)
+    record_artifact(conn, job, kind="source", path="https://x.ai", captured_by="model")
+
+    with pytest.raises(ValueError, match="may not produce a 'screenshot'"):
+        record_artifact(conn, job, kind="screenshot", path="/tmp/fake.png", captured_by="model")
+
+
+def test_a_family_cannot_fact_check_its_own_research(conn):
+    """The exact hole that let the Grok number through.
+
+    A family that got a fact wrong will re-read its own sources and find them
+    convincing — it made the same inference the first time. Only a different mind
+    reads them cold.
+    """
+    job = _research_job(conn, seat="orchestrator")  # gpt
+    record_artifact(conn, job, kind="source", path="https://x.ai", captured_by="model")
+
+    with pytest.raises(GuardViolation, match="may not fact-check its own research"):
+        record_verdict(conn, job, "orchestrator", verdict="pass", role="verifier")
+
+
+def test_a_different_family_can_fact_check_it(conn):
+    job = _research_job(conn, seat="orchestrator")  # gpt built it
+    record_artifact(conn, job, kind="source", path="https://x.ai", captured_by="model")
+
+    record_verdict(conn, job, "reviewer", verdict="fail", role="verifier", severity="p1",
+                   summary="That benchmark is the old model. The one you'd get is far better.")
+
+    row = conn.execute(
+        "SELECT model_family, verdict FROM verdicts WHERE job_id=? AND role='verifier'", (job,)
+    ).fetchone()
+    assert row["model_family"] == "claude" and row["verdict"] == "fail"
+
+
+def test_a_build_job_needs_no_sources(conn):
+    """The citation guard is for research. It must not block ordinary code."""
+    job = create_job(conn, "add the login form", builder_seat="orchestrator")
+    set_status(conn, job, "done")
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
 # Atomic claiming — parallel workers must not double-claim
 # ---------------------------------------------------------------------------
 def test_a_job_is_claimed_exactly_once(conn):

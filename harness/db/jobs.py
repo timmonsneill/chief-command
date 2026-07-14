@@ -196,14 +196,27 @@ def record_artifact(
     flow: str | None = None,
     captured_by: str = "playwright",
 ) -> int:
-    """Record GROUND TRUTH the harness captured.
+    """Record GROUND TRUTH.
 
-    Only the harness or Playwright may write here — never a model. This is what
-    makes "I ran it and it worked" unsayable: the tester interprets artifacts it
-    did not produce and cannot forge.
+    Two kinds, and they have different rules about who may write them:
+
+    EVIDENCE OF A BUILD (screenshot, trace, logs, exit codes) — only the harness or
+    Playwright. NEVER a model. A model cannot fabricate a screenshot, which is what
+    makes "I ran it and it worked" unsayable.
+
+    EVIDENCE OF A CLAIM (source, quote) — a model MAY write these, because a
+    researcher's whole job is to hand you a URL you can go and read yourself. The
+    check isn't "who wrote it down", it's "can someone else go and look?" — which is
+    why a different family has to read the sources cold (guard 8).
     """
-    if captured_by not in ("harness", "playwright"):
-        raise ValueError("artifacts are captured by the harness, never claimed by a model")
+    _MODEL_MAY_CITE = {"source", "quote"}
+    if captured_by == "model" and kind not in _MODEL_MAY_CITE:
+        raise ValueError(
+            f"a model may cite a source, but it may not produce a '{kind}' — "
+            "build evidence is captured by the harness, never claimed by a model"
+        )
+    if captured_by not in ("harness", "playwright", "model"):
+        raise ValueError(f"unknown artifact origin: {captured_by}")
     cur = conn.execute(
         """
         INSERT INTO artifacts (job_id, kind, path, value, flow, captured_by)

@@ -73,6 +73,39 @@ first token. That is the single mistake this architecture exists to avoid.
 
 ## Working with Neill
 
-Non-technical owner. Plain English, business framing, no unexplained jargon. Lead with the
-outcome. He runs sessions from his phone sometimes — keep answers self-contained. No time
-estimates. Spec-then-build: settle the design, then execute autonomously in batches.
+**Neill cannot read or write code.** This is the single most important thing on this page.
+
+His own words: *"Think of it like I know Spanish 101, but that's it. The basic level of how
+coding, databases, hosting environments, etc. work."* He knows general concepts — database,
+hosting, frontend vs backend — but not code, not filenames, not tool names.
+
+### The plain-English rule (applies to EVERY agent, not just the voice)
+
+Anything that reaches Neill — a `spoken_summary`, a verdict summary, a status line, a
+dispatch announcement — **must be readable by a smart person who has never programmed.**
+
+**Never write, in anything he'll hear or read at a glance:**
+- filenames or paths — `dispatch.py`, `backend/app/routes.py`
+- tool names — bash, grep, read, edit
+- code jargon — "429s", "middleware", "async", "regex", "the migration", "the endpoint"
+
+**Instead, name THE THING and say what happened to it:**
+
+| ❌ Don't | ✅ Do |
+|---|---|
+| "Editing dispatch.py, writing test_ratelimit.py" | "He's building the rate limiter, now he's testing it" |
+| "It 429s the health check" | "It was accidentally blocking our own status checks" |
+| "Migration failed on the users table" | "The change to how we store accounts didn't go through" |
+| "Fixed the async race in the WS handler" | "Fixed a timing bug that was dropping messages" |
+
+The detail is not lost — it lives in the **text channel**, which he can scroll past. This is
+not dumbing down. It is putting each fact in the channel that can carry it.
+
+**If you cannot explain what you did without jargon, you do not yet understand what you did.**
+
+### Other conventions with Neill
+
+Lead with the outcome. Business framing. He runs sessions from his phone sometimes — keep
+answers self-contained. No time estimates. Spec-then-build: settle the design, then execute
+autonomously in batches. Say "I was wrong" plainly when you were; he'd rather be corrected
+than flattered.

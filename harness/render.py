@@ -38,17 +38,6 @@ _KIND_SPOKEN = {
     "error":      "hit a problem",
 }
 
-# Spoken lines must not read like log lines. A path is unspeakable — nobody wants to
-# hear "backend slash app slash dispatch dot py" — and "running tests pytest" is not
-# a sentence. Voice gets the filename; the text channel keeps the full path.
-_SILENT_TARGET = {"test_run", "thinking", "dispatched", "done"}
-
-
-def _spoken_target(kind: str, target: str | None) -> str:
-    if not target or kind in _SILENT_TARGET:
-        return ""
-    return " " + target.rsplit("/", 1)[-1]
-
 _KIND_GLYPH = {
     "dispatched": "→", "thinking": "·", "read": "◇", "edit": "✎", "write": "+",
     "command": "$", "test_run": "⚑", "browse": "👁", "verdict": "⚖",
@@ -131,17 +120,35 @@ def render_text(conn: sqlite3.Connection, job_id: int) -> str:
 # colleague says and "read auth.py, then edited routes.py" is what a log says.
 # ---------------------------------------------------------------------------
 
-# Event kinds → the phase a person would name.
+# ═══════════════════════════════════════════════════════════════════════════
+# THE HARD RULE: NEILL IS NOT A CODER.
+#
+# His words (2026-07-13): "I never ever wanna hear that type of granular info.
+# Editing dispatch.py, writing test_ratelimit.py. I don't know what that means…
+# Think of it like I know Spanish 101, but that's it."
+#
+# So the voice NEVER emits:
+#   - a filename or path    (dispatch.py, backend/app/routes.py)
+#   - a tool name           (bash, read, edit, grep)
+#   - code jargon           (429s, middleware, async, regex)
+#
+# Every phase below is something a smart person who has never programmed would
+# understand. They all refer back to THE THING (the task name) — never the files
+# underneath it. "He's building it." "Now he's testing it." That's the ceiling.
+#
+# The filenames STILL EXIST — in the text channel, which he can scroll past. This
+# is not dumbing down. It is putting the detail in the channel that can carry it.
+# ═══════════════════════════════════════════════════════════════════════════
 _PHASE = {
-    "dispatched": "getting started",
-    "read":       "reading through it",
-    "thinking":   "working out the approach",
-    "edit":       "writing the code",
-    "write":      "writing the code",
-    "command":    "writing the code",
-    "test_run":   "running his tests",
-    "browse":     "clicking through it",
-    "verdict":    "being reviewed",
+    "dispatched": "just getting started",
+    "read":       "getting his head round it",
+    "thinking":   "working out how to do it",
+    "edit":       "building it",
+    "write":      "building it",
+    "command":    "building it",
+    "test_run":   "testing it",
+    "browse":     "clicking through it like a user",
+    "verdict":    "waiting on the others",
     "error":      "stuck",
 }
 
@@ -150,7 +157,7 @@ def _phase_of(conn: sqlite3.Connection, job_id: int) -> str:
     row = conn.execute(
         "SELECT kind FROM events WHERE job_id = ? ORDER BY id DESC LIMIT 1", (job_id,)
     ).fetchone()
-    return _PHASE.get(row["kind"], "working on it") if row else "getting started"
+    return _PHASE.get(row["kind"], "working on it") if row else "just getting started"
 
 
 def announce_dispatch(lane: str, task_name: str, reviewers: int = 0) -> str:

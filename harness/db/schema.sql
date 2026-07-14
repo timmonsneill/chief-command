@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     origin        TEXT NOT NULL DEFAULT 'text'
                   CHECK (origin IN ('text', 'voice', 'cron', 'relay')),  -- 'relay' = Jess (§10)
 
+    -- 'build'    → produces code. Ground truth = a screenshot (Playwright drove it).
+    -- 'research' → produces an ANSWER. Ground truth = a source (someone can go read it).
+    -- Same principle, different evidence. A researcher that can't cite is a researcher
+    -- that might be confabulating — and a confident wrong answer is worse than no answer,
+    -- because you act on it.
+    kind          TEXT NOT NULL DEFAULT 'build' CHECK (kind IN ('build', 'research')),
+
     builder_seat  TEXT NOT NULL REFERENCES seats(id),
     run_id        TEXT,                      -- OpenClaw sessions_spawn run id
     session_key   TEXT,                      -- agent:<id>:subagent:<uuid>
@@ -104,7 +111,11 @@ CREATE TABLE IF NOT EXISTS verdicts (
     reviewer_tier TEXT NOT NULL CHECK (reviewer_tier IN ('local', 'subscription', 'metered')),
     -- 'reviewer' reads the diff and judges. 'tester' DRIVES THE APP (Playwright) and
     -- judges what it observed. The tester guards below apply only to the latter.
-    role          TEXT NOT NULL DEFAULT 'reviewer' CHECK (role IN ('reviewer', 'tester')),
+    -- 'reviewer' reads the diff and judges it.
+    -- 'tester'   DROVE the running app (Playwright) and judges what it observed.
+    -- 'verifier' FACT-CHECKS a research answer against its sources.
+    role          TEXT NOT NULL DEFAULT 'reviewer'
+                  CHECK (role IN ('reviewer', 'tester', 'verifier')),
     -- model family is snapshotted here so §6's "at least two families" rule is
     -- auditable, and so the no-self-family-testing guard has something to check.
     model_family  TEXT NOT NULL,
@@ -176,15 +187,20 @@ CREATE TABLE IF NOT EXISTS artifacts (
     id            INTEGER PRIMARY KEY,
     job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL CHECK (kind IN (
+                      -- build evidence: the harness drove the app and wrote these down
                       'screenshot', 'trace', 'video', 'console_log',
-                      'network_log', 'dom_snapshot', 'exit_code', 'stdout', 'stderr'
+                      'network_log', 'dom_snapshot', 'exit_code', 'stdout', 'stderr',
+                      -- research evidence: a claim you can go and check yourself
+                      'source', 'quote'
                   )),
     path          TEXT,                      -- on-disk artifact
     value         TEXT,                      -- inline (e.g. an exit code)
     -- The flow this came from, e.g. "login -> dashboard -> dispatch a build"
     flow          TEXT,
+    -- 'model' IS allowed here, but ONLY for research sources — a researcher must be
+    -- able to hand you a URL. It is still not allowed to invent a screenshot.
     captured_by   TEXT NOT NULL DEFAULT 'harness'
-                  CHECK (captured_by IN ('harness', 'playwright')),  -- never 'model'
+                  CHECK (captured_by IN ('harness', 'playwright', 'model')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -264,6 +280,54 @@ BEFORE INSERT ON verdicts
 WHEN NEW.role = 'tester'
 BEGIN
     SELECT RAISE(ABORT, 'guard: a model family may not test its own build')
+    WHERE NEW.model_family = (
+        SELECT s.family FROM jobs j
+        JOIN seats s ON s.id = j.builder_seat
+        WHERE j.id = NEW.job_id
+    );
+END;
+
+-- ===========================================================================
+-- GUARD 7 — a researcher must be able to show you where it got that.
+--
+-- This one exists because of a real failure, in this very project. While
+-- researching the seat hierarchy, Atlas confidently reported that Grok Build
+-- scored 70.8% on a coding benchmark — and it was the wrong model entirely. It
+-- also reported that a web-view app can't get background microphone access, and
+-- that was wrong too. Both were fluent, sourced-sounding, and false. Neill caught
+-- them by pushing back. Nothing in the system would have.
+--
+-- A confident wrong answer is worse than no answer, because you ACT on it. Neill
+-- nearly made a purchasing decision on the first one.
+--
+-- So research gets the same treatment as code: cite ground truth, and let a
+-- different family check it. For a build, ground truth is a screenshot. For
+-- research, ground truth is a SOURCE — a thing someone can go and read.
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_research_must_cite_sources
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+     AND NEW.kind = 'research'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a research answer must cite sources — no source, no answer')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM artifacts a
+        WHERE a.job_id = NEW.id AND a.kind IN ('source', 'quote')
+    );
+END;
+
+-- ===========================================================================
+-- GUARD 8 — a model family may not fact-check its own research.
+--
+-- Same reasoning as the no-self-testing rule. A family that got a fact wrong will
+-- read its own sources and find them convincing — it made the same inference the
+-- first time. Only a different mind reads them cold.
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_no_self_family_verifying
+BEFORE INSERT ON verdicts
+WHEN NEW.role = 'verifier'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a model family may not fact-check its own research')
     WHERE NEW.model_family = (
         SELECT s.family FROM jobs j
         JOIN seats s ON s.id = j.builder_seat
