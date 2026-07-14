@@ -14,7 +14,7 @@ import soundfile as sf
 logger = logging.getLogger(__name__)
 
 # Model cache directory — downloads automatically on first use
-MODELS_DIR = Path("/Users/user/Desktop/chief-command/models")
+MODELS_DIR = Path("/Users/user/code-projects/chief-command/models")
 MODEL_SIZE = "medium"
 COMPUTE_TYPE = "int8"  # Optimized for Apple Silicon M-series Neural Engine
 

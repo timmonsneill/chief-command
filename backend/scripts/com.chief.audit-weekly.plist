@@ -21,7 +21,7 @@
   Errors are logged to /tmp/chief-audit-error.log.
 
   IMPORTANT: Update ProgramArguments paths below if your repo lives somewhere
-  other than ~/Desktop/chief-command/.
+  other than ~/code-projects/chief-command/.
 -->
 
 <plist version="1.0">
@@ -44,12 +44,12 @@
   <!-- Absolute paths — update if your repo location differs -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/user/Desktop/chief-command/backend/.venv/bin/python3</string>
-    <string>/Users/user/Desktop/chief-command/backend/scripts/audit_runner.py</string>
+    <string>/Users/user/code-projects/chief-command/backend/.venv/bin/python3</string>
+    <string>/Users/user/code-projects/chief-command/backend/scripts/audit_runner.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/user/Desktop/chief-command</string>
+  <string>/Users/user/code-projects/chief-command</string>
 
   <key>StandardOutPath</key>
   <string>/tmp/chief-audit.log</string>

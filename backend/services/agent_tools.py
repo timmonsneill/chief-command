@@ -33,10 +33,12 @@ Cancellation:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,42 +55,70 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# think_deep — direct Anthropic API escalation (Stage 3 of Live pivot)
+# think_deep — Opus/Sonnet escalation via the `claude` CLI subprocess
 # ---------------------------------------------------------------------------
 # When the owner asks for spec walkthrough, planning, tradeoff analysis, or
 # "think this through carefully," the Live brain (Flash native-audio, fast
-# but conversational) escalates to Opus (default, deeper) or Sonnet (lighter)
-# via the direct Anthropic API. Forge measured Sonnet TTFT ~0.56s and Opus
-# ~0.79s on the prior Anthropic-streamed pipeline — meaningfully faster
-# than Pro on Vertex (1-3s warm, 12-14s cold).
+# but conversational) escalates to Opus (default, deeper) or Sonnet (lighter).
+#
+# Auth path: we spawn the `claude` CLI as a subprocess with a stripped env
+# (no ANTHROPIC_API_KEY, no AWS_*, no GITHUB_TOKEN, etc.) so the CLI falls
+# back to the Claude Code OAuth login on the owner's Max plan. Owner is
+# flat-rate billed — Opus escalations have $0 marginal cost. Same env-
+# allowlist trick `dispatcher.py` uses for dispatch_agent.
+#
+# Tradeoff vs the old direct-SDK path: the CLI subprocess adds ~0.5-1.5s
+# of spawn + harness boot on top of the model latency. The bridge-phrase
+# rule (chief_context #13) covers this — owner hears "Give me a second"
+# before the tool fires, so the perceived latency is unchanged. Worth it
+# to avoid per-token billing against ANTHROPIC_API_KEY.
 #
 # Default flipped to Opus 2026-05-05: owner uses think_deep almost
 # exclusively for hard reasoning (spec walkthroughs, architecture, tradeoff
-# tournaments). The reasoning-depth gap matters more than the ~1s latency
-# gap, and the bridge-phrase rule (chief_context #13) covers the perceived
-# latency by speaking before the tool fires. Sonnet stays opt-in for lighter
-# quick-reasoning calls where pacing wins. Pricing impact: Opus is ~5x
-# Sonnet per token; the owner is on Max plan (flat-rate Anthropic), so the
-# real cost lever is the daily-cap math in usage_tracker.
+# tournaments). Sonnet stays opt-in for lighter quick-reasoning calls where
+# pacing wins.
 #
-# Pricing rows already exist in usage_tracker.PRICING_PER_MTOK for both
-# Sonnet and Opus; the executor records the turn so the dashboard sees
-# escalation cost alongside Live audio cost.
+# Token bookkeeping: the CLI emits a `usage` block in `--output-format json`
+# so we still record input/output/cache tokens via record_think_deep_cost.
+# The computed cost_cents is informational only (flat-rate Max plan), but
+# the daily dashboard still sees escalation volume.
 THINK_DEEP_OPUS_MODEL: str = "claude-opus-4-7"
 THINK_DEEP_SONNET_MODEL: str = "claude-sonnet-4-6"
 # Default = Opus. To use Sonnet, callers pass model=THINK_DEEP_SONNET_MODEL
 # (or the Live brain emits the Sonnet enum value via the tool schema).
 THINK_DEEP_DEFAULT_MODEL: str = THINK_DEEP_OPUS_MODEL
-THINK_DEEP_MAX_TOKENS: int = 2048
-THINK_DEEP_TIMEOUT_S: float = 30.0
+THINK_DEEP_TIMEOUT_S: float = 45.0
 # Allowlist guards against the Live brain emitting an arbitrary string —
 # the schema's enum prevents it server-side, but a defense-in-depth check
-# in the executor stops a misbehaving model from spending against an
-# unintended pricing row.
+# in the executor stops a misbehaving model from running against an
+# unintended model row.
 _THINK_DEEP_ALLOWED_MODELS: frozenset[str] = frozenset({
     THINK_DEEP_OPUS_MODEL,
     THINK_DEEP_SONNET_MODEL,
 })
+
+# Env allowlist for the spawned `claude` CLI. Mirrors dispatcher._ENV_ALLOWLIST.
+# Critically, ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are NOT in the list —
+# the CLI then falls back to the Claude Code OAuth login (Max sub).
+_CLAUDE_CLI_ENV_ALLOWLIST = {
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "PWD",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+}
+
+# Resolved at call time so PATH tweaks are honored without module reload.
+_CLAUDE_BIN_NAME = "claude"
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +135,8 @@ _THINK_DEEP_ALLOWED_MODELS: frozenset[str] = frozenset({
 # tool-call cost via record_code_review_cost so the dashboard sees this
 # specialist spend alongside Live audio + think_deep.
 CODE_REVIEW_MODEL: str = "gemini-2.5-pro"
-CODE_REVIEW_TIMEOUT_S: float = 45.0
-CODE_REVIEW_MAX_OUTPUT_TOKENS: int = 2048
+CODE_REVIEW_TIMEOUT_S: float = 120.0
+CODE_REVIEW_MAX_OUTPUT_TOKENS: int = 16384  # must cover Pro thinking tokens + visible output
 # Cap on the artifact text we send into Pro. 100KB matches the dispatch
 # preview ceiling and keeps the prompt below the 1M-token Pro limit by ~10x
 # even on dense source. Truncated content gets a footer note so the model
@@ -626,37 +656,128 @@ async def execute_grep(pattern: str, cwd: Path, path: str = ".") -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# think_deep — direct Anthropic API escalation
+# think_deep — Opus/Sonnet escalation via `claude` CLI subprocess
 # ---------------------------------------------------------------------------
+def _build_think_deep_argv(
+    claude_bin: str, *, model: str, system_prompt: str, prompt: str,
+) -> list[str]:
+    """Build the argv we hand to ``asyncio.create_subprocess_exec``.
+
+    Extracted so tests can inspect the argv without spawning a real process.
+
+    * ``--print`` — non-interactive, one-shot.
+    * ``--model`` — Opus default, Sonnet opt-in (allowlist enforced upstream).
+    * ``--system-prompt`` — replaces Claude Code's default system prompt with
+      the Chief context so escalations stay in-persona (and no CLAUDE.md
+      auto-discovery contaminates the answer).
+    * ``--tools ""`` — disables every tool. think_deep is pure reasoning;
+      we don't want the CLI to start running Read/Bash on the scratch CWD.
+    * ``--output-format json`` — gives us back token usage so the dashboard
+      still tracks escalation volume.
+    * ``--no-session-persistence`` — don't write this turn into ~/.claude
+      session storage; nothing's going to resume it.
+    * ``--setting-sources user`` — only load the user-level settings, skip
+      project/local hooks that could fire on the scratch CWD.
+    * ``--`` — end-of-options marker. Without this, a prompt starting with
+      "-" (e.g. "--review this") would be parsed by commander.js as a CLI
+      flag rather than the positional prompt. Same Vera HIGH finding the
+      dispatcher applied to its argv.
+    """
+    return [
+        claude_bin,
+        "--print",
+        "--model", model,
+        "--system-prompt", system_prompt,
+        "--tools", "",
+        "--output-format", "json",
+        "--no-session-persistence",
+        "--setting-sources", "user",
+        "--",
+        prompt,
+    ]
+
+
+def _clean_claude_env() -> dict[str, str]:
+    """Build a subprocess env using an explicit allowlist.
+
+    Mirrors ``dispatcher.TaskDispatcher._clean_env``. ANTHROPIC_API_KEY and
+    every other secret are stripped so the spawned CLI falls back to the
+    Max-subscription OAuth login (no per-token spend).
+    """
+    return {k: v for k, v in os.environ.items() if k in _CLAUDE_CLI_ENV_ALLOWLIST}
+
+
+async def _run_claude_cli(
+    argv: list[str], *, cwd: str, env: dict[str, str], timeout: float,
+) -> tuple[int, bytes, bytes]:
+    """Spawn the claude CLI, wait for exit, return (returncode, stdout, stderr).
+
+    Wraps ``asyncio.create_subprocess_exec`` in an ``asyncio.timeout`` so a
+    wedged subprocess is SIGKILLed on overrun. Pulled out as its own function
+    so tests can monkeypatch the whole subprocess wiring without monkey-
+    patching the stdlib.
+
+    Raises:
+        asyncio.TimeoutError: wall clock exceeded ``timeout``.
+        asyncio.CancelledError: outer turn was cancelled (barge-in).
+        OSError / FileNotFoundError: spawn failed (claude binary missing).
+    """
+    proc: Optional[asyncio.subprocess.Process] = None
+    try:
+        async with asyncio.timeout(timeout):
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            return proc.returncode or 0, stdout_bytes, stderr_bytes
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Best-effort kill so we don't leak a child that keeps spending wall
+        # clock after the caller has moved on.
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        raise
+
+
 async def execute_think_deep(
     prompt: str,
     *,
     scope: str,
     model: str = THINK_DEEP_DEFAULT_MODEL,
 ) -> ToolResult:
-    """Escalate a hard question to Sonnet/Opus via the direct Anthropic API.
+    """Escalate a hard question to Opus/Sonnet via the ``claude`` CLI subprocess.
 
     Returns a ``ToolResult`` whose ``output`` is the assistant's reply text
     (the Live brain reads it back to the owner as Chief's spoken reply).
-    Never raises — sandbox/auth/timeout errors come back as ``error=True``
+    Never raises — spawn/timeout/parse errors come back as ``error=True``
     on the ToolResult so the brain can react in a human voice instead of
     crashing the turn.
 
-    The Chief system prompt for the active scope is injected so escalation
-    answers stay in-persona (no "I'm Claude" fourth-wall break). We use the
-    flat-string variant (``build_chief_system_string``) because the
-    Anthropic single-message API takes one ``system`` string, not the cached
-    block list — this call is a one-shot, not a streaming conversation, so
-    the cache_control optimization wouldn't fire anyway.
+    Auth: the subprocess env is stripped of ANTHROPIC_API_KEY (and every
+    other secret) so the CLI falls back to the Max-subscription OAuth login.
+    Owner is flat-rate billed — Opus escalations have $0 marginal cost.
 
-    Cost: ``usage_tracker.record_turn`` is invoked with the active session's
-    id when ``session_id`` is plumbed by the caller (websockets layer). For
-    the unit-test path where no session is open, the executor still returns
-    the right output but skips the billing write — escalations only count
-    against the daily cap when they happen in a real WS session.
+    The Chief system prompt for the active scope is injected via
+    ``--system-prompt`` so escalation answers stay in-persona AND the CLI's
+    default Claude Code system prompt (with CLAUDE.md auto-discovery, IDE
+    integration nudges, etc.) is fully replaced.
 
-    Cancellation: ``asyncio.timeout(30s)`` caps the wall-clock; outer
-    CancelledError (e.g. from a barge-in) propagates without retry.
+    Token bookkeeping: ``--output-format json`` returns a ``usage`` block;
+    we forward those counts to ``record_think_deep_cost`` so daily-cap math
+    and the dashboard still see escalation volume. The cost cents column
+    will reflect what the call WOULD have cost via raw API — informational
+    only on Max.
+
+    Cancellation: ``asyncio.timeout(45s)`` caps the wall-clock (subprocess
+    spawn adds ~0.5-1.5s on top of the model latency). Outer CancelledError
+    (e.g. from a barge-in) kills the subprocess and propagates.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         return ToolResult(output="error: prompt is required", error=True)
@@ -668,17 +789,17 @@ async def execute_think_deep(
             model, chosen_model,
         )
 
-    # Load the API key from settings — pydantic Settings reads it from .env
-    # at startup. Failing closed here (rather than raising) keeps a missing
-    # key from spilling into the user's voice as a stack trace.
-    from config.settings import settings
-    api_key = settings.ANTHROPIC_API_KEY
-    if not api_key:
+    # Resolve the binary now (and not at import time) so PATH tweaks land.
+    # Fail closed if it's missing — same shape as the old missing-API-key
+    # branch, but a different cause.
+    claude_bin = shutil.which(_CLAUDE_BIN_NAME)
+    if not claude_bin:
         logger.warning(
-            "think_deep: ANTHROPIC_API_KEY not configured; refusing escalation"
+            "think_deep: `%s` not found on PATH; refusing escalation",
+            _CLAUDE_BIN_NAME,
         )
         return ToolResult(
-            output="error: think_deep unavailable (no Anthropic API key)",
+            output="error: think_deep unavailable (claude CLI not found)",
             error=True,
         )
 
@@ -700,28 +821,25 @@ async def execute_think_deep(
             "careful reasoning."
         )
 
-    # Lazy SDK import — keeps the module import-safe in environments
-    # without ``anthropic`` installed (e.g. unit tests that stub the
-    # executor out before it's reached).
-    try:
-        from anthropic import AsyncAnthropic
-    except ImportError as exc:
-        logger.exception("think_deep: anthropic SDK import failed: %s", exc)
-        return ToolResult(
-            output="error: think_deep unavailable (anthropic SDK missing)",
-            error=True,
-        )
+    argv = _build_think_deep_argv(
+        claude_bin,
+        model=chosen_model,
+        system_prompt=system_prompt,
+        prompt=prompt,
+    )
+    env = _clean_claude_env()
+    # Scratch CWD so the CLI doesn't accidentally pull a project CLAUDE.md
+    # or fire project-local hooks. tempfile.mkdtemp gives us a unique empty
+    # dir under $TMPDIR; the OS reclaims it. We don't bother explicitly
+    # removing it — these are tiny and `--setting-sources user` already
+    # skips project/local settings.
+    scratch_cwd = tempfile.mkdtemp(prefix="think_deep_")
 
     started = time.monotonic()
     try:
-        async with asyncio.timeout(THINK_DEEP_TIMEOUT_S):
-            client = AsyncAnthropic(api_key=api_key)
-            response = await client.messages.create(
-                model=chosen_model,
-                max_tokens=THINK_DEEP_MAX_TOKENS,
-                system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
-            )
+        returncode, stdout_bytes, stderr_bytes = await _run_claude_cli(
+            argv, cwd=scratch_cwd, env=env, timeout=THINK_DEEP_TIMEOUT_S,
+        )
     except asyncio.TimeoutError:
         elapsed = time.monotonic() - started
         logger.warning(
@@ -733,53 +851,73 @@ async def execute_think_deep(
             error=True,
         )
     except asyncio.CancelledError:
-        # Outer turn cancelled (barge-in). Don't try to clean up the inflight
-        # request — the SDK handles its own teardown via the timeout context
-        # manager; just propagate.
+        # Outer turn cancelled (barge-in). _run_claude_cli already killed
+        # the subprocess; just propagate.
         raise
     except Exception as exc:
-        # Authentication / rate-limit / 5xx all funnel here. Detail in the
-        # log; user-facing text is generic so we don't leak provider error
-        # internals into the voice channel.
-        logger.exception("think_deep: anthropic call failed: %s", exc)
+        # Spawn failure (missing binary slipped past the which() check,
+        # permission denied, etc.). Detail in the log; user-facing text
+        # is generic so we don't leak provider/OS internals into voice.
+        logger.exception("think_deep: subprocess failed: %s", exc)
         return ToolResult(
             output="error: think_deep failed",
             error=True,
         )
 
-    # Pull the text content out of the response. Anthropic 0.39+ returns
-    # ``Message.content`` as a list of blocks; the first ``TextBlock``
-    # carries the answer for non-streaming single-turn calls.
-    text_out = ""
-    try:
-        for block in response.content:
-            block_text = getattr(block, "text", None)
-            if isinstance(block_text, str) and block_text:
-                text_out = block_text
-                break
-    except Exception as exc:
-        logger.warning("think_deep: response parsing failed: %s", exc)
+    if returncode != 0:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:500]
+        logger.warning(
+            "think_deep: claude CLI exited code=%d stderr=%r",
+            returncode, stderr_text,
+        )
+        return ToolResult(
+            output="error: think_deep failed",
+            error=True,
+        )
 
-    if not text_out.strip():
+    try:
+        payload = json.loads(stdout_bytes.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "think_deep: failed to parse CLI JSON output: %s; raw=%r",
+            exc, stdout_bytes[:500],
+        )
+        return ToolResult(
+            output="error: think_deep returned malformed output",
+            error=True,
+        )
+
+    # The CLI's own error path: `is_error: true` or `subtype != "success"`
+    # means the model returned an error frame even though the process exit
+    # was 0. Surface a generic error to the model.
+    if payload.get("is_error") or payload.get("subtype") != "success":
+        logger.warning(
+            "think_deep: CLI returned error payload subtype=%r is_error=%r",
+            payload.get("subtype"), payload.get("is_error"),
+        )
+        return ToolResult(
+            output="error: think_deep failed",
+            error=True,
+        )
+
+    text_out = payload.get("result", "") or ""
+    if not isinstance(text_out, str) or not text_out.strip():
         return ToolResult(
             output="error: think_deep returned empty text",
             error=True,
         )
 
-    # Record the escalation cost so it lands in the daily cap + dashboard.
-    # Best-effort: record_turn requires an active session_id, which we
-    # don't have in the executor's local frame. The caller (websockets
-    # tool-call dispatch) is responsible for surfacing the cost via the
-    # standard turn-recording path; here we ALSO write a standalone
-    # bookkeeping row tagged with a synthetic session derived from the
-    # subject so daily-cap math sums it. If the import / write fails we
-    # log + continue — the user-facing reply is the priority.
+    # Record the escalation volume so it lands in the daily dashboard.
+    # cost_cents is informational only — on Max sub, the actual dollars
+    # spent are $0 regardless of input/output token counts. Best-effort;
+    # any failure is logged + swallowed so a billing failure can't break
+    # the user-facing reply.
     try:
-        usage = getattr(response, "usage", None)
-        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-        cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        usage = payload.get("usage", {}) or {}
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+        cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
         from services.usage_tracker import record_think_deep_cost
         await record_think_deep_cost(
             model=chosen_model,
