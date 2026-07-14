@@ -140,7 +140,7 @@ model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
 tier = "subscription"                       // $30 SuperGrok, primary
 family = "grok"
 worktree_isolated = true
-daily_cap_cents = 100                       // the FALLBACK's cap: ~$30/mo ceiling
+daily_cap_cents = 100                       // $1/day = ~$30/mo HARD CEILING (owner, 2026-07-13)
 notes = "Sub primary, API fallback. Hard ceiling $60/mo total. Quota is undisclosed — expect the 403."
 
   // Failover target. Same model, metered. This is what makes the hidden quota a

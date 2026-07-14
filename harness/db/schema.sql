@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     kind          TEXT NOT NULL DEFAULT 'build' CHECK (kind IN ('build', 'research')),
 
     builder_seat  TEXT NOT NULL REFERENCES seats(id),
+    -- SNAPSHOTTED AT CREATION. Sol (cross-family review, 2026-07-13) found that
+    -- guards read the builder's tier/family LIVE from `seats`, so re-tiering a local
+    -- seat to 'subscription' retroactively legitimized its old unreviewed work.
+    -- Freeze it here. What a seat is TODAY cannot change what it WAS.
+    builder_tier   TEXT NOT NULL DEFAULT 'local'
+                   CHECK (builder_tier IN ('local','subscription','metered')),
+    builder_family TEXT NOT NULL DEFAULT 'unknown',
     run_id        TEXT,                      -- OpenClaw sessions_spawn run id
     session_key   TEXT,                      -- agent:<id>:subagent:<uuid>
 
@@ -224,85 +231,184 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE INDEX IF NOT EXISTS idx_usage_seat_day ON usage(seat_id, day);
 
 -- ===========================================================================
--- GUARD 1 — local output never ships unreviewed (§4.3, §9)
+-- THE GUARDS
 --
--- A job built by a 'local' tier seat cannot reach 'done' without at least one
--- PASSING verdict from a higher tier. This is a transition guard, not a
--- convention: the write simply fails.
+-- ⚠️ REWRITTEN 2026-07-13 after a cross-family review. Sol (GPT) reviewed Claude's
+-- code and found NINE ways through. The headline: every guard fired on UPDATE of
+-- status, and NONE fired on INSERT — so a job could be BORN 'done'. Fences around
+-- the front door, no wall.
+--
+-- Sol's closing line, which is the one that mattered:
+--     "Those are application conventions, not the claimed structurally impossible
+--      guarantees."
+--
+-- He was right. Fixed below. Each guard now fires on BOTH insert and update, checks
+-- SNAPSHOTTED facts rather than live ones, and validates claims against `seats`
+-- instead of trusting whatever the writer put in the row.
 -- ===========================================================================
-CREATE TRIGGER IF NOT EXISTS guard_local_output_needs_review
-BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'done' AND OLD.status <> 'done'
+
+-- A job may never be BORN finished. (Sol #1 — the worst one.)
+CREATE TRIGGER IF NOT EXISTS guard_no_job_is_born_done
+BEFORE INSERT ON jobs
+WHEN NEW.status IN ('done', 'shipped')
 BEGIN
-    SELECT RAISE(ABORT, 'guard: local-built job requires a passing subscription-tier review before done')
-    WHERE (SELECT tier FROM seats WHERE id = NEW.builder_seat) = 'local'
-      AND NOT EXISTS (
-          SELECT 1 FROM verdicts v
-          WHERE v.job_id = NEW.id
-            AND v.reviewer_tier IN ('subscription', 'metered')
-            AND v.verdict = 'pass'
-      );
+    SELECT RAISE(ABORT, 'guard: a job cannot be created already finished — it must earn it');
+END;
+
+-- The builder's tier/family are snapshotted at creation and are then HISTORY.
+-- (Sol #5, #6 — re-tiering a seat rewrote the past.)
+CREATE TRIGGER IF NOT EXISTS guard_builder_identity_is_frozen
+BEFORE UPDATE ON jobs
+WHEN OLD.builder_seat <> NEW.builder_seat
+  OR OLD.builder_tier <> NEW.builder_tier
+  OR OLD.builder_family <> NEW.builder_family
+BEGIN
+    SELECT RAISE(ABORT, 'guard: who built this cannot be rewritten after the fact');
+END;
+
+-- The panel size is fixed at dispatch. (Sol #7 — it could be set to zero later.)
+CREATE TRIGGER IF NOT EXISTS guard_panel_size_is_fixed
+BEFORE UPDATE OF required_reviews ON jobs
+WHEN OLD.required_reviews > 0 AND NEW.required_reviews < OLD.required_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'guard: the panel cannot be shrunk after dispatch');
+END;
+
+-- A verdict, once written, is a fact. It cannot be edited into a pass.
+-- (Sol #2 — every verdict guard checked INSERT only, so you could rewrite the row.)
+CREATE TRIGGER IF NOT EXISTS guard_verdicts_are_append_only
+BEFORE UPDATE ON verdicts
+WHEN OLD.verdict <> NEW.verdict
+     AND NOT (OLD.verdict = 'needs_human' AND NEW.verdict IN ('pass','fail'))
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a verdict cannot be rewritten — only an escalation may be answered');
+END;
+
+CREATE TRIGGER IF NOT EXISTS guard_verdict_identity_is_frozen
+BEFORE UPDATE ON verdicts
+WHEN OLD.role <> NEW.role OR OLD.model_family <> NEW.model_family
+  OR OLD.reviewer_seat <> NEW.reviewer_seat OR OLD.reviewer_tier <> NEW.reviewer_tier
+BEGIN
+    SELECT RAISE(ABORT, 'guard: who reviewed this cannot be rewritten after the fact');
+END;
+
+-- A reviewer cannot LIE about who it is. (Sol #4 — the DB took the row's word for it.)
+CREATE TRIGGER IF NOT EXISTS guard_reviewer_identity_must_be_real
+BEFORE INSERT ON verdicts
+WHEN NEW.reviewer_tier <> (SELECT tier FROM seats WHERE id = NEW.reviewer_seat)
+  OR NEW.model_family  <> (SELECT family FROM seats WHERE id = NEW.reviewer_seat)
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a reviewer cannot misrepresent its own tier or family');
+END;
+
+-- Build evidence can only come from the harness. (Sol #9 — the DB accepted a
+-- model-captured screenshot; only the Python helper refused.)
+CREATE TRIGGER IF NOT EXISTS guard_models_cannot_forge_evidence
+BEFORE INSERT ON artifacts
+WHEN NEW.captured_by = 'model' AND NEW.kind NOT IN ('source', 'quote')
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a model may cite a source but may not produce build evidence');
 END;
 
 -- ===========================================================================
--- GUARD 3 — a tester's verdict must CITE GROUND TRUTH.
+-- GUARD 1 — local output never ships unreviewed (§4.3, §9)
+-- Now reads the SNAPSHOT (builder_tier), not the live seat.
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_local_output_needs_review
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+     AND NEW.builder_tier = 'local'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: local-built job requires a passing subscription-tier review before done')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM verdicts v
+        WHERE v.job_id = NEW.id
+          AND v.reviewer_tier IN ('subscription', 'metered')
+          AND v.verdict = 'pass'
+    );
+END;
+
+-- ===========================================================================
+-- GUARD 2 — escalations must be answered, not outrun (§6)
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_unresolved_escalation
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+BEGIN
+    SELECT RAISE(ABORT, 'guard: job has an unresolved needs_human verdict')
+    WHERE EXISTS (
+        SELECT 1 FROM verdicts v WHERE v.job_id = NEW.id AND v.verdict = 'needs_human'
+    );
+END;
+
+-- ===========================================================================
+-- GUARD 3 — a tester's verdict must cite REAL BUILD EVIDENCE.
 --
--- Playwright is the hands; the model is the judgment. This guard governs the hands:
--- a 'tester' verdict cannot be recorded unless the harness has actually captured
--- artifacts for that job. No screenshot, no trace, no verdict.
---
--- This makes "I ran it and it worked" unsayable. The model is not trusted to report
--- what happened — only to interpret what the harness already wrote to disk.
+-- ⚠️ Sol #3: "The 'no screenshot, no verdict' claim is false." My original guard
+-- accepted ANY artifact — including a research source, or an empty row. So a tester
+-- could "pass" a job on the strength of a URL somebody pasted. Now it must be
+-- evidence the HARNESS captured by actually driving the app.
 -- ===========================================================================
 CREATE TRIGGER IF NOT EXISTS guard_tester_must_cite_artifacts
 BEFORE INSERT ON verdicts
 WHEN NEW.role = 'tester'
 BEGIN
-    SELECT RAISE(ABORT, 'guard: a tester verdict requires captured artifacts — no screenshot, no verdict')
+    SELECT RAISE(ABORT, 'guard: a tester verdict requires real captured evidence — no screenshot, no verdict')
     WHERE NOT EXISTS (
-        SELECT 1 FROM artifacts a WHERE a.job_id = NEW.job_id
+        SELECT 1 FROM artifacts a
+        WHERE a.job_id = NEW.job_id
+          AND a.kind IN ('screenshot', 'trace', 'video', 'dom_snapshot')
+          AND a.captured_by IN ('harness', 'playwright')
+          AND COALESCE(a.path, a.value) IS NOT NULL
     );
 END;
 
 -- ===========================================================================
 -- GUARD 4 — a model family may not test its own work.
---
--- Playwright stops a tester FABRICATING what happened. It cannot stop a tester
--- RATIONALIZING it. If Claude builds a form and decides validation fires on blur,
--- Claude will look at a screenshot of validation firing on blur and call it correct
--- — truthfully, and wrongly. Same artifact, same blind spot, rubber stamp.
---
--- Only a different mind catches that. So: the tester's family must differ from the
--- builder's. Enforced, not requested.
+-- Reads the snapshot, so re-pointing a seat later changes nothing.
 -- ===========================================================================
 CREATE TRIGGER IF NOT EXISTS guard_no_self_family_testing
 BEFORE INSERT ON verdicts
 WHEN NEW.role = 'tester'
+     AND NEW.model_family = (SELECT builder_family FROM jobs WHERE id = NEW.job_id)
 BEGIN
-    SELECT RAISE(ABORT, 'guard: a model family may not test its own build')
-    WHERE NEW.model_family = (
-        SELECT s.family FROM jobs j
-        JOIN seats s ON s.id = j.builder_seat
-        WHERE j.id = NEW.job_id
-    );
+    SELECT RAISE(ABORT, 'guard: a model family may not test its own build');
 END;
 
 -- ===========================================================================
--- GUARD 7 — a researcher must be able to show you where it got that.
+-- GUARD 5 — the full panel, always. DISTINCT reviewers.
 --
--- This one exists because of a real failure, in this very project. While
--- researching the seat hierarchy, Atlas confidently reported that Grok Build
--- scored 70.8% on a coding benchmark — and it was the wrong model entirely. It
--- also reported that a web-view app can't get background microphone access, and
--- that was wrong too. Both were fluent, sourced-sounding, and false. Neill caught
--- them by pushing back. Nothing in the system would have.
---
--- A confident wrong answer is worse than no answer, because you ACT on it. Neill
--- nearly made a purchasing decision on the first one.
---
--- So research gets the same treatment as code: cite ground truth, and let a
--- different family check it. For a build, ground truth is a screenshot. For
--- research, ground truth is a SOURCE — a thing someone can go and read.
+-- ⚠️ Sol #7: "The full panel can be faked with duplicate passes." It counted ROWS.
+-- One reviewer could pass the same job six times. Now it counts distinct seats.
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_full_panel
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+BEGIN
+    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+    WHERE (
+        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+        WHERE v.job_id = NEW.id AND v.verdict = 'pass'
+    ) < NEW.required_reviews;
+END;
+
+-- ===========================================================================
+-- GUARD 6 — nothing ships without a passing cross-family tester.
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_ship_requires_a_passing_tester
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status = 'shipped' AND OLD.status <> 'shipped'
+BEGIN
+    SELECT RAISE(ABORT, 'guard: nothing ships without a passing cross-family tester on the record')
+    WHERE OLD.status <> 'done'
+       OR NOT EXISTS (
+           SELECT 1 FROM verdicts v
+           WHERE v.job_id = NEW.id AND v.role = 'tester' AND v.verdict = 'pass'
+       );
+END;
+
+-- ===========================================================================
+-- GUARD 7 — a researcher must show you where it got that.
 -- ===========================================================================
 CREATE TRIGGER IF NOT EXISTS guard_research_must_cite_sources
 BEFORE UPDATE OF status ON jobs
@@ -313,97 +419,46 @@ BEGIN
     WHERE NOT EXISTS (
         SELECT 1 FROM artifacts a
         WHERE a.job_id = NEW.id AND a.kind IN ('source', 'quote')
+          AND COALESCE(a.path, a.value) IS NOT NULL
     );
 END;
 
 -- ===========================================================================
 -- GUARD 8 — a model family may not fact-check its own research.
---
--- Same reasoning as the no-self-testing rule. A family that got a fact wrong will
--- read its own sources and find them convincing — it made the same inference the
--- first time. Only a different mind reads them cold.
 -- ===========================================================================
 CREATE TRIGGER IF NOT EXISTS guard_no_self_family_verifying
 BEFORE INSERT ON verdicts
 WHEN NEW.role = 'verifier'
+     AND NEW.model_family = (SELECT builder_family FROM jobs WHERE id = NEW.job_id)
 BEGIN
-    SELECT RAISE(ABORT, 'guard: a model family may not fact-check its own research')
-    WHERE NEW.model_family = (
-        SELECT s.family FROM jobs j
-        JOIN seats s ON s.id = j.builder_seat
-        WHERE j.id = NEW.job_id
-    );
+    SELECT RAISE(ABORT, 'guard: a model family may not fact-check its own research');
 END;
 
 -- ===========================================================================
--- GUARD 2 — an unresolved 'needs_human' verdict blocks completion.
--- Escalations must be answered, not outrun (§6).
+-- GUARD 9 — spend caps are enforced by the DATABASE, not by good manners.
+--
+-- ⚠️ Sol #8: "Spend caps do not structurally prevent runaway cost." They were a
+-- Python check before dispatch — a classic race (two dispatches both pass the check
+-- before either records spend), and a direct write skipped them entirely. Now the
+-- ledger itself refuses the entry that would breach the cap.
 -- ===========================================================================
-CREATE TRIGGER IF NOT EXISTS guard_unresolved_escalation
-BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'done' AND OLD.status <> 'done'
+CREATE TRIGGER IF NOT EXISTS guard_no_negative_spend
+BEFORE INSERT ON usage
+WHEN NEW.cost_cents < 0
 BEGIN
-    SELECT RAISE(ABORT, 'guard: job has an unresolved needs_human verdict')
-    WHERE EXISTS (
-        SELECT 1 FROM verdicts v
-        WHERE v.job_id = NEW.id AND v.verdict = 'needs_human'
-    );
+    SELECT RAISE(ABORT, 'guard: spend cannot be negative — no unwinding the meter');
 END;
 
--- ===========================================================================
--- GUARD 5 — the full panel, always. No "pick two."
---
--- A job cannot complete without the number of passing reviews it was dispatched
--- with. Chief's memory: "Full set, always. No 'minimum,' no 'pick two,' no
--- 'optional depending on scope.'" An agent in a hurry can no longer decide that
--- this particular change didn't really need the whole gauntlet.
--- ===========================================================================
-CREATE TRIGGER IF NOT EXISTS guard_full_panel
-BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+CREATE TRIGGER IF NOT EXISTS guard_daily_cap_is_hard
+BEFORE INSERT ON usage
 BEGIN
-    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
-    WHERE (
-        SELECT COUNT(*) FROM verdicts v
-        WHERE v.job_id = NEW.id AND v.verdict = 'pass'
-    ) < NEW.required_reviews;
-END;
-
--- ===========================================================================
--- GUARD 6 — a job ships when the GATES say so, not when an agent feels good.
---
--- OWNER OVERRIDE (2026-07-13): "I don't want shipped depending on me. If it is
--- reviewed and tested, then it ships."
---
--- The old rule (from Chief's memory: "Chief must NEVER say 'shipped' unless Neill
--- has confirmed it works on his device") was written when the only protection was
--- Forge's DISCIPLINE — a prompt, which a model can talk itself out of. It was a
--- human backstop for a pipeline with no teeth.
---
--- The pipeline has teeth now. So the backstop moves from Neill to the schema:
--- a job may auto-ship, but ONLY if it cleared every gate that used to require him.
---
---   • it reached 'done' (which already means: full panel, no unresolved escalation,
---     and local work carries a paid-seat signature)
---   • a TESTER drove the running app and PASSED it
---   • that tester cited real Playwright artifacts (guard 3)
---   • that tester was NOT the builder's own family (guard 4)
---
--- Neill is out of the critical path. He is NOT out of the loop — every ship is on
--- the record and reads back in the morning report.
--- ===========================================================================
-CREATE TRIGGER IF NOT EXISTS guard_ship_requires_a_passing_tester
-BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'shipped' AND OLD.status <> 'shipped'
-BEGIN
-    SELECT RAISE(ABORT, 'guard: nothing ships without a passing cross-family tester on the record')
-    WHERE OLD.status <> 'done'
-       OR NOT EXISTS (
-           SELECT 1 FROM verdicts v
-           WHERE v.job_id = NEW.id
-             AND v.role = 'tester'
-             AND v.verdict = 'pass'
-       );
+    SELECT RAISE(ABORT, 'guard: this seat is over its daily cap')
+    WHERE (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+      AND (
+        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+         WHERE seat_id = NEW.seat_id AND day = date('now')
+      ) + NEW.cost_cents
+      > (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id);
 END;
 
 -- Keep updated_at honest.

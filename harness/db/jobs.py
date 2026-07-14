@@ -104,12 +104,22 @@ def create_job(
     the request, which reads back the owner's own paragraph at him — exactly what a
     colleague would never do.
     """
+    row = seat(conn, builder_seat)
+    if row is None:
+        raise ValueError(f"unknown builder seat: {builder_seat}")
+
+    # Snapshot who built this, AT BUILD TIME. Sol's cross-family review found that
+    # reading the builder's tier live meant re-tiering a local seat retroactively
+    # legitimized its old unreviewed work. What a seat is today cannot change what
+    # it was. The schema then freezes these columns.
     cur = conn.execute(
         """
-        INSERT INTO jobs (request, builder_seat, origin, parent_job_id, task_name)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO jobs (request, builder_seat, builder_tier, builder_family,
+                          origin, parent_job_id, task_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (request, builder_seat, origin, parent_job_id, task_name),
+        (request, builder_seat, row["tier"], row["family"],
+         origin, parent_job_id, task_name),
     )
     return int(cur.lastrowid)
 
@@ -308,6 +318,7 @@ def over_budget(conn: sqlite3.Connection, seat_id: str) -> bool:
     return spend_today(conn, seat_id) >= int(row["daily_cap_cents"])
 
 
+@_guarded
 def record_usage(
     conn: sqlite3.Connection,
     seat_id: str,
@@ -316,6 +327,12 @@ def record_usage(
     input_tokens: int = 0,
     output_tokens: int = 0,
 ) -> None:
+    """Record spend. The DATABASE refuses an entry that would breach the daily cap.
+
+    This used to be a Python check before dispatch — which Sol correctly called a
+    race (two dispatches both pass the check before either records spend) and easily
+    bypassed by any direct write. The ledger itself now says no.
+    """
     conn.execute(
         """
         INSERT INTO usage (seat_id, job_id, input_tokens, output_tokens, cost_cents)
