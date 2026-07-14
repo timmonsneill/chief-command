@@ -1,0 +1,47 @@
+Review this ENTIRE system architecture adversarially. The owner (Neill) is NON-TECHNICAL and cannot read code — write your answer in PLAIN ENGLISH for him. Be blunt. Your job is to find what will actually break, not to be encouraging. You have reviewed parts of this before and found serious flaws each time; assume there are more.
+
+THE SYSTEM: a voice-first harness that dispatches AI coding agents to build software. Neill talks to it while driving. He is not a programmer.
+
+=== 1. THE VOICE LAYER ===
+A realtime speech-to-speech model (gpt-realtime-2.1) is the "mouth". It has EXACTLY ONE tool: ask_chief. It makes no decisions, answers nothing itself, and forwards everything Neill says verbatim — including "yes" and "no" — to Chief. It speaks Chief's answer back in its own words. Rationale: two earlier designs where the voice classified utterances both leaked ("Do you think this is safe?" was treated as a command because it starts with "do"; and a "confirmation" like "yes — skip the backup" turns a safe plan into a catastrophic one).
+
+=== 2. CHIEF ===
+A text model (gpt-5.6-terra by default, gpt-5.6-sol when Neill pushes back) running as a LIVE STREAMING SESSION over the API — it holds conversation history, streams answers sentence-by-sentence so the voice starts speaking before Chief finishes thinking. Measured: ~1.4s to first words in real multi-turn conversation.
+Chief reads every instruction, decides, dispatches builder agents, and pushes back on bad ideas. Chief is explicitly NOT a security boundary (you yourself said "a smarter model is not a security boundary" — and under pressure, Sol dropped a safety objection on a destructive deletion while cheaper models held).
+
+=== 3. THE BUILDERS ===
+Named lanes (Riggs=backend, Finn=frontend, Nova=glue, Forge=integration tester, Atlas=researcher, plus reviewers). Each lane has its own accumulated MEMORY (project conventions, past mistakes) that is model-agnostic — swap the model behind a lane, keep the scars. Models: Claude Opus, GPT-5.6 (sol/terra/luna), Grok 4.5, and a free local Qwen 7B ("Coal"). Builders run as CLI subprocesses (free on subscription).
+
+=== 4. MODEL TIERING ===
+Nothing gets the top model by default. It's EARNED: the owner asks; OR the work is dangerous (auth/money/patient data/deletions/migrations); OR it already failed twice; OR a reviewer flagged p0/p1; OR it's a decision that's expensive to reverse. Everything else runs cheap. Rationale: rate limits (not money) are the binding constraint on autonomous work, and you cannot buy your way out of a weekly cap.
+
+=== 5. THE QUALITY GATES (~24 SQLite triggers — the write physically fails) ===
+- Local-model output cannot be marked done without a passing paid-tier review
+- A tester cannot record "pass" without real captured Playwright screenshots ("I ran it and it worked" is unsayable)
+- A model family cannot test or fact-check its own work
+- ONE failing review stops the job — passes cannot outvote a fail
+- A job cannot be created already "done"; verdicts are append-only; a reviewer cannot misrepresent its own tier/family
+- Builder identity is snapshotted at creation and frozen (re-tiering a seat can't retroactively legitimize old work)
+- Per-seat, per-role, and monthly spend caps enforced in the database
+
+=== 6. CAPABILITY GATES (built after your last review) ===
+A table of what each agent may do. Safe: read code, write in own worktree, run tests, open a PR. Denied by default: touch production, delete data, deploy, merge to main, force push, read secrets, send external requests, spend money. Anything irreversible needs a single-use approval naming the exact action, with what was READ BACK ALOUD to Neill, and a recovery plan.
+
+=== 7. THE FLAW I HAVE ALREADY FOUND MYSELF ===
+I now believe the capability gates are theatre. They gate the RECORD, not the ACTION. A database row saying "agents may not touch production" is a piece of paper — if the agent has a shell, it CAN touch production and the database simply never finds out. I built a permissions table, not a permission system. Real containment would have to be at the execution layer (sandbox, no credentials, no network to prod, restricted filesystem).
+
+=== 8. OPEN QUESTION: OPENCLAW ===
+Considering a hybrid: use OpenClaw (a popular open-source agent platform) as the execution ENGINE (parallel non-blocking dispatch, scheduling, sessions, daemon) and keep our SQLite layer as the safety/record gates on top.
+
+=== WHAT I WANT FROM YOU ===
+
+Neill's questions, verbatim: "where are the gaps still. will it work. will it be conversational when I am working through ideas with dispatch/chief."
+
+1. Am I right that the capability gates are theatre? Is there ANY version where a database-level permission table provides real containment, or must it be at the execution layer?
+2. What ELSE is theatre in this design — what other guarantee am I claiming that isn't actually enforced?
+3. Will the conversation actually work in practice? Every utterance goes to Chief (~1.4s to first words, streaming). What breaks in real fast back-and-forth while driving? Interruptions, "no wait", changing his mind mid-sentence, a slow turn while he's already talking again, transcription errors on a highway.
+4. What is MISSING from this design entirely — what have we not thought about at all?
+5. Rank the top 5 things that will actually bite him, most likely first.
+6. Will it work? Straight answer.
+
+Be specific. Name the exact failure. Plain English.

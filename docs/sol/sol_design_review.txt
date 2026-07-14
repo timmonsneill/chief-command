@@ -1,0 +1,28 @@
+You have reviewed this system three times and found serious weaknesses each time — nine flaws in the database rules, then eighteen more, then the finding that the "capability gate" was ineffective because it governed the record rather than the action. Your last review concluded: "OpenClaw drives the car. Chief Command decides whether the gate opens. The coding agents never receive the gate key." And: "stop calling the current database a physical safety boundary until it controls the actual doors."
+
+The owner (Neill — NON-TECHNICAL, cannot read code) has now instructed that NOTHING further be built until you approve the design. The document below is the corrected architecture. It has NOT been implemented. Your approval is the gate.
+
+READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
+You may also read the existing code under /Users/user/code-projects/chief-command/harness/ to check whether the document's claims match what is actually there.
+
+YOUR JOB: find what is still wrong with this design. Do not be encouraging. You are the last check before it gets built.
+
+Address each of these:
+
+1. THE CORE CLAIM is "a missed checkpoint must be harmless." Is the design actually achieving that? Walk it through concretely: if one agent runner does not pass its actions through the pre-action policy check (which you previously said WILL happen for some runner), what harm can it still cause, given the stated controls — GitHub branch protection, credentials absent from the machine, strict kernel sandbox, no write access to the safety database, a disposable working copy per agent, and a separate release service? Name anything harmful that survives all of those.
+
+2. WHAT REMAINS INEFFECTIVE? Which guarantee in the document is claimed but is not actually enforced by something that cannot be reasoned away by a model — i.e. still resting on good behaviour, configuration, or a record rather than a real boundary?
+
+3. THE SEAMS. Name every place the design assumes an action passes through a checkpoint when it might not: different agent runners, MCP servers, hooks, scheduled jobs, the voice path, the release service itself, and OpenClaw upgrades.
+
+4. THE RELEASE SERVICE holds all the irreversible power (merge to main, deploy, spend). What compromises it? How can it trust that "the database says this version passed" if the database is a plain file? What prevents an agent from simply calling the release service directly?
+
+5. CREDENTIAL ABSENCE. Is this achievable in practice on a personal Mac that the owner ALSO uses for real work, where production credentials must exist somewhere for his own legitimate use? Where do they leak back into the agents' reach?
+
+6. THE VOICE AND CHIEF LAYER. Any problems with: the voice as a pure relay with a single tool; Chief as a live streaming session (~1.4s to first words); Terra as Chief; an 8-second timeout that reports "nothing started"? Consider a moving car, interruptions, partial transcripts, the owner changing his mind mid-sentence, and what happens as Chief's conversation history grows long.
+
+7. WHAT IS MISSING ENTIRELY from this document?
+
+8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked most important first. If yes, say so plainly and name the top three risks to watch during the build.
+
+Write in PLAIN ENGLISH for a non-technical reader. Be specific. Name exact failures, not categories.

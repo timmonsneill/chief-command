@@ -1,0 +1,41 @@
+You are advising a NON-TECHNICAL owner (Neill) on an architecture decision. He cannot read code. Write your answer in PLAIN ENGLISH for him — no jargon, no filenames, no bullets-as-crutch. Be blunt and specific. Your job is to find what's wrong with the reasoning, not to be encouraging.
+
+THE SITUATION
+
+Neill is building a voice-first system that dispatches AI coding agents to build software for him. He talks to it while driving. The original plan was to build on OPENCLAW — a popular open-source agent platform (very widely used; provides a persistent daemon, multi-provider model routing, parallel non-blocking agent spawning, session management, agent memory, a plugin ecosystem, a web UI, and Tailscale/launchd integration).
+
+Over about 24 hours, his AI assistant (Claude) instead built a PARALLEL system: a SQLite job store with ~24 database triggers that enforce quality gates, plus its own dispatch (shelling out to CLI tools), its own web UI, its own memory (per-project and per-lane), its own budget caps, and capability gates.
+
+WHAT THE CUSTOM LAYER ENFORCES (these are database triggers — the write physically fails):
+- A job built by the free local model cannot be marked done without a passing review from a paid-tier model
+- A tester cannot record a "pass" without real captured browser screenshots — "I ran it and it worked" is unsayable
+- A model family cannot test or fact-check its own work (Claude builds it, Claude can't test it)
+- A single failing review stops the job — passes cannot outvote a fail
+- A job cannot be created already marked "done"; a verdict cannot be edited into a pass; a reviewer cannot misrepresent its own tier/family
+- Agents have NO dangerous capabilities by default (no production access, no deploy, no delete, no secrets, no spending). Anything irreversible needs a single-use, read-back-aloud approval with a recovery plan
+- Per-seat and monthly spend caps enforced at the database level
+
+WHAT OPENCLAW HAS THAT THE CUSTOM LAYER DOESN'T:
+- Parallel, non-blocking agent dispatch (fire 8 agents, get IDs back instantly). The custom layer shells out to CLI tools synchronously.
+- Scheduled/cron autonomy (overnight runs)
+- Battle-tested session management and memory
+- A plugin ecosystem
+- Thousands of users finding its bugs
+
+NEILL'S SKEPTICISM (verbatim): "openclaw is very popular so I find it hard to believe that in 24 hrs we built something better."
+
+THE PROPOSED SYNTHESIS: Use OpenClaw as the ENGINE (dispatch, parallelism, sessions, daemon, scheduling) and keep the custom SQLite layer as the SAFETY GATES on top. OpenClaw can spawn whatever it likes; it cannot make a job "legal" that the database says isn't.
+
+QUESTIONS FOR YOU:
+
+1. Is that synthesis actually coherent, or is it wishful thinking? Can a safety layer meaningfully gate an execution engine it doesn't control? What are the concrete ways this breaks — where can OpenClaw do something the database never sees?
+
+2. Is Neill's skepticism right? Be honest: is the custom layer likely to be worse than what a large open-source project has already solved — buggier, less tested, a maintenance burden that will rot? Or is it genuinely doing something OpenClaw doesn't do?
+
+3. What is the ACTUAL cost of maintaining a custom harness alongside a fast-moving dependency (OpenClaw shipped 3 breaking releases in 90 days)? Be concrete about what will break and when.
+
+4. If you were advising him with his interests only: adopt OpenClaw fully and rebuild the gates as OpenClaw plugins? Drop OpenClaw entirely and finish the custom system? Or the hybrid? Give ONE clear recommendation and defend it.
+
+5. What is the single biggest risk in whichever path you recommend, and how would you mitigate it?
+
+Be concrete. If the hybrid has an integration seam that will leak, name exactly where.
