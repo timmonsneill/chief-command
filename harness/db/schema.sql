@@ -27,6 +27,35 @@ CREATE TABLE IF NOT EXISTS seats (
     family        TEXT NOT NULL,             -- 'gpt' | 'claude' | 'grok' | 'qwen'
     -- tier drives the review guard below. 'local' output is never trusted on its own.
     tier          TEXT NOT NULL CHECK (tier IN ('local', 'subscription', 'metered')),
+    -- ═══════════════════════════════════════════════════════════════════════
+    -- MODEL TIERS. Owner (2026-07-14):
+    --     "If we do highest model every time for every build, on autonomous work,
+    --      Claude and ChatGPT are gonna bottom out. I need us to build in model
+    --      tiering as well."
+    --
+    -- He's right, and it's the difference between a system that runs for a month and
+    -- one that dies on Thursday. Rate limits are the binding constraint on autonomous
+    -- work — NOT money (Claude and OpenAI are flat-rate). You cannot buy your way out
+    -- of a weekly cap. You can only spend it wisely.
+    --
+    -- So every seat carries THREE models, and the harness picks by what the work
+    -- actually deserves:
+    --
+    --   light     the cheap one. Boilerplate, scaffolding, small fixes, quick answers.
+    --   standard  the default. Most real work.
+    --   heavy     the top of the line. Reserved, and it has to be EARNED.
+    --
+    -- Nothing gets `heavy` by default. It's earned by: an explicit ask ("think hard"),
+    -- a risky area (auth, money, data), a repeat failure, or a major decision. See
+    -- tiering.py — the whole point is that the escalation is a rule, not a vibe.
+    -- ═══════════════════════════════════════════════════════════════════════
+    model_light    TEXT,     -- e.g. claude-haiku / gpt-5.6-luna
+    model_standard TEXT,     -- e.g. claude-sonnet / gpt-5.6-terra
+    model_heavy    TEXT,     -- e.g. claude-opus / gpt-5.6-sol  (EARNED, never default)
+    effort_light    TEXT DEFAULT 'low',
+    effort_standard TEXT DEFAULT 'medium',
+    effort_heavy    TEXT DEFAULT 'high',
+
     -- CAPS ARE PER-ROLE, not just per-seat. Owner's call (2026-07-13):
     --     "it can review as much as it wants more or less, but shouldn't build as
     --      much as claude and chat"
@@ -47,6 +76,62 @@ CREATE TABLE IF NOT EXISTS seats (
     enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     notes         TEXT
 );
+
+-- ---------------------------------------------------------------------------
+-- Projects: the top-level thing work belongs to. Each has its OWN memory.
+--
+-- Owner: "ability to see a projects tab and each project has its own memory,
+-- timeline/planning."
+--
+-- This matters more than it looks. Memory that isn't scoped to a project leaks:
+-- lessons from the EMR bleed into the harness, conventions from one codebase get
+-- applied to another. Chief already keeps per-AGENT memory; this is per-PROJECT,
+-- and the two are different axes. Riggs knows how HE works; the project knows how
+-- IT works.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS projects (
+    id            TEXT PRIMARY KEY,          -- 'chief', 'arch', 'jess'
+    name          TEXT NOT NULL,
+    repo_path     TEXT,
+    description   TEXT,
+    -- Where this project's own memory lives. Loaded into context for any job on it.
+    memory_dir    TEXT,
+    color         TEXT,                      -- the UI reads this
+    archived      INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Project memory: facts that belong to the PROJECT, not to an agent and not to a job.
+-- "The API returns snake_case." "Never touch the billing table directly."
+CREATE TABLE IF NOT EXISTS project_memory (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL DEFAULT 'lesson'
+                  CHECK (kind IN ('lesson', 'convention', 'constraint', 'decision', 'gotcha')),
+    fact          TEXT NOT NULL,
+    -- Where it came from, so a wrong lesson can be traced and killed.
+    learned_from  INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pmem_project ON project_memory(project_id);
+
+-- The plan. What's coming, in order. This is the timeline the UI draws.
+CREATE TABLE IF NOT EXISTS plan_items (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,
+    detail        TEXT,
+    phase         TEXT,                      -- 'phase 1', 'phase 2'…
+    status        TEXT NOT NULL DEFAULT 'planned'
+                  CHECK (status IN ('planned', 'active', 'blocked', 'done', 'dropped')),
+    blocked_on    TEXT,                      -- plain English. "waiting on Neill to log in"
+    job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_items(project_id, position);
 
 -- ---------------------------------------------------------------------------
 -- Jobs: one row per dispatched unit of work. This is the audit trail.
@@ -72,6 +157,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- that might be confabulating — and a confident wrong answer is worse than no answer,
     -- because you act on it.
     kind          TEXT NOT NULL DEFAULT 'build' CHECK (kind IN ('build', 'research')),
+
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+
+    -- Which tier this job actually ran at, and WHY. The 'why' matters: if we're
+    -- burning heavy tier on boilerplate, this column is how we find out.
+    tier          TEXT NOT NULL DEFAULT 'standard'
+                  CHECK (tier IN ('light', 'standard', 'heavy')),
+    tier_reason   TEXT,
 
     builder_seat  TEXT NOT NULL REFERENCES seats(id),
     -- SNAPSHOTTED AT CREATION. Sol (cross-family review, 2026-07-13) found that

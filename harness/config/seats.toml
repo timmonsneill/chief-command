@@ -70,12 +70,43 @@ notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok].
 // That is the reviewer-gauntlet shape (§6), native.
 //   Terminal-Bench 2.1: 88.8% single-agent / 91.9% Ultra — SOTA for agentic work.
 // ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL TIERS — nothing gets the top model by default. Owner (2026-07-14):
+//     "If we do highest model every time for every build, on autonomous work, Claude
+//      and ChatGPT are gonna bottom out."
+//
+// THE KEY FACT: the binding constraint on autonomous work is RATE LIMITS, not money.
+// Claude and OpenAI are both flat-rate — you already paid. But you CANNOT BUY YOUR WAY
+// OUT OF A WEEKLY CAP. Every top-tier call spent on boilerplate is one you don't have
+// left for the thing that actually needed it.
+//
+// So the top tier is EARNED: you ask for it, the work is dangerous (auth/money/data),
+// it already failed twice, a reviewer flagged p0/p1, or it's a decision that's
+// expensive to reverse. Everything else runs light or standard. See tiering.py — the
+// escalation is a RULE, not a vibe, and every job records which tier it got AND WHY.
+// ═══════════════════════════════════════════════════════════════════════════
+
 [seats.brain]
 provider = "codex"
 model = "gpt-5.6-sol"
 tier = "subscription"
-reasoning_effort = "high"
-mode = "ultra"                              // coordinated subagent decomposition
+
+// Owner: "Sol needs to be the brain, but prolly doesn't need to be ultra for most
+// convos. Maybe if it's managing a major spec and deciding builds and such, but
+// generally lower effort in convo."
+//
+// Measured, and he's right: Sol at FULL effort took over FIVE MINUTES on a real
+// question. In a conversation that isn't thorough — it's a hang. Claude at ~8s gave a
+// genuinely better answer. So Sol's heavy tier is reserved for what it's actually for:
+// specs, architecture, and pushback.
+model_light    = "gpt-5.6-luna"             // quick takes
+model_standard = "gpt-5.6-terra"            // most work
+model_heavy    = "gpt-5.6-sol"              // specs, decisions, pushback. EARNED.
+effort_light    = "low"
+effort_standard = "medium"
+effort_heavy    = "high"
+
+mode = "ultra"                              // ONLY at heavy. Coordinated subagents.
 max_threads = 6                             // spec said 8; the real default is 6
 max_depth = 1
 notes = "OAuth is TOLERATED, not sanctioned. Most likely seat to break. Keep API-key swap ready."
@@ -111,7 +142,24 @@ provider = "codex"
 model = "gpt-5.6-sol"
 tier = "subscription"
 worktree_isolated = true
+
+model_light    = "gpt-5.6-luna"             // scaffolding, boilerplate, first drafts
+model_standard = "gpt-5.6-terra"            // the bulk of real building
+model_heavy    = "gpt-5.6-sol"              // auth, money, data, or it failed twice
 notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK below."
+
+// The Claude builders — Riggs (backend), Finn (frontend), Nova (glue). Same lanes,
+// same memory, tiered the same way. Opus is the best coder we own (87.6% SWE-bench);
+// it is also the one most likely to burn a weekly cap, so it is EARNED like the rest.
+[seats.riggs]
+provider = "claude-cli"
+model = "claude-opus-4-8"
+family = "claude"
+tier = "subscription"
+model_light    = "claude-haiku-4-5"
+model_standard = "claude-sonnet-5"
+model_heavy    = "claude-opus-4-8"          // the best coder we have. EARNED.
+notes = "Backend lane. Memory belongs to the LANE, not the model — swap the model, keep the scars."
 
 // ---------------------------------------------------------------------------
 // GROK — builder + cross-family reviewer.
@@ -208,6 +256,16 @@ model = "claude-opus-4-8"
 tier = "subscription"                       // NOT credits — the pool was paused, never shipped
 optional = true
 max_calls_per_day = 25                      // keeps escalation from eating interactive headroom
+
+// Owner: "Reviewers prolly need to be opus and one model down for ChatGPT, unless we
+// say to go high review or we have a good trigger to do higher reviews."
+//
+// THE RULE: A REVIEWER IS NEVER WEAKER THAN THE BUILDER. A junior checking a senior's
+// work is theatre — it produces a green tick and no safety. So review tier FLOORS at
+// whatever tier built the thing. And reviews are cheap anyway (read-heavy, ~1/10th the
+// tokens of a build), so generosity here costs far less than generosity on the build.
+model_standard = "claude-sonnet-5"          // ordinary reviews
+model_heavy    = "claude-opus-4-8"          // dangerous areas, heavy builds, or you asked
 notes = "Low-volume escalation. Strongest model + 4th model family. Droppable by design."
 
 // ===========================================================================

@@ -34,6 +34,12 @@ class Seat:
     daily_cap_cents: Optional[int] = None   # hard ceiling across everything
     build_cap_cents: Optional[int] = None   # ration the EXPENSIVE work
     review_cap_cents: Optional[int] = None  # reviewing is cheap — be generous
+    # Three models per seat. NOTHING gets `heavy` by default — it has to be earned.
+    # Rate limits, not money, are the binding constraint on autonomous work, and you
+    # cannot buy your way out of a weekly cap.
+    model_light: Optional[str] = None
+    model_standard: Optional[str] = None
+    model_heavy: Optional[str] = None
     enabled: bool = True
     notes: str = ""
 
@@ -70,8 +76,9 @@ def upsert_seat(conn: sqlite3.Connection, seat: Seat) -> None:
     conn.execute(
         """
         INSERT INTO seats (id, provider, model, family, tier, daily_cap_cents,
-                           build_cap_cents, review_cap_cents, enabled, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           build_cap_cents, review_cap_cents,
+                           model_light, model_standard, model_heavy, enabled, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             provider = excluded.provider,
             model = excluded.model,
@@ -80,11 +87,15 @@ def upsert_seat(conn: sqlite3.Connection, seat: Seat) -> None:
             daily_cap_cents = excluded.daily_cap_cents,
             build_cap_cents = excluded.build_cap_cents,
             review_cap_cents = excluded.review_cap_cents,
+            model_light = excluded.model_light,
+            model_standard = excluded.model_standard,
+            model_heavy = excluded.model_heavy,
             enabled = excluded.enabled,
             notes = excluded.notes
         """,
         (seat.id, seat.provider, seat.model, seat.family, seat.tier,
          seat.daily_cap_cents, seat.build_cap_cents, seat.review_cap_cents,
+         seat.model_light, seat.model_standard, seat.model_heavy,
          int(seat.enabled), seat.notes),
     )
 
