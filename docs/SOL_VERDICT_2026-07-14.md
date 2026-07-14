@@ -154,10 +154,25 @@ valuable, it needs:
 
 ---
 
-## Caveat worth keeping
+## Caveat worth keeping — now RESOLVED (verified 2026-07-14)
 
-Sol's "I proved that…" claims (deletable fail verdicts, fake screenshot path accepted,
-pre-granted approval) are **specific and checkable** — the exploit attempts are in its
-transcript. Verify them against the schema before treating them as fact. They are
-almost certainly right, but this project's whole lesson is not to take a model's word
-for it.
+Sol's three "I proved that…" claims were re-run against the real `schema.sql`, not taken
+on its word (`scratchpad/verify_sol_exploits.py`, deleted after use; result recorded
+here). **All three reproduced.**
+
+1. **Deletable failing verdict — CONFIRMED, now FIXED.** "Append-only" only blocked
+   UPDATE. A fail could be DELETED, after which the failing-review guard saw nothing.
+   Added a `BEFORE DELETE` guard; verdicts are now un-deletable. Regression test added.
+2. **Approval born already-granted — CONFIRMED, now FIXED.** Every approval guard fired on
+   UPDATE only — the same "born done" hole from round 1, never applied here. A row
+   inserted already-granted with no recovery plan went straight into `live_approvals`.
+   Added a `BEFORE INSERT` guard; an approval must be born ungranted and granted through a
+   read-back. Regression test added.
+3. **Passing tester verdict on a nonexistent screenshot path — CONFIRMED, deliberately NOT
+   fixed in the schema.** A SQL trigger cannot check whether a file exists on disk. This
+   moves to the harness/gatekeeper: the harness owns evidence capture and hands the tester
+   only artifact IDs it wrote this run, and the gatekeeper confirms the file exists before
+   release. See `ARCHITECTURE_v2_2026-07-14.md` §4.
+
+79 tests pass (3 new round-3 regressions in `test_sol_attacks.py`). This is the project's
+whole lesson in one exercise: the claims were right, and we only know because we ran them.
