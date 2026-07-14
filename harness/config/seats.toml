@@ -204,6 +204,52 @@ notes = "Low-volume escalation. Strongest model + 4th model family. Droppable by
 // need it.
 // ===========================================================================
 
+// ===========================================================================
+// VOICE — how much it tells you, and when.
+//
+// THE RULE: one event stream, two renderings. The voice and the text are not two
+// systems — they read the SAME job records at different verbosity. Anything the
+// voice says, you could have read. Anything you can read, the voice can summarize.
+//
+//   VOICE  → a sentence.  "Riggs is on it."
+//   TEXT   → the terminal. Every tool call, every file, every result.
+//
+// Voice escalates on request. That's the interaction model: fast by default, deep
+// on demand — the same principle that put a quick model at the mouth and a slow one
+// at the brain.
+//
+// SHORT IS NOT A STYLE PREFERENCE — IT'S THE BILL. Audio output is 55-70% of the
+// realtime cost and runs ~16x the price of the same content as text. A chatty voice
+// is an expensive voice. §5.3 already asked for short spoken summaries with full
+// detail in the log; it was written for latency and it pays off twice.
+// ===========================================================================
+[voice]
+default_depth = "brief"                     // brief | normal | detailed
+
+// What each depth actually says:
+//   brief    "Riggs is on it."
+//   normal   "Riggs, on Claude — editing routes.py."
+//   detailed "Riggs on Claude: read auth.py, then edited routes.py, then ran tests.
+//             Panel: 5 of 6 passed, 3 different models."
+//
+// ALWAYS name the model at 'normal' and above. "Riggs" alone doesn't tell you
+// whether your auth module was built by your best coder or your cheapest one.
+speak_the_model = true
+
+// Phrases that pull the voice deeper into the same stream the text channel shows.
+escalate_on = [
+  "what's it doing", "tell me more", "details", "go deeper",
+  "what happened", "walk me through it", "why",
+]
+
+// Volunteer bad news; stay quiet about good news unless asked. Nobody wants a
+// running commentary on a build that's going fine.
+interrupt_me_on = ["failed", "needs_human", "over_budget", "guard_blocked"]
+stay_quiet_on   = ["thinking", "read", "edit"]
+
+// Spoken replies get truncated to this. The full text is always in the log.
+max_spoken_seconds = 12
+
 // ---------------------------------------------------------------------------
 // GAUNTLET (§6) — reviewers run in PARALLEL against one frozen bundle.
 // The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE

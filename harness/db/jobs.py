@@ -96,13 +96,20 @@ def create_job(
     builder_seat: str,
     origin: str = "text",
     parent_job_id: Optional[int] = None,
+    task_name: Optional[str] = None,
 ) -> int:
+    """task_name is the 2-4 word handle the voice will use ("the rate limiter").
+
+    The mouth coins it at dispatch. Without one the voice falls back to truncating
+    the request, which reads back the owner's own paragraph at him — exactly what a
+    colleague would never do.
+    """
     cur = conn.execute(
         """
-        INSERT INTO jobs (request, builder_seat, origin, parent_job_id)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO jobs (request, builder_seat, origin, parent_job_id, task_name)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (request, builder_seat, origin, parent_job_id),
+        (request, builder_seat, origin, parent_job_id, task_name),
     )
     return int(cur.lastrowid)
 

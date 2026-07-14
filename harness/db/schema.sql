@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   TEXT,
 
     request       TEXT NOT NULL,             -- what was asked, verbatim (§7)
+    -- A 2-4 word handle the mouth coins at dispatch: "the rate limiter".
+    -- The VOICE says this. The TEXT shows `request` in full. Echoing a man's own
+    -- paragraph back at him is not how a colleague talks.
+    task_name     TEXT,
     origin        TEXT NOT NULL DEFAULT 'text'
                   CHECK (origin IN ('text', 'voice', 'cron', 'relay')),  -- 'relay' = Jess (§10)
 
@@ -112,6 +116,43 @@ CREATE TABLE IF NOT EXISTS verdicts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_verdicts_job ON verdicts(job_id);
+
+-- ---------------------------------------------------------------------------
+-- Events: the live activity stream. What an agent is doing RIGHT NOW.
+--
+-- This is what makes the text channel feel like the Claude Code terminal — you
+-- watch Riggs read auth.py, edit routes.py, run pytest, and come back green.
+-- Without it the harness can only tell you a job "happened," which is useless
+-- while you're waiting and only mildly interesting afterward.
+--
+-- ONE STREAM, TWO RENDERINGS (this is the key design decision):
+--   VOICE reads jobs.spoken_summary — a sentence. "Riggs is on it, two minutes."
+--   TEXT  reads THIS table in full   — every tool call, every file, every result.
+-- Same truth, different verbosity. The voice can escalate into this table on
+-- request ("what's it actually doing?") — see [voice] in seats.toml.
+--
+-- Note `lane` and `model` are BOTH recorded. The lane (Riggs) carries the memory
+-- and the conventions; the model is whoever is sitting in that chair today. You
+-- must always be able to see which — otherwise you can't tell whether your auth
+-- module was built by your best coder or your cheapest one.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY,
+    job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    seat_id       TEXT NOT NULL REFERENCES seats(id),
+    lane          TEXT NOT NULL,             -- 'riggs' | 'finn' | 'nova' | 'forge' ...
+    model         TEXT NOT NULL,             -- who is actually in the chair right now
+    family        TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN (
+                      'dispatched', 'thinking', 'read', 'edit', 'write',
+                      'command', 'test_run', 'browse', 'verdict', 'done', 'error'
+                  )),
+    target        TEXT,                      -- the file / command / URL it touched
+    detail        TEXT,                      -- one line, terminal-style
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, id);
 
 -- ---------------------------------------------------------------------------
 -- Artifacts: GROUND TRUTH. Captured by the harness, not reported by a model.
