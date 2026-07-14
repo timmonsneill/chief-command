@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Chief — Voice</title>
+<style>
+  :root{
+    --void:#05070A; --panel:#0F141C; --raised:#151C26; --rule:#1D2734;
+    --ink:#F2F6FB; --dim:#7E90A8; --faint:#4A5A70;
+    --live:#00E5A0; --think:#FFC53D; --bad:#FF4D4D;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,system-ui,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{margin:0;background:var(--void);color:var(--ink);font-family:var(--sans);
+       display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;
+       padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+
+  header{padding:16px;border-bottom:1px solid var(--rule);display:flex;
+         align-items:center;justify-content:space-between}
+  .brand{font-family:var(--mono);font-weight:700;font-size:16px;letter-spacing:-.02em}
+  .state{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+         color:var(--faint);display:flex;align-items:center;gap:7px}
+  .state i{width:7px;height:7px;border-radius:50%;background:var(--faint);display:block}
+  .state.live i{background:var(--live);box-shadow:0 0 10px var(--live);animation:pulse 2s infinite}
+  .state.think i{background:var(--think);box-shadow:0 0 10px var(--think);animation:pulse .8s infinite}
+  .state.bad i{background:var(--bad)}
+  @keyframes pulse{50%{opacity:.35}}
+
+  main{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px}
+  .turn{max-width:88%;padding:13px 16px;font-size:16px;line-height:1.55;border:1px solid var(--rule)}
+  .turn.you{align-self:flex-end;background:var(--raised);border-left:2px solid var(--ink)}
+  .turn.chief{align-self:flex-start;background:var(--panel);border-left:2px solid var(--live)}
+  .turn.hold{align-self:flex-start;background:transparent;border-left:2px solid var(--think);
+             color:var(--dim);font-style:italic}
+  .turn .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.2em;text-transform:uppercase;
+             color:var(--faint);margin-bottom:6px}
+  .hint{color:var(--faint);text-align:center;margin:auto;max-width:30ch;line-height:1.6;font-size:14px}
+
+  footer{padding:18px 18px calc(18px + env(safe-area-inset-bottom));border-top:1px solid var(--rule)}
+  .mic{width:100%;padding:20px;border:0;background:var(--live);color:#04120C;
+       font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.1em;
+       text-transform:uppercase;cursor:pointer}
+  .mic.on{background:var(--bad);color:#fff}
+  .mic:disabled{opacity:.4}
+  .note{font-size:11.5px;color:var(--faint);text-align:center;margin-top:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">CHIEF</div>
+  <div class="state" id="state"><i></i><span id="stateLabel">off</span></div>
+</header>
+
+<main id="log">
+  <div class="hint" id="hint">
+    Tap the button once.<br>Then just talk — no button holding, and you can cut me off any time.
+  </div>
+</main>
+
+<footer>
+  <button class="mic" id="mic">Start talking</button>
+  <div class="note" id="note">Everything you say goes to Chief. Chief decides, and can push back.</div>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+let pc = null, stream = null, dc = null, live = false;
+let lastSaid = "", lastAnswer = "";
+
+function setState(cls, label) {
+  $('#state').className = 'state ' + cls;
+  $('#stateLabel').textContent = label;
+}
+function turn(cls, who, text) {
+  $('#hint')?.remove();
+  const d = document.createElement('div');
+  d.className = 'turn ' + cls;
+  d.innerHTML = `<div class="lbl">${who}</div>${(text||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}`;
+  $('#log').appendChild(d);
+  d.scrollIntoView({behavior:'smooth', block:'end'});
+  return d;
+}
+
+$('#mic').onclick = () => live ? stop() : start();
+
+async function start() {
+  $('#mic').disabled = true;
+  setState('think', 'connecting');
+  try {
+    // A short-lived token, minted by our Mac. The real key never touches this browser.
+    const tok = await fetch('/api/voice/token').then(r => r.json());
+    if (tok.error) throw new Error(tok.error);
+    const key = tok.value || tok.client_secret?.value;
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+
+    pc = new RTCPeerConnection();
+    // Chief's voice comes back over this.
+    const audio = new Audio();
+    audio.autoplay = true;
+    audio.setAttribute('playsinline', '');   // iOS refuses to play inline without this
+    pc.ontrack = e => { audio.srcObject = e.streams[0]; };
+    pc.addTrack(stream.getAudioTracks()[0], stream);
+
+    dc = pc.createDataChannel('oai-events');
+    dc.onmessage = e => handle(JSON.parse(e.data));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const r = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      body: offer.sdp,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/sdp' },
+    });
+    await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+
+    live = true;
+    $('#mic').textContent = 'Stop';
+    $('#mic').classList.add('on');
+    setState('live', 'listening');
+  } catch (err) {
+    setState('bad', 'failed');
+    turn('chief', 'Chief', "Couldn't start the microphone. " + err.message);
+  }
+  $('#mic').disabled = false;
+}
+
+function stop() {
+  pc?.close(); stream?.getTracks().forEach(t => t.stop());
+  pc = stream = dc = null; live = false;
+  $('#mic').textContent = 'Start talking';
+  $('#mic').classList.remove('on');
+  setState('', 'off');
+}
+
+async function handle(ev) {
+  // What Neill said.
+  if (ev.type === 'conversation.item.input_audio_transcription.completed') {
+    lastSaid = ev.transcript;
+    turn('you', 'You', ev.transcript);
+  }
+
+  // The mouth is reaching for Chief. This is the ONLY thing it's allowed to do.
+  if (ev.type === 'response.function_call_arguments.done' && ev.name === 'ask_chief') {
+    setState('think', 'thinking');
+    const args = JSON.parse(ev.arguments || '{}');
+    const hold = turn('hold', 'Chief', 'thinking…');
+
+    const out = await fetch('/api/voice/ask', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer })
+    }).then(r => r.json());
+
+    hold.remove();
+    lastAnswer = out.full || out.spoken;
+
+    // Hand Chief's answer back to the mouth, which will SAY it in its own words.
+    dc.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: ev.call_id,
+              output: JSON.stringify({ answer: out.spoken }) }
+    }));
+    dc.send(JSON.stringify({ type: 'response.create' }));
+    setState('live', 'listening');
+  }
+
+  // What Chief said back, once the mouth has finished saying it.
+  if (ev.type === 'response.output_audio_transcript.done') {
+    turn('chief', 'Chief', ev.transcript);
+  }
+
+  if (ev.type === 'error') {
+    setState('bad', 'error');
+    turn('chief', 'Chief', ev.error?.message || 'Something went wrong.');
+  }
+}
+</script>
+</body>
+</html>

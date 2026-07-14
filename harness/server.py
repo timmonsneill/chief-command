@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from db.jobs import connect, init_db
+from db.jobs import connect, init_db, month_spend
 
 app = FastAPI(title="Chief Command")
 
@@ -277,6 +277,110 @@ def _handle_directly(u: str) -> str:
                 else f"{who} finished {thing}. The others are checking it.")
 
     return "Got it."
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOICE
+# ═══════════════════════════════════════════════════════════════════════════════
+import os  # noqa: E402
+
+import httpx  # noqa: E402
+
+from chief import ASK_CHIEF_TOOL, MOUTH_INSTRUCTIONS, ask_chief  # noqa: E402
+
+VOICE_MODEL = "gpt-realtime-2.1"   # the FULL model, NOT mini.
+# Mini has an open, unresolved bug where it refuses to call function tools. For a
+# telephone whose entire job is placing one call, that is fatal — you'd speak into
+# the car and nothing would happen. ~$50/mo more to remove the single point of
+# failure from the whole system. Cheapest insurance on the board.
+
+
+@app.get("/api/voice/token")
+async def voice_token():
+    """Mint a SHORT-LIVED client token so the real API key never reaches the browser.
+
+    The browser talks straight to OpenAI (that's what keeps the audio fast — it doesn't
+    bounce through this Mac). But it must never hold the key that can spend money, so
+    it gets a token that expires in a minute and can do nothing but start one session.
+    """
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        return JSONResponse({"error": "no OpenAI key configured"}, status_code=503)
+
+    # Refuse to start a session we can't afford. Sol: "a safe failure mode when Chief
+    # is unavailable" — same principle for the money. Better to not start than to be
+    # cut off mid-sentence by OpenAI's own cap.
+    m = month_spend(db())
+    if m["spent_cents"] >= m["cap_cents"]:
+        return JSONResponse(
+            {"error": f"You're at your ${m['cap_cents']/100:.0f} monthly limit. "
+                      "Voice is off until you raise it."},
+            status_code=402,
+        )
+
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.post(
+            "https://api.openai.com/v1/realtime/client_secrets",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "session": {
+                    "type": "realtime",
+                    "model": VOICE_MODEL,
+                    "instructions": MOUTH_INSTRUCTIONS,
+                    "tools": [ASK_CHIEF_TOOL],
+                    "tool_choice": "auto",
+                    "audio": {
+                        "input": {
+                            # SEMANTIC turn detection, not plain silence detection.
+                            # A driver pauses mid-sentence to merge; silence-based VAD
+                            # cuts him off. Semantic judges whether he SOUNDED finished.
+                            "turn_detection": {"type": "semantic_vad", "eagerness": "low",
+                                               "interrupt_response": True},
+                        },
+                        "output": {"voice": "cedar"},
+                    },
+                }
+            },
+        )
+    if r.status_code >= 400:
+        return JSONResponse({"error": r.text[:300]}, status_code=r.status_code)
+    return r.json()
+
+
+@app.post("/api/voice/ask")
+async def voice_ask(request: Request):
+    """The mouth's ONE tool. Everything Neill says arrives here and goes to Chief.
+
+    The mouth decides nothing. It doesn't even decide whether something is worth
+    sending — because "is this worth sending?" is a judgment, and judgments are where
+    this leaked twice.
+    """
+    body = await request.json()
+    said = (body.get("said") or "").strip()
+    if not said:
+        return {"spoken": "I didn't catch that."}
+
+    from mouth import is_pushback
+    out = ask_chief(
+        said,
+        context=body.get("context", ""),
+        pushed_back=is_pushback(said),
+    )
+
+    # Everything Chief says goes on the record, so the text channel always has the full
+    # version of anything he only half-heard in the car.
+    c = db()
+    c.execute(
+        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+        "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
+        (out.get("model", CHIEF_MODEL), out["full"][:500]),
+    )
+    return out
+
+
+@app.get("/voice", response_class=HTMLResponse)
+def voice_page():
+    return (Path(__file__).resolve().parent / "web" / "voice.html").read_text()
 
 
 @app.get("/", response_class=HTMLResponse)
