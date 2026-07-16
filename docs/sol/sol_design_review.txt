@@ -1,28 +1,34 @@
-You have reviewed this system three times and found serious weaknesses each time — nine flaws in the database rules, then eighteen more, then the finding that the "capability gate" was ineffective because it governed the record rather than the action. Your last review concluded: "OpenClaw drives the car. Chief Command decides whether the gate opens. The coding agents never receive the gate key." And: "stop calling the current database a physical safety boundary until it controls the actual doors."
+You have reviewed this system four times and found serious weaknesses each time — nine flaws in the database rules, then eighteen more, then the finding that the "capability gate" was ineffective because it governed the record rather than the action, and in round 4 the deepest finding yet: an agent can put a harmful payload into its working copy, fool the model reviewers, receive genuine passing records, and have the release service deliberately deploy it — no forgery required, every door working exactly as designed. You rejected the design and listed 12 required changes, three of which were owner decisions.
 
-The owner (Neill — NON-TECHNICAL, cannot read code) has now instructed that NOTHING further be built until you approve the design. The document below is the corrected architecture. It has NOT been implemented. Your approval is the gate.
+Since your round-4 rejection:
+- The core claim has been rewritten to the honest, weaker version you specified: a skipped checkpoint cannot directly obtain release authority; containment, independent review, and narrow deploy privileges limit the harm of code that passes review.
+- Your 12 required changes have been folded into the document.
+- The owner (Neill — NON-TECHNICAL, cannot read code) has personally decided the three questions you made conditions of approval: (A) he ACCEPTED mandatory human written sign-off for high-authority change classes, with everything else autonomous; (B) agents run in a dedicated VM on this Mac, migratable to separate hardware later; (C) the PHI-bearing EMR is OUT of scope now, revisitable only after strict egress controls are built and attack-tested.
+
+Neill's standing instruction holds: NOTHING further is built until you approve the design. The document below is the corrected architecture. It has NOT been implemented. Your approval is the gate.
 
 READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
+Your round-4 verdict, for checking your own conditions: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND4_2026-07-14.md
 You may also read the existing code under /Users/user/code-projects/chief-command/harness/ to check whether the document's claims match what is actually there.
 
 YOUR JOB: find what is still wrong with this design. Do not be encouraging. You are the last check before it gets built.
 
 Address each of these:
 
-1. THE CORE CLAIM is "a missed checkpoint must be harmless." Is the design actually achieving that? Walk it through concretely: if one agent runner does not pass its actions through the pre-action policy check (which you previously said WILL happen for some runner), what harm can it still cause, given the stated controls — GitHub branch protection, credentials absent from the machine, strict kernel sandbox, no write access to the safety database, a disposable working copy per agent, and a separate release service? Name anything harmful that survives all of those.
+1. YOUR 12 REQUIRED CHANGES from round 4. Go through them one by one. For each: is it now genuinely addressed in the document, addressed only in words, or still missing? Be specific about which sentence carries the load and whether the stated mechanism actually provides it.
 
-2. WHAT REMAINS INEFFECTIVE? Which guarantee in the document is claimed but is not actually enforced by something that cannot be reasoned away by a model — i.e. still resting on good behaviour, configuration, or a record rather than a real boundary?
+2. THE REWRITTEN CORE CLAIM — "a skipped checkpoint cannot directly obtain release authority; containment, independent review, and narrow deploy privileges limit the harm of code that passes review." Is even this weaker claim actually delivered by the stated mechanisms? Walk a concrete attack through it.
 
-3. THE SEAMS. Name every place the design assumes an action passes through a checkpoint when it might not: different agent runners, MCP servers, hooks, scheduled jobs, the voice path, the release service itself, and OpenClaw upgrades.
+3. THE HUMAN-REVIEW BOUNDARY. The owner accepted mandatory written sign-off for high-authority change classes. The document says classification is derived deterministically from what a change touches, never from a model's self-report. Can an agent get a high-authority change classified as routine? Name the exact evasion paths (build scripts, dependency lockfiles, generated code, config that becomes code at runtime, changes split across several routine-looking submissions).
 
-4. THE RELEASE SERVICE holds all the irreversible power (merge to main, deploy, spend). What compromises it? How can it trust that "the database says this version passed" if the database is a plain file? What prevents an agent from simply calling the release service directly?
+4. WHAT REMAINS INEFFECTIVE? Which guarantee in the document is claimed but still rests on good behaviour, configuration, or a record rather than a boundary that cannot be reasoned away?
 
-5. CREDENTIAL ABSENCE. Is this achievable in practice on a personal Mac that the owner ALSO uses for real work, where production credentials must exist somewhere for his own legitimate use? Where do they leak back into the agents' reach?
+5. THE SEAMS. Name every place the design assumes an action passes through a checkpoint when it might not: different agent runners, MCP servers, hooks, scheduled jobs, the voice path, the release service itself, the GitHub and provider brokers, and OpenClaw upgrades.
 
-6. THE VOICE AND CHIEF LAYER. Any problems with: the voice as a pure relay with a single tool; Chief as a live streaming session (~1.4s to first words); Terra as Chief; an 8-second timeout that reports "nothing started"? Consider a moving car, interruptions, partial transcripts, the owner changing his mind mid-sentence, and what happens as Chief's conversation history grows long.
+6. THE VM DECISION. Agents run in a dedicated VM on this same Mac, which also runs the owner's real business. Is the stated separation (no owner-home sharing, no clipboard, no credential connections, no host-management connection, release service outside) sufficient in practice? What leaks across that boundary on a personal Mac?
 
 7. WHAT IS MISSING ENTIRELY from this document?
 
-8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked most important first. If yes, say so plainly and name the top three risks to watch during the build.
+8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked most important first — and distinguish "must change the design" from "must be proven during the build." If yes, say so plainly and name the top three risks to watch during the build.
 
 Write in PLAIN ENGLISH for a non-technical reader. Be specific. Name exact failures, not categories.

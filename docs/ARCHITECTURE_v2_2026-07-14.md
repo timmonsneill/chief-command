@@ -8,9 +8,10 @@ before the rest is written.
 
 Plain English throughout, because the owner cannot read code.
 
-Three questions in this document are marked **OWNER DECISION**. They are not the agent's
-to settle — they reverse or constrain directions Neill personally set, and Sol has made
-them conditions of approval. They are collected at the end.
+Three questions in this document were marked **OWNER DECISION** — they reversed or
+constrained directions Neill personally set, and Sol made them conditions of approval.
+**Neill decided all three on 2026-07-15.** The decisions are recorded inline where they
+apply and collected at the end.
 
 ---
 
@@ -90,8 +91,9 @@ pretend it's one component. Two separations do the heavy lifting:
 
 ## Where agents run — containment
 
-**OWNER DECISION B** governs the strength here (VM on this Mac vs. a separate host). The
-mechanism is the same either way:
+**DECIDED (Neill, 2026-07-15): a dedicated VM on this Mac** — Sol's stated minimum. The
+design stays hardware-agnostic, so migrating agent execution to a separate physical
+machine later is a config change, not a redesign. The mechanism:
 
 - **A dedicated virtual machine (minimum) or separate host (stronger)** runs all agent
   execution. **No** owner-home sharing, **no** clipboard sharing, **no** credential
@@ -192,11 +194,16 @@ untrusted payload even after it passes the gauntlet.** The design's response:
 - **Containment limits blast radius.** The deployed code inherits only the narrow
   production privileges the release path grants — not the owner's full authority.
 - **A data-egress policy** (below) limits what a payload can exfiltrate even if it runs.
-- **Independent human review for high-authority change classes** — **OWNER DECISION A.**
-  Sol's condition: changes that can gain production authority, alter dependencies, change
-  automation, handle secrets, change auth or money, modify stored data, or change the
-  release service itself must get a qualified human review, or be prohibited from
-  auto-release. This is where the "autonomous ship" direction and containment collide.
+- **Independent human review for high-authority change classes — DECIDED (Neill,
+  2026-07-15): ACCEPTED.** Changes that can gain production authority, alter dependencies,
+  change automation, handle secrets, change auth or money, modify stored data, or change
+  the release service itself **do not auto-release** — they wait for the owner's written
+  sign-off (with plain-English explanation of what the change does and why it's in a
+  dangerous class). Everything outside those classes ships autonomously through the
+  gauntlet. The release service enforces the classification: a change tagged
+  high-authority without a consumed human approval is refused, and classification is
+  derived by the deterministic release path from what the change touches — never from a
+  model's self-report.
 
 ---
 
@@ -211,8 +218,12 @@ a channel that carries data out.
 
 So: an **enforced egress policy** defines what each project may send to each provider, and
 blocks customer/medical/private/cross-project data independently of credential scanning.
-**OWNER DECISION C** — whether the PHI-bearing EMR is ever in scope for this harness at
-all — sets how heavy this must be.
+**DECIDED (Neill, 2026-07-15): the PHI-bearing EMR is OUT of scope for this harness now,
+revisitable later.** The harness's project list simply does not include it, the agents'
+isolated environment contains no clone of it, and the egress policy still protects
+private source, business plans, and conversation data for the projects that are in scope.
+Any future decision to bring the EMR in requires the strict medical-data egress controls
+to be built and attack-tested first — that is a precondition, not a follow-up.
 
 ---
 
@@ -314,19 +325,22 @@ list. Anything that can do one of those stays disabled until the route is closed
 
 ---
 
-## ⚠️ OWNER DECISIONS — Neill's to make, not the agent's
+## ✅ OWNER DECISIONS — made by Neill, 2026-07-15
 
-These three reverse or constrain directions Neill set, and Sol has made them conditions of
-approval. They are teed up for him; the design is written to accept whichever way he goes.
+These three reversed or constrained directions Neill set, and Sol made them conditions of
+approval. He decided all three:
 
-- **A. Autonomy vs. mandatory human review for high-authority changes.** Sol requires a
-  qualified human review (or a ban on auto-release) for the dangerous change classes, because
-  honest model review can pass malicious code. This limits "the gates replace the human
-  gate." His own stated process — *Sol must approve* — points at accepting it; his autonomy
-  goal points against. **This is the crux of the rejection; nothing gets Sol's approval
-  without resolving it.**
-- **B. Where agents run** — a VM on this Mac (Sol's minimum) or a separate physical machine
-  (Sol's stronger), given this Mac runs his real business. Cost/hardware call.
-- **C. Whether the PHI-bearing EMR is ever in scope** for this harness, which sets how heavy
-  the egress policy and provider rules must be. Keeping it permanently out is a legitimate,
-  simplifying answer.
+- **A. Human review for high-authority changes: ACCEPTED.** The dangerous change classes
+  (production authority, dependencies, automation, secrets, auth, money, stored data, the
+  release service itself) require his written sign-off before release; everything else
+  ships autonomously through the gauntlet. This resolves the crux of the round-4
+  rejection: honest model review can pass malicious code, so for the classes where that
+  matters most, a human is the backstop. Routine autonomy — the actual product goal — is
+  preserved for everything else.
+- **B. Where agents run: a dedicated VM on this Mac** (Sol's stated minimum). The design
+  is hardware-agnostic, so moving agent execution to a separate physical machine later is
+  a config change, not a redesign.
+- **C. The PHI-bearing EMR: out of scope now, revisitable later.** The harness's project
+  list does not include it and the agents' environment holds no clone of it. Bringing it
+  in later requires the strict medical-data egress controls to be built and attack-tested
+  first — a precondition, not a follow-up.
