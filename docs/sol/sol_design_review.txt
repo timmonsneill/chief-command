@@ -1,34 +1,37 @@
-You have reviewed this system four times and found serious weaknesses each time — nine flaws in the database rules, then eighteen more, then the finding that the "capability gate" was ineffective because it governed the record rather than the action, and in round 4 the deepest finding yet: an agent can put a harmful payload into its working copy, fool the model reviewers, receive genuine passing records, and have the release service deliberately deploy it — no forgery required, every door working exactly as designed. You rejected the design and listed 12 required changes, three of which were owner decisions.
+You have reviewed this system five times and found serious weaknesses each time. Round 4: an agent can get harmful code deployed by passing every gate honestly — model review is a quality gate, not a containment boundary. Round 5: you rejected again, ruling that (a) written owner consent is not qualified independent review, (b) danger must be classified by production authority, not filenames — and you listed 12 required design changes, 14 missing designs, and a set of classifier evasions, seams, and VM leaks.
 
-Since your round-4 rejection:
-- The core claim has been rewritten to the honest, weaker version you specified: a skipped checkpoint cannot directly obtain release authority; containment, independent review, and narrow deploy privileges limit the harm of code that passes review.
-- Your 12 required changes have been folded into the document.
-- The owner (Neill — NON-TECHNICAL, cannot read code) has personally decided the three questions you made conditions of approval: (A) he ACCEPTED mandatory human written sign-off for high-authority change classes, with everything else autonomous; (B) agents run in a dedicated VM on this Mac, migratable to separate hardware later; (C) the PHI-bearing EMR is OUT of scope now, revisitable only after strict egress controls are built and attack-tested.
+Since your round-5 rejection, the document has been rewritten to implement your required changes:
+- Decision A revised: a qualified independent technical human must inspect high-authority changes; the owner's authenticated (device-bound, single-use, digest-bound) written approval is only the business authorization. The reviewer seat is currently EMPTY and the system FAILS CLOSED — high-authority changes queue unreleased until a qualified reviewer exists. The owner accepted this reduces autonomous scope.
+- Classification is by production authority with fail-closed intake (binaries, generated output, dependencies including lockfile-only and transitive, build behavior, runtime-interpreted config, links, sub-project pointers), cumulative since the last human review, with the classifier itself always high-authority.
+- Production containment: per-component enumeration of data/records/secrets/destinations/spend, enforced outside the component; components without an enumeration are high-authority.
+- The release chain: restricted patch intake (never a built package), a clean builder with pinned dependency digests, signed origin in an immutable store, production-side signature verification making the path exclusive, separated powers (merge caller / builder / signer / deployer / spend broker / record-writer as distinct identities), limited rollout, independent post-release monitoring, a production kill switch distinct from the job stop, rollback that cannot revive a withdrawn package.
+- Egress as architecture with admitted limits; the VM profile completed per your list (no sharing at all, fixed disk, broker-only egress, host-side firewall, no Tailscale identity inside, residual same-Mac risk stated); brokers with exact authority and hostile-input rules including PR-triggered automation; authenticated approval and fixed-playback delivery of critical text; secret lifecycle; realistic update policy; explicit decommissioning of every legacy path you found in the current code; and the acceptance test rewritten as 14 explicit fail-closed attack cases plus named residual risks.
 
-Neill's standing instruction holds: NOTHING further is built until you approve the design. The document below is the corrected architecture. It has NOT been implemented. Your approval is the gate.
+The owner (Neill — NON-TECHNICAL, cannot read code) maintains his instruction: NOTHING further is built until you approve. The document has NOT been implemented.
 
 READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
-Your round-4 verdict, for checking your own conditions: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND4_2026-07-14.md
-You may also read the existing code under /Users/user/code-projects/chief-command/harness/ to check whether the document's claims match what is actually there.
+Your round-5 verdict summary: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND5_2026-07-15.md
+Your full round-5 transcript if needed: /Users/user/code-projects/chief-command/docs/sol/sol_round2.out
+You may read the existing code under /Users/user/code-projects/chief-command/harness/ to check claims.
 
-YOUR JOB: find what is still wrong with this design. Do not be encouraging. You are the last check before it gets built.
+YOUR JOB: find what is still wrong. Do not be encouraging. You are the last check before it gets built.
 
 Address each of these:
 
-1. YOUR 12 REQUIRED CHANGES from round 4. Go through them one by one. For each: is it now genuinely addressed in the document, addressed only in words, or still missing? Be specific about which sentence carries the load and whether the stated mechanism actually provides it.
+1. YOUR ROUND-5 REQUIRED CHANGES (the 12) and the 14 missing designs. One by one: genuinely addressed, addressed only in words, or still missing? Name the load-bearing sentence and say whether its mechanism actually delivers.
 
-2. THE REWRITTEN CORE CLAIM — "a skipped checkpoint cannot directly obtain release authority; containment, independent review, and narrow deploy privileges limit the harm of code that passes review." Is even this weaker claim actually delivered by the stated mechanisms? Walk a concrete attack through it.
+2. THE CLASSIFIER, AS NOW SPECIFIED. Walk your own evasion list (build behavior, lockfiles, transitive deps, generated code, generation inputs, runtime config, ordinary source with authority, repository indirection, dormant loaders, split authority, cumulative drift, external activation) through the new fail-closed, authority-based, cumulative rules. Which still get through?
 
-3. THE HUMAN-REVIEW BOUNDARY. The owner accepted mandatory written sign-off for high-authority change classes. The document says classification is derived deterministically from what a change touches, never from a model's self-report. Can an agent get a high-authority change classified as routine? Name the exact evasion paths (build scripts, dependency lockfiles, generated code, config that becomes code at runtime, changes split across several routine-looking submissions).
+3. THE FAIL-CLOSED REVIEWER SEAT. With the technical reviewer seat empty, high-authority changes queue indefinitely. Does anything in the design pressure or path around that queue (reclassification, emergency exceptions, the owner overriding, an agent shrinking a component's enumerated authority on paper)? Is the queue itself attackable?
 
-4. WHAT REMAINS INEFFECTIVE? Which guarantee in the document is claimed but still rests on good behaviour, configuration, or a record rather than a boundary that cannot be reasoned away?
+4. THE SEPARATED POWERS AND THE EXCLUSIVE PATH. Can a compromise of any single component (merge caller, builder, signer, deployer, spend broker, record-writer, the harness, the web UI) still reach production, spend, or rewrite history? Is production-side signature verification actually sufficient to make the path exclusive?
 
-5. THE SEAMS. Name every place the design assumes an action passes through a checkpoint when it might not: different agent runners, MCP servers, hooks, scheduled jobs, the voice path, the release service itself, the GitHub and provider brokers, and OpenClaw upgrades.
+5. WHAT REMAINS INEFFECTIVE — claimed but resting on good behavior, configuration, or a record rather than a boundary?
 
-6. THE VM DECISION. Agents run in a dedicated VM on this same Mac, which also runs the owner's real business. Is the stated separation (no owner-home sharing, no clipboard, no credential connections, no host-management connection, release service outside) sufficient in practice? What leaks across that boundary on a personal Mac?
+6. THE SEAMS, AGAIN. Runners, MCP servers, hooks, schedules, retries, recovery, voice/text/web doors, brokers, GitHub itself, OpenClaw upgrades, backups/restore. What still bypasses a checkpoint?
 
 7. WHAT IS MISSING ENTIRELY from this document?
 
-8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked most important first — and distinguish "must change the design" from "must be proven during the build." If yes, say so plainly and name the top three risks to watch during the build.
+8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked, distinguishing "must change the design" from "must be proven during the build." If yes, say so plainly and name the top three risks to watch during the build.
 
 Write in PLAIN ENGLISH for a non-technical reader. Be specific. Name exact failures, not categories.

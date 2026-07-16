@@ -3,13 +3,15 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
-Last updated: 2026-07-15 (session 3 — Neill decided the three owner questions; decisions
-folded into the arch doc; Sol round 5 running)
+Last updated: 2026-07-16 (session 3 — round 5 REJECTED; decision A revised to fail-closed
+qualified-reviewer model; arch doc rewritten around Sol's 12 changes; round 6 running)
 
-**Owner decisions, made 2026-07-15:** (A) human written sign-off required for
-high-authority change classes, everything else autonomous; (B) agents run in a dedicated
-VM on this Mac; (C) the PHI-bearing EMR is out of scope now, revisitable only after
-strict egress controls exist and are attack-tested.
+**Owner decisions:** (A, revised 2026-07-16) high-authority changes require a qualified
+independent technical HUMAN review — the seat is currently empty and the system fails
+closed (those changes queue unreleased); Neill's authenticated written approval is the
+business authorization only; everything else autonomous. (B) agents run in a dedicated VM
+on this Mac. (C) the PHI-bearing EMR is out of scope now, revisitable only after strict
+egress controls exist and are attack-tested.
 
 ---
 
@@ -72,10 +74,11 @@ sol has reviewed it and approved it as well."*
 - [x] **Rewrite `ARCHITECTURE_v2_2026-07-14.md`** DONE 2026-07-14. Restructured around
       Sol's 8 review questions; added the seam table, the plain-file-DB trust answer, the
       credential-absence-via-separate-user answer, and folded in the verified exploits.
-- [~] **Send it back to Sol** (`./ask-sol.sh`). Round 4 REJECTED (2026-07-14) — the
-      honest-pass finding; see `SOL_VERDICT_ROUND4_2026-07-14.md`. Owner decisions made
-      2026-07-15; round 5 running on the updated doc. Iterate attack → fix → re-attack
-      **until Sol has nothing left.**
+- [~] **Send it back to Sol** (`./ask-sol.sh`). Round 4 REJECTED (honest-pass finding).
+      Round 5 REJECTED (owner sign-off ≠ technical review; classify by authority not
+      filenames; 12 changes + 14 missing designs) — see `SOL_VERDICT_ROUND5_2026-07-15.md`,
+      transcript `docs/sol/sol_round2.out`. Doc rewritten 2026-07-16 implementing all 12;
+      round 6 running. Iterate attack → fix → re-attack **until Sol has nothing left.**
 - [ ] **Only then build.**
 
 ---
