@@ -1,37 +1,25 @@
-You have reviewed this system five times and found serious weaknesses each time. Round 4: an agent can get harmful code deployed by passing every gate honestly — model review is a quality gate, not a containment boundary. Round 5: you rejected again, ruling that (a) written owner consent is not qualified independent review, (b) danger must be classified by production authority, not filenames — and you listed 12 required design changes, 14 missing designs, and a set of classifier evasions, seams, and VM leaks.
+You have reviewed this system six times. Your rounds 4–6 established, correctly, that model review is a quality gate, not a containment boundary, and that a system holding autonomous production-release authority needs the full apparatus of one: authority-based classification, qualified human review, signed release authorizations, independent build reproduction, key governance, administrator custody. Your demands were individually valid and collectively deepening every round.
 
-Since your round-5 rejection, the document has been rewritten to implement your required changes:
-- Decision A revised: a qualified independent technical human must inspect high-authority changes; the owner's authenticated (device-bound, single-use, digest-bound) written approval is only the business authorization. The reviewer seat is currently EMPTY and the system FAILS CLOSED — high-authority changes queue unreleased until a qualified reviewer exists. The owner accepted this reduces autonomous scope.
-- Classification is by production authority with fail-closed intake (binaries, generated output, dependencies including lockfile-only and transitive, build behavior, runtime-interpreted config, links, sub-project pointers), cumulative since the last human review, with the classifier itself always high-authority.
-- Production containment: per-component enumeration of data/records/secrets/destinations/spend, enforced outside the component; components without an enumeration are high-authority.
-- The release chain: restricted patch intake (never a built package), a clean builder with pinned dependency digests, signed origin in an immutable store, production-side signature verification making the path exclusive, separated powers (merge caller / builder / signer / deployer / spend broker / record-writer as distinct identities), limited rollout, independent post-release monitoring, a production kill switch distinct from the job stop, rollback that cannot revive a withdrawn package.
-- Egress as architecture with admitted limits; the VM profile completed per your list (no sharing at all, fixed disk, broker-only egress, host-side firewall, no Tailscale identity inside, residual same-Mac risk stated); brokers with exact authority and hostile-input rules including PR-triggered automation; authenticated approval and fixed-playback delivery of critical text; secret lifecycle; realistic update policy; explicit decommissioning of every legacy path you found in the current code; and the acceptance test rewritten as 14 explicit fail-closed attack cases plus named residual risks.
+The owner has now made the decision that resets the scope (Decision D, 2026-07-17, recorded in the document): **release authority is removed from the design.** This is a DEVELOPMENT harness. Agents build in a sealed VM, a multi-model gauntlet reviews, and work lands on the owner's own repositories the same way it lands from his terminal today when he runs Claude Code or Codex by hand — which he does daily, like millions of developers. Production deployment, where a project even has one, stays a manual owner action. There is no deployer, no signer, no machine release path — because there is no release authority to protect. The genuinely irreversible things sit behind doors: GitHub branch protection (server-side), credential absence, provider-side spend caps, the VM boundary, and the owner's own manual deploy step.
 
-The owner (Neill — NON-TECHNICAL, cannot read code) maintains his instruction: NOTHING further is built until you approve. The document has NOT been implemented.
+YOUR TASK HAS CHANGED, and this is important. You are NOT being asked to certify that no attack path exists — you yourself showed that question has no finite answer for any system running powerful agents, and it is not a standard anyone applies to the owner's daily terminal use, which is the explicit benchmark. Your job now:
+
+1. VERIFY THE CLAIMS TABLE. The document claims specific protections from specific mechanisms (branch protection, credential absence, VM profile, brokers, provider caps, the record). For each: does the stated mechanism actually provide the stated protection at this scope? Where a claim is stronger than its mechanism, say so.
+
+2. CHECK THE BENCHMARK HONESTLY. Is this harness, as designed, materially MORE dangerous than the owner running Claude Code in his terminal on the same projects? Name every way it is (always-on, voice-triggered, overnight scale, no human watching) and judge whether the stated compensations (job record, budgets, VM, brokers, emergency stop, latency guard) actually compensate.
+
+3. NAME THE RESIDUAL RISKS in plain English for the owner to accept knowingly. The document lists five. Is that list complete and honestly stated? Add what's missing. Do not demand elimination of risks that are inherent to running coding agents at all — name them so the acceptance is informed.
+
+4. FIND SCOPE LEAKS. The design says no production deploys, no EMR, no release machinery. Is there any path in the document by which the harness quietly reacquires release-like authority (deploy scripts in repos the agents can edit, repository automation that deploys on merge, a project whose "repo" IS its production, MCP servers with production credentials)? This is the most valuable thing you can find — places where the proportionate scope is stated but not held.
+
+5. THE VOICE LAYER at this scope: any remaining path where voice or ambient speech reaches something irreversible, given merges are the gauntlet's call and doors gate the rest?
+
+6. WOULD YOU SIGN OFF ON THIS DESIGN AS PROPORTIONATE AND HONEST for its stated scope — a one-person development harness benchmarked against terminal agent use? If no: name the specific findings, ranked, distinguishing "the design must change" from "the build must prove it" from "the owner must accept it knowingly." If yes: say so plainly and name the top three things to watch during the build.
+
+Do not re-demand the autonomous-release architecture — that scope was removed, deliberately, by the owner. If you believe the removal itself is unsound (i.e., this design still secretly holds release authority somewhere), that is a scope leak — report it under question 4.
 
 READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
-Your round-5 verdict summary: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND5_2026-07-15.md
-Your full round-5 transcript if needed: /Users/user/code-projects/chief-command/docs/sol/sol_round2.out
+Prior verdicts if needed: docs/SOL_VERDICT_ROUND5_2026-07-15.md, docs/SOL_VERDICT_ROUND6_2026-07-16.md
 You may read the existing code under /Users/user/code-projects/chief-command/harness/ to check claims.
-
-YOUR JOB: find what is still wrong. Do not be encouraging. You are the last check before it gets built.
-
-Address each of these:
-
-1. YOUR ROUND-5 REQUIRED CHANGES (the 12) and the 14 missing designs. One by one: genuinely addressed, addressed only in words, or still missing? Name the load-bearing sentence and say whether its mechanism actually delivers.
-
-2. THE CLASSIFIER, AS NOW SPECIFIED. Walk your own evasion list (build behavior, lockfiles, transitive deps, generated code, generation inputs, runtime config, ordinary source with authority, repository indirection, dormant loaders, split authority, cumulative drift, external activation) through the new fail-closed, authority-based, cumulative rules. Which still get through?
-
-3. THE FAIL-CLOSED REVIEWER SEAT. With the technical reviewer seat empty, high-authority changes queue indefinitely. Does anything in the design pressure or path around that queue (reclassification, emergency exceptions, the owner overriding, an agent shrinking a component's enumerated authority on paper)? Is the queue itself attackable?
-
-4. THE SEPARATED POWERS AND THE EXCLUSIVE PATH. Can a compromise of any single component (merge caller, builder, signer, deployer, spend broker, record-writer, the harness, the web UI) still reach production, spend, or rewrite history? Is production-side signature verification actually sufficient to make the path exclusive?
-
-5. WHAT REMAINS INEFFECTIVE — claimed but resting on good behavior, configuration, or a record rather than a boundary?
-
-6. THE SEAMS, AGAIN. Runners, MCP servers, hooks, schedules, retries, recovery, voice/text/web doors, brokers, GitHub itself, OpenClaw upgrades, backups/restore. What still bypasses a checkpoint?
-
-7. WHAT IS MISSING ENTIRELY from this document?
-
-8. FINALLY: WOULD YOU APPROVE THIS DESIGN TO BE BUILT? If not, list the specific changes required for approval, ranked, distinguishing "must change the design" from "must be proven during the build." If yes, say so plainly and name the top three risks to watch during the build.
 
 Write in PLAIN ENGLISH for a non-technical reader. Be specific. Name exact failures, not categories.
