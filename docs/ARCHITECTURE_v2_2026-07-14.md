@@ -19,10 +19,15 @@ Plain English throughout, because the owner cannot read code.
 
 ## OWNER DECISION D (2026-07-17) — the proportionality reset
 
-**The benchmark: this harness must be no more dangerous than the owner running Claude
-Code in his terminal today — and safer where safety is cheap.** It is a *development*
-harness. It is not, and does not claim to be, an autonomous production-release
-authority.
+**The benchmark, stated the honest way (Sol round 7):** compared to the owner running
+Claude Code in his terminal today, this harness is **safer in blast radius** — the VM,
+credential absence, and hard caps protect the Mac, the secrets, production, and the
+wallet better than a bare terminal does — and **more autonomous**: it runs unattended,
+takes voice-triggered work, operates at overnight scale, and reads more injectable
+content than a supervised session. The extra autonomy risk lands almost entirely on
+*unwanted-but-source-reversible repository changes and routine spend*, and the owner
+accepts that explicitly (Decision E). It is a *development* harness. It is not, and
+does not claim to be, an autonomous production-release authority.
 
 Concretely:
 
@@ -31,6 +36,17 @@ Concretely:
   gauntlet passes, work merges autonomously by default, exactly like his terminal
   workflow — with GitHub branch protection blocking the one irreversible git action
   (rewriting history) on repos where it's enabled.
+- **Autonomous merge is only available to ADMITTED repos.** Admission is a recorded,
+  per-repo decision proving that **merging does nothing but change source**: merging
+  does not deploy a site or service; the repo is not itself the live product; no other
+  machine auto-pulls its main branch; no push/PR publishes a package, updates
+  infrastructure, alters scheduled work, or contacts outside systems; no repository
+  automation holds production secrets; no automation runs agent-written code before
+  the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
+  or the owner's authenticated tap is explicitly designated as the manual deploy step.
+  Projects are an explicit **allowlist** — a repo that was never admitted simply does
+  not exist to the harness, and **the EMR is structurally refused**: adding it
+  requires a new recorded owner decision, not a config edit.
 - **Deploying to a live production service is out of scope for agents.** Where a
   project has a real production deployment, that step stays a manual owner action, as
   it is today. No deployer identity, no signing chain, no production kill switch —
@@ -93,11 +109,14 @@ Not the owner. The real threats, in order:
 | Brokered GitHub/provider access | Narrow authority | Agents holding reusable keys; runaway spend at brokered providers |
 | Provider-side hard caps | External boundary | Spend past the cap, where the provider offers a real one |
 | The gauntlet + job record | Quality gate + audit | Bad work landing *unexamined*; "what did the overnight run do?" going unanswerable |
-| Git itself | Reversibility | Makes a bad merge a fixable event, not a disaster |
+| Git itself | Reversibility of SOURCE | Makes a bad merge usually recoverable as a source change |
 
 The table is the design's honesty mechanism: the first five are boundaries; the
-gauntlet is explicitly *not* one (round 4's lesson); git reversibility is what makes
-quality-gate failures survivable.
+gauntlet is explicitly *not* one (round 4's lesson). And git's reversibility is stated
+precisely: **git reverses source, not consequences.** It cannot unpublish a leaked
+secret, undo automation that already ran, retract a downloaded package, or repair
+damaged live data — which is exactly why repos where a merge *has* consequences are
+refused admission to autonomous merge.
 
 ---
 
@@ -119,9 +138,12 @@ Mac:
 - Isolated clones per agent — never shared working copies (a git worktree shares
   history and hooks; a clone doesn't).
 - The profile covers every runner (Claude Code, Codex, Ollama), child process, hook,
-  MCP server, scheduled job, retry, and recovery path. Local MCP servers run inside;
-  remote MCP servers hold their own credentials and are individually allowed with
-  stated authority, or not connected.
+  MCP server, scheduled job, retry, and recovery path. Local MCP servers run inside.
+  Connected tools are governed by an **exclusion rule, not per-tool documentation**:
+  no connected tool may hold production credentials, cloud administration, publishing
+  authority, repository administration, branch-rule bypass, live-database access, or
+  patient data. A tool that would recreate the removed release authority is refused,
+  period.
 - Kernel sandbox on, strict, as the second layer inside the VM. Startup checks detect
   drift; the VM is the wall.
 - Prompt security updates for the Mac and VM software; snapshots and crash dumps
@@ -130,11 +152,15 @@ Mac:
 ## No keys in agent hands — the brokers
 
 - **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
-  the broker, which pushes the branch, opens the PR, and — on repos dialed to
-  autonomous — merges after the gauntlet passes. Its token has the narrowest scope
-  GitHub allows; repository automation on unreviewed branches runs with no valuable
-  secrets or not at all. Repos dialed to tap-to-merge are enforced by branch
-  protection, not by the broker's good behavior.
+  the broker, which pushes the branch, opens the PR, and — on admitted repos — merges
+  after the gauntlet passes. Its token has the narrowest scope GitHub allows, and the
+  broker is **unable** (not just untasked) to change repository settings, branch
+  rules, releases, packages, deployment environments, or repos outside the allowlist.
+  Because pushing a branch can itself start repository automation *before* the
+  gauntlet, **the broker refuses the push** unless that automation is known (from the
+  admission record) to hold no valuable credentials, no broad repo authority, and no
+  production effect. Repos dialed to tap-to-merge are enforced by branch protection,
+  not by the broker's good behavior.
 - **Provider broker.** Agent runners get no reusable API or subscription credentials;
   the broker applies per-job budget *before* each call and is the only path to a
   provider. Hard provider-side caps wherever offered — stated honestly: only the
@@ -149,10 +175,13 @@ Mac:
 - Every dispatched job gets a row; no silent work. Reviews, verdicts, and evidence
   bind to the exact commit they examined (the round-3 lesson: a verdict that outlives
   the code it reviewed is worthless). A fail condemns a version, not the job forever;
-  verdicts can't be deleted or edited pass-ward (enforced in the schema, already
-  built and regression-tested).
-- Local model output never lands without higher-tier review (schema guard, already
-  enforced).
+  verdicts can't be deleted or edited pass-ward. **Honest status (Sol round 7): these
+  rules are hardened in the schema source but the LIVE database still runs the old,
+  weaker rules — startup never migrated it.** No credit is claimed until the live
+  record is migrated and re-attacked; the same applies to review-to-version binding,
+  which the current build does not yet enforce.
+- Local model output never lands without higher-tier review (same caveat: enforced in
+  schema source; live migration required before credit).
 - The record is the *audit*, not the jailer — agents have no write access to it, and
   the doors above don't consult it to work. A corrupted record misleads; it doesn't
   unlock anything.
@@ -176,8 +205,17 @@ Unchanged from round 5's design — the settled rules hold:
 - No dangerous approvals by voice; the per-repo tap-to-merge tap happens on GitHub,
   stopped, authenticated as a person (Tailscale is network privacy, not identity —
   the web app authenticates the user).
-- Ambient speakers stated plainly as an open risk: voice can create work and spend
-  from the routine budget; it can never open a door.
+- **OWNER DECISION E (2026-07-17): voice-originated jobs merge autonomously too.**
+  Sol offered a choice — an authenticated non-voice "yes I really asked for that" tap
+  before voice-originated work merges, or explicit acceptance of the risk that a
+  misheard or ambient-speech instruction produces merged (source-reversible, admitted-
+  repo-only) changes nobody wanted. **Neill chose fully hands-free and accepts that
+  risk knowingly.** The blast radius of that acceptance is bounded by admission rules:
+  a wrong merge changes source in a repo where merges have no consequences beyond
+  source.
+- Ambient speakers stated plainly as an open risk: voice can create work, spend from
+  the routine budget, and (per Decision E) cause unwanted-but-reversible merges in
+  admitted repos; it can never open a door.
 - Chief is `gpt-5.6-terra` streaming (~1.4s), escalating to `gpt-5.6-sol` on pushback;
   Chief is not a security boundary. Realistic driving test set before trusting the
   voice beyond calm, stopped conversation.
@@ -195,9 +233,23 @@ Unchanged from round 5's design — the settled rules hold:
 
 ## Decommissioning
 
-Before the new paths are trusted, the old ones die, verified: direct runner launch
-from dispatch, harness-written verdicts, the old shipping path, the provider key in the
-web service, model-based speech-turn detection. v1 `backend/`/`frontend/` stay dead.
+Before the new paths are trusted, the old ones die, verified — "v1 is dead" is not
+sufficient while the paths remain runnable (Sol round 7 found these live in the repo
+today):
+
+- Direct runner launch from dispatch, and **every other direct host launch** — the
+  current voice/text paths start Codex/Claude directly on the business Mac, outside
+  the record, brokers, and VM, which quietly restores the authority Decision D
+  removed.
+- Harness-written verdicts; the old autonomous shipping path.
+- The provider key held in the web service; model-based speech-turn detection.
+- **The live production deploy command (Netlify), the public Cloudflare tunnel config
+  and the startup machinery that opens it, and the installer that creates a default
+  password** — removed or physically disabled, not just unused, because agents working
+  on this repo can read and edit anything runnable.
+- The live database migrated to the hardened rules (the old, weaker triggers are what
+  actually run today).
+- v1 `backend/`/`frontend/` stay dead.
 
 ---
 
@@ -221,9 +273,14 @@ build proves, as executed attacks:
 2. Resource attacks (disk fill, fork bomb, memory, network flood) leave the Mac
    usable.
 3. An agent cannot push, merge, or spend except through its broker; broker tokens
-   can't rewrite history or touch protected repos' merge rules.
+   can't rewrite history, change repo settings or branch rules, publish releases or
+   packages, or touch any repo outside the allowlist.
 4. Tap-to-merge repos: nothing merges without the owner's authenticated tap —
    enforced by GitHub with the broker's token unable to bypass it.
+4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
+   automation is refused autonomous merge; a push whose branch automation would run
+   with valuable credentials is refused by the broker; the EMR cannot be added by
+   config alone.
 5. Spend stops at provider-side caps under concurrent and retried requests.
 6. The record refuses agent writes; verdicts can't be deleted or edited pass-ward;
    evidence binds to the commit it examined.
@@ -232,21 +289,37 @@ build proves, as executed attacks:
 8. Every decommissioned legacy path is confirmed dead.
 9. Re-run on every upgrade of anything pinned.
 
-**Residual risks, named for the owner to accept knowingly** (the same ones his
-terminal use already carries, plus the always-on difference):
+**Residual risks, named for the owner to accept knowingly** (expanded per Sol round
+7 — these are accepted, not contained):
 
-- A subtle payload can pass honest review and land in a repo — contained by
-  reversibility, absence of credentials/production/customer data in scope, and the
-  audit trail; not prevented.
+- A subtle payload can pass honest review and land in a repo — contained by source
+  reversibility, admission rules, absence of credentials/production/customer data in
+  scope, and the audit trail; not prevented. **If the owner later manually deploys
+  that code, it can harm production — the manual step stops autonomous release; it
+  does not make the code correct.**
+- **Reverting source cannot undo consequences**: a disclosed secret, corrupted live
+  data, a published package, or an external action already taken stays done.
 - Source code and project content necessarily flow to the model providers the seats
   use; an injected instruction could deliberately include private project material in
-  a legitimate request. Scope (no EMR, no customer data) is the mitigation.
-- An always-on harness acts without the owner watching, unlike his terminal; the
-  record, budgets, and voice status reports are the compensations.
+  a legitimate request — and encoded exfiltration through an allowed channel cannot be
+  reliably scanned away. Scope (no EMR, no customer data) is the mitigation.
+  **Continuous voice additionally sends the owner's speech — and possibly nearby
+  conversation — to the voice provider.**
+- An always-on harness acts without the owner watching; misheard or ambient speech can
+  start work and (Decision E) merge it. The record, budgets, admission rules, and
+  voice status reports are the compensations.
+- **Many individually harmless merges can accumulate into a dangerous whole that no
+  single review sees** — the audit trail is the recovery tool, not a preventer.
+- A bug or compromise in a broker, a GitHub account, a model provider, a connected
+  tool, or a software update could grant more authority than intended; the record can
+  be incomplete or written falsely by a compromised trusted service.
 - Same-Mac VM escape via hypervisor bug: mitigated by patching; migration to separate
   hardware is a config change.
 - A compromised or spoofed voice/text session can create work and burn routine budget
   (never open doors).
+- **Availability is not guaranteed**: provider outages, exhausted subscription
+  allowances, queue flooding, or a failed broker can stop the harness without damage.
+- Agent-written code can carry licensing or ownership problems even when it works.
 
 ---
 
@@ -259,7 +332,11 @@ terminal use already carries, plus the always-on difference):
 - **C (2026-07-15):** the PHI-bearing EMR is out of scope; revisit requires
   attack-tested medical-data egress controls first.
 - **D (2026-07-17):** the proportionality reset. The harness is a development harness
-  benchmarked against the owner's daily terminal use of coding agents; agents merge to
-  ordinary repos autonomously after the gauntlet; production deployment stays manual;
-  irreversible powers stay behind server-side and physical doors; Sol names residual
-  risks rather than certifying impossibility.
+  benchmarked honestly against the owner's daily terminal use of coding agents (safer
+  in blast radius, more autonomous); agents merge to ADMITTED repos autonomously after
+  the gauntlet; production deployment stays manual; irreversible powers stay behind
+  server-side and physical doors; Sol names residual risks rather than certifying
+  impossibility.
+- **E (2026-07-17):** voice-originated jobs merge autonomously like typed ones. Neill
+  knowingly accepts that misheard or ambient speech can produce unwanted,
+  source-reversible merges in admitted repos, rather than adding a confirm-intent tap.

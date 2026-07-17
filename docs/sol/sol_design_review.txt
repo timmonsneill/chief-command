@@ -1,25 +1,31 @@
-You have reviewed this system six times. Your rounds 4–6 established, correctly, that model review is a quality gate, not a containment boundary, and that a system holding autonomous production-release authority needs the full apparatus of one: authority-based classification, qualified human review, signed release authorizations, independent build reproduction, key governance, administrator custody. Your demands were individually valid and collectively deepening every round.
+You have reviewed this system seven times. In round 7 you accepted the proportionality reset (Decision D: a development harness with no autonomous release authority, benchmarked against the owner's daily terminal use) and gave a conditional verdict: "Once the four narrow design changes above are made and the build proves the listed doors, I would sign off on it as an honest one-person development harness."
 
-The owner has now made the decision that resets the scope (Decision D, 2026-07-17, recorded in the document): **release authority is removed from the design.** This is a DEVELOPMENT harness. Agents build in a sealed VM, a multi-model gauntlet reviews, and work lands on the owner's own repositories the same way it lands from his terminal today when he runs Claude Code or Codex by hand — which he does daily, like millions of developers. Production deployment, where a project even has one, stays a manual owner action. There is no deployer, no signer, no machine release path — because there is no release authority to protect. The genuinely irreversible things sit behind doors: GitHub branch protection (server-side), credential absence, provider-side spend caps, the VM boundary, and the owner's own manual deploy step.
+The four design changes have now been made in the document:
 
-YOUR TASK HAS CHANGED, and this is important. You are NOT being asked to certify that no attack path exists — you yourself showed that question has no finite answer for any system running powerful agents, and it is not a standard anyone applies to the owner's daily terminal use, which is the explicit benchmark. Your job now:
+1. REPOSITORY ADMISSION RULES. Autonomous merge exists only for ADMITTED repos, and admission is a recorded per-repo decision proving a merge does nothing but change source: no deploy-on-merge, repo is not itself the live product, no machine auto-pulls main, no push/PR publishes packages or updates infrastructure or contacts outside systems, no automation with production secrets, no automation running agent code before the gauntlet. Any "yes" → automation disabled, repo excluded, or the owner's authenticated tap is explicitly the manual deploy step. Projects are an explicit allowlist; the EMR is structurally refused (a new recorded owner decision, not a config edit, would be required). The GitHub broker refuses a branch push unless the admission record shows that branch automation holds no valuable credentials and has no production effect.
 
-1. VERIFY THE CLAIMS TABLE. The document claims specific protections from specific mechanisms (branch protection, credential absence, VM profile, brokers, provider caps, the record). For each: does the stated mechanism actually provide the stated protection at this scope? Where a claim is stronger than its mechanism, say so.
+2. EXCLUSIONS BY RULE. No connected tool may hold production credentials, cloud administration, publishing authority, repository administration, branch-rule bypass, live-database access, or patient data — a rule, not per-tool documentation. The GitHub broker is unable (not just untasked) to change repo settings, branch rules, releases, packages, deployment environments, or repos outside the allowlist.
 
-2. CHECK THE BENCHMARK HONESTLY. Is this harness, as designed, materially MORE dangerous than the owner running Claude Code in his terminal on the same projects? Name every way it is (always-on, voice-triggered, overnight scale, no human watching) and judge whether the stated compensations (job record, budgets, VM, brokers, emergency stop, latency guard) actually compensate.
+3. CORRECTED CLAIMS AND BENCHMARK. The document now states: git reverses source, not consequences (with the examples you gave); the harness is "safer in blast radius, more autonomous" than terminal use — not "no more dangerous"; the extra autonomy risk lands on unwanted-but-source-reversible merges and routine spend. The "already built and regression-tested" credit for the record guards was removed — the document now states plainly that the live database still runs the old weaker rules and no credit is claimed until it is migrated and re-attacked, and that review-to-version binding is not yet enforced in the build. Your expanded residual-risk list (manual deploy of fooled code, source-revert ≠ consequence-revert, broker/account/provider compromise, cumulative merges, availability, voice audio to the provider, licensing) was folded in for explicit owner acceptance.
 
-3. NAME THE RESIDUAL RISKS in plain English for the owner to accept knowingly. The document lists five. Is that list complete and honestly stated? Add what's missing. Do not demand elimination of risks that are inherent to running coding agents at all — name them so the acceptance is informed.
+4. VOICE INTENT RESOLVED. You offered: authenticated non-voice confirmation before voice-originated merges, OR explicit owner acceptance of unwanted-but-reversible merges. The owner chose fully hands-free and the document records this as OWNER DECISION E, with its blast radius bounded by admission rules (a wrong merge changes source in a repo where merges have no consequences beyond source).
 
-4. FIND SCOPE LEAKS. The design says no production deploys, no EMR, no release machinery. Is there any path in the document by which the harness quietly reacquires release-like authority (deploy scripts in repos the agents can edit, repository automation that deploys on merge, a project whose "repo" IS its production, MCP servers with production credentials)? This is the most valuable thing you can find — places where the proportionate scope is stated but not held.
+Your scope-leak findings were also folded into the decommissioning list as verified-dead requirements: the Netlify deploy command, the Cloudflare tunnel and its startup machinery, the default-password installer, every direct host launch of coding models (voice and text paths included), the provider key in the web service, and the live-database migration.
 
-5. THE VOICE LAYER at this scope: any remaining path where voice or ambient speech reaches something irreversible, given merges are the gauntlet's call and doors gate the rest?
-
-6. WOULD YOU SIGN OFF ON THIS DESIGN AS PROPORTIONATE AND HONEST for its stated scope — a one-person development harness benchmarked against terminal agent use? If no: name the specific findings, ranked, distinguishing "the design must change" from "the build must prove it" from "the owner must accept it knowingly." If yes: say so plainly and name the top three things to watch during the build.
-
-Do not re-demand the autonomous-release architecture — that scope was removed, deliberately, by the owner. If you believe the removal itself is unsound (i.e., this design still secretly holds release authority somewhere), that is a scope leak — report it under question 4.
+Your build-must-prove list is adopted as the build-phase acceptance test (the document's numbered attack list was extended with admission-rule and broker-scope attacks).
 
 READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
-Prior verdicts if needed: docs/SOL_VERDICT_ROUND5_2026-07-15.md, docs/SOL_VERDICT_ROUND6_2026-07-16.md
+Your round-7 verdict summary: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND7_2026-07-17.md
 You may read the existing code under /Users/user/code-projects/chief-command/harness/ to check claims.
 
-Write in PLAIN ENGLISH for a non-technical reader. Be specific. Name exact failures, not categories.
+YOUR JOB now:
+
+1. Verify each of your four required changes is genuinely addressed — not just addressed in words. Name any load-bearing sentence whose mechanism doesn't deliver.
+
+2. Check Decision E's recording is honest: is the acceptance correctly scoped and stated, or does hands-free voice still reach something beyond unwanted-but-source-reversible merges in admitted repos, given the admission rules?
+
+3. Anything NEW the changes introduced (an admission process that can itself be gamed, an allowlist that can be edited by an agent, etc.)?
+
+4. FINALLY: do you SIGN OFF on this design as proportionate and honest for its stated scope, with the remaining items being build-phase proofs and knowing owner acceptances? If yes, say so plainly and name the top three things to watch during the build. If no, name exactly what is left, ranked, and whether it is a design change or a build proof.
+
+Write in PLAIN ENGLISH for a non-technical reader. Be specific.
