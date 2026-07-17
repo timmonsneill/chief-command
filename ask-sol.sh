@@ -12,7 +12,9 @@ while [ -e "$REPO/docs/sol/sol_round${N}.out" ]; do N=$((N + 1)); done
 OUT="$REPO/docs/sol/sol_round${N}.out"
 
 echo "Sending the design to Sol at high effort (round $N). This takes 5-15 minutes..."
-codex exec -c model_reasoning_effort=high "$(cat "$PROMPT")" > "$OUT" 2>&1
+# </dev/null: codex treats a non-tty stdin as extra input and waits for EOF forever,
+# which hangs unattended runs.
+codex exec -c model_reasoning_effort=high "$(cat "$PROMPT")" < /dev/null > "$OUT" 2>&1
 echo
 echo "================ SOL'S REVIEW (round $N) ================"
 tail -c 14000 "$OUT"
