@@ -62,10 +62,13 @@ start of a session if they're still open.
 
 ---
 
-## 🔵 BEFORE ANY BUILDING — design freeze is in effect
+## 🔵 ~~BEFORE ANY BUILDING~~ — **DESIGN FREEZE LIFTED 2026-07-17**
 
-Neill's instruction: *"stop building new shit until we have this all nailed down, and
-sol has reviewed it and approved it as well."*
+**SOL SIGNED OFF (round 9): "I sign off on this design as proportionate and honest for
+a one-person development harness. … No further design change is required."** See
+`SOL_APPROVAL_2026-07-17.md`. The build may begin; Sol's build-phase proofs are the
+acceptance bar, and its top three watches are the repository gate, the
+review-to-version chain, and hidden bypasses (old paths physically unusable).
 
 - [x] **Verify Sol's exploits against the schema.** DONE 2026-07-14. All three
       reproduced against the real schema. Two fixed in `schema.sql` (verdicts now
@@ -76,13 +79,11 @@ sol has reviewed it and approved it as well."*
 - [x] **Rewrite `ARCHITECTURE_v2_2026-07-14.md`** DONE 2026-07-14. Restructured around
       Sol's 8 review questions; added the seam table, the plain-file-DB trust answer, the
       credential-absence-via-separate-user answer, and folded in the verified exploits.
-- [~] **Send it back to Sol** (`./ask-sol.sh`). Rounds 4–6 REJECTED with deepening
-      demands (see verdict docs). **Round 7 on the re-scoped v3: CONDITIONAL — Sol's
-      closest to approval: "Once the four narrow design changes are made and the build
-      proves the listed doors, I would sign off."** See `SOL_VERDICT_ROUND7_2026-07-17.md`.
-      All four changes made (repo admission rules; exclusions by rule; honest
-      claims/benchmark; Decision E — Neill accepts hands-free voice merges). Round 8
-      running: verify-and-sign-off.
+- [x] **Sol review loop: COMPLETE.** Rounds 4–6 rejected (deepening demands under the
+      release-authority framing). Round 7 conditional after Decision D re-scoped.
+      Round 8 left four narrow items; all closed. **Round 9: SIGNED OFF, no further
+      design change required** — `SOL_APPROVAL_2026-07-17.md`, transcript
+      `docs/sol/sol_round6.out`.
 - [ ] **Build-phase gates from round 7** (fold into the build list): migrate the live
       DB to the hardened rules; bind verdicts to exact versions; kill ALL direct host
       launches (voice + text paths); remove/disable the Netlify deploy command, the

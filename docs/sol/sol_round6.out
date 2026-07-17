@@ -1,0 +1,1560 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.3
+--------
+workdir: /Users/user/code-projects/chief-command
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019f711e-2c0e-7972-8c45-c94901aa0c4e
+--------
+user
+You have reviewed this system eight times. Round 7: conditional approval of the proportionality reset pending four design changes. Round 8: you verified the four changes, passed the claims/benchmark corrections and Decision E's honesty, and left exactly four remaining items — three design changes and one wording change — stating: "Once those are added, I would regard the remaining work — VM escape attempts, credential searches, live-record migration, exact-version binding, branch-protection attacks, spend races, hostile voice tests, and verified removal of the old paths — as build-phase proof rather than further architectural debate."
+
+All four are now in the document:
+
+1. OWNER-CONTROLLED, CONTINUOUSLY VALID ADMISSION. Only the authenticated owner can create, change, or revoke admissions, the allowlist, connected-tool approvals, or the EMR refusal; these records live outside anything an agent can edit. Admission does not survive drift: the broker re-checks live repository state (automation, webhooks, integrations, publishing settings) against the recorded proof before each action and refuses on mismatch; a proposed change that would itself add deployment/publishing/privileged-automation behavior cancels the repo's admission until the owner re-admits. Repos are identified by GitHub's permanent repository ID. The "owner's tap = manual deploy step" exception now only counts where the tap physically starts the separate deployment and cannot rescue a repo where merge itself deploys.
+
+2. GAUNTLET BEFORE THE FIRST PUSH. The sequencing conflict you found is resolved in the direction round 7 required: review happens inside the harness on the agent's isolated clone BEFORE the first push; there is no pre-review push path at all; no repository automation ever runs unreviewed agent code; the verdict binds to the exact version that is then pushed and merged.
+
+3. THE OPERATION FILTER. The document now states GitHub's permission reality plainly (contents-write suffices to create releases and trigger certain automation, per GitHub's docs you cited), abandons the claim that token scoping alone delivers the prohibition, and places the broker behind an independently enforced operation filter — a separate component under a separate identity the broker cannot alter, permitting only push-branch / open-PR / merge-PR on allowlisted repo IDs and blocking release, tag, settings, and dispatch calls — designed to hold even if the broker is fooled or compromised, and attacked as part of the build (new acceptance cases 4b/4c/4d).
+
+4. WORDING. "Real money" became "spending beyond the fixed limits"; the benchmark no longer says the autonomy risk lands "almost entirely" on merges and spend — it now names continuous audio exposure, provider disclosure, and queue flooding alongside them.
+
+READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
+Your round-8 verdict summary: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND8_2026-07-17.md
+
+YOUR JOB: verify the four items are genuinely delivered, check nothing new was broken by the changes, and give your final answer: DO YOU SIGN OFF on this design as proportionate and honest for its stated scope — a one-person development harness — with the remaining work being the build-phase proofs you listed and the knowing owner acceptances recorded in the document? If yes, say so plainly and name the top three things to watch during the build. If no, name exactly what is left, precisely, and whether each item is a design change or a build proof.
+
+Write in PLAIN ENGLISH for a non-technical reader.
+codex
+I’m doing the final cross-check against my round-eight conditions. I’ll trace each promised change in the architecture, then scan the surrounding rules for contradictions or accidental weakening before giving a direct sign-off or a precise remaining list.
+exec
+/bin/zsh -lc 'wc -l docs/ARCHITECTURE_v2_2026-07-14.md docs/SOL_VERDICT_ROUND8_2026-07-17.md && rg -n -i "admission|allowlist|EMR|repository ID|manual deploy|gauntlet|first push|operation filter|contents.?write|release|dispatch|real money|spending beyond|almost entirely|continuous audio|queue flooding|provider disclosure|Decision E|acceptance case|4b|4c|4d|exact version|branch protection|credential|VM escape|live.record|old paths" docs/ARCHITECTURE_v2_2026-07-14.md docs/SOL_VERDICT_ROUND8_2026-07-17.md' in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+     374 docs/ARCHITECTURE_v2_2026-07-14.md
+      43 docs/SOL_VERDICT_ROUND8_2026-07-17.md
+     417 total
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:7:Scorecard on its round-7 conditions: claims/benchmark corrections **pass**; Decision E
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:8:**honestly recorded**; connected-tool exclusions **mostly pass**; admission rules
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:9:**partly** — governance of the admission process itself was missing.
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:13:1. **Owner-controlled, continuously valid admission (design).** Only the authenticated
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:14:   owner may create/change/revoke admissions, the allowlist, connected-tool approvals,
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:15:   or the EMR refusal — stored outside anything an agent can edit. Admission is not
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:18:   automation behavior cancels the repo's admission before it can be pushed or merged.
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:20:   manual deploy step" exception only counts where the tap physically starts the
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:22:2. **Gauntlet before the first push (design).** Sol caught a sequencing conflict: the
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:23:   admission rule said no automation runs agent code before review, but the broker text
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:25:   passes the gauntlet BEFORE its first branch push; no repository automation ever runs
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:28:   bundles contents-write (needed to push/merge) with release creation — so "the broker's
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:29:   token can't create releases" is factually unachievable with token scoping alone
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:33:4. **Two overstatements (wording).** "Real money" is not behind a door — routine spend
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:34:   is allowed; say "spending beyond the fixed limits." And the autonomy risk doesn't
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:35:   land "almost entirely" on merges and spend — continuous audio exposure, queue
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:36:   flooding, and provider disclosure are also new versus the terminal.
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:40:The doc's no-credit-claimed stance matches reality: admission system and GitHub broker
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:41:not built; live record still allows verdict deletion; the one "shipped" job lacks run
+docs/SOL_VERDICT_ROUND8_2026-07-17.md:42:identity; provider credential and direct execution paths still present — all correctly
+docs/ARCHITECTURE_v2_2026-07-14.md:5:production, Sol correctly demanded the full security apparatus of an autonomous release
+docs/ARCHITECTURE_v2_2026-07-14.md:24:credential absence, and hard caps protect the Mac, the secrets, production, and the
+docs/ARCHITECTURE_v2_2026-07-14.md:29:spend at scale, continuous audio going to the voice provider, more project material
+docs/ARCHITECTURE_v2_2026-07-14.md:30:flowing to model providers, and queue flooding that costs availability* — all named in
+docs/ARCHITECTURE_v2_2026-07-14.md:32:does not claim to be, an autonomous production-release authority.
+docs/ARCHITECTURE_v2_2026-07-14.md:38:  gauntlet passes, work merges autonomously by default, exactly like his terminal
+docs/ARCHITECTURE_v2_2026-07-14.md:39:  workflow — with GitHub branch protection blocking the one irreversible git action
+docs/ARCHITECTURE_v2_2026-07-14.md:41:- **Autonomous merge is only available to ADMITTED repos.** Admission is a recorded,
+docs/ARCHITECTURE_v2_2026-07-14.md:47:  the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
+docs/ARCHITECTURE_v2_2026-07-14.md:48:  or the owner's authenticated tap is designated as the manual deploy step — which
+docs/ARCHITECTURE_v2_2026-07-14.md:51:  Projects are an explicit **allowlist** — a repo that was never admitted simply does
+docs/ARCHITECTURE_v2_2026-07-14.md:52:  not exist to the harness, and **the EMR is structurally refused**: adding it
+docs/ARCHITECTURE_v2_2026-07-14.md:54:- **Admission is owner-controlled and continuously valid, not a one-time stamp.**
+docs/ARCHITECTURE_v2_2026-07-14.md:55:  Only the authenticated owner can create, change, or revoke an admission, the
+docs/ARCHITECTURE_v2_2026-07-14.md:56:  allowlist, a connected-tool approval, or the EMR refusal — and these records live
+docs/ARCHITECTURE_v2_2026-07-14.md:58:  agent-writable config). Admission does not survive drift: the broker re-checks the
+docs/ARCHITECTURE_v2_2026-07-14.md:62:  automation behavior **cancels the repo's admission** — it cannot be pushed or merged
+docs/ARCHITECTURE_v2_2026-07-14.md:64:  identified by GitHub's permanent repository ID, not by a name that can be renamed
+docs/ARCHITECTURE_v2_2026-07-14.md:69:  because there is no machine release path to protect.
+docs/ARCHITECTURE_v2_2026-07-14.md:71:  *tap-to-merge* — the gauntlet passes, the PR waits for his one-tap merge on GitHub,
+docs/ARCHITECTURE_v2_2026-07-14.md:72:  which branch protection enforces server-side. Default for ordinary personal repos is
+docs/ARCHITECTURE_v2_2026-07-14.md:74:- **The PHI-bearing EMR remains fully out of scope** (Decision C) — not a dial
+docs/ARCHITECTURE_v2_2026-07-14.md:77:This supersedes the round-5/6 release-chain design (preserved in git history and in
+docs/ARCHITECTURE_v2_2026-07-14.md:79:release authority; with release authority removed, it collapses to something the owner
+docs/ARCHITECTURE_v2_2026-07-14.md:81:as the per-repo dial and the standing rule that the gauntlet runs before anything
+docs/ARCHITECTURE_v2_2026-07-14.md:99:deploys, spending beyond the fixed limits, patient data) sit behind doors no agent can
+docs/ARCHITECTURE_v2_2026-07-14.md:114:   a subtle payload can survive the gauntlet and land in a repo. What contains it here
+docs/ARCHITECTURE_v2_2026-07-14.md:116:   project with no customer data, with no credentials to steal in the workspace, no
+docs/ARCHITECTURE_v2_2026-07-14.md:123:| GitHub branch protection | Server-side boundary | History rewrite and direct pushes to protected branches; enforces tap-to-merge where dialed |
+docs/ARCHITECTURE_v2_2026-07-14.md:124:| Credentials absent from agent reach | Absence | Exfiltration and misuse of what isn't there |
+docs/ARCHITECTURE_v2_2026-07-14.md:128:| The gauntlet + job record | Quality gate + audit | Bad work landing *unexamined*; "what did the overnight run do?" going unanswerable |
+docs/ARCHITECTURE_v2_2026-07-14.md:132:gauntlet is explicitly *not* one (round 4's lesson). And git's reversibility is stated
+docs/ARCHITECTURE_v2_2026-07-14.md:136:refused admission to autonomous merge.
+docs/ARCHITECTURE_v2_2026-07-14.md:148:- No shared folders, clipboard, or device passthrough; no credential connections; no
+docs/ARCHITECTURE_v2_2026-07-14.md:160:  no connected tool may hold production credentials, cloud administration, publishing
+docs/ARCHITECTURE_v2_2026-07-14.md:162:  patient data. A tool that would recreate the removed release authority is refused,
+docs/ARCHITECTURE_v2_2026-07-14.md:171:- **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
+docs/ARCHITECTURE_v2_2026-07-14.md:172:  the broker — and **only work whose exact version has already passed the gauntlet**:
+docs/ARCHITECTURE_v2_2026-07-14.md:178:  that allows pushing content also suffices to create releases and trigger certain
+docs/ARCHITECTURE_v2_2026-07-14.md:180:  release" true. The broker therefore sits behind an **independently enforced
+docs/ARCHITECTURE_v2_2026-07-14.md:181:  operation filter** — a separate component, under a separate identity the broker
+docs/ARCHITECTURE_v2_2026-07-14.md:183:  PR, on allowlisted repo IDs) and blocks release, tag, settings, dispatch, and every
+docs/ARCHITECTURE_v2_2026-07-14.md:186:  branch protection, not by the broker's good behavior.
+docs/ARCHITECTURE_v2_2026-07-14.md:187:- **Provider broker.** Agent runners get no reusable API or subscription credentials;
+docs/ARCHITECTURE_v2_2026-07-14.md:193:  environment are treated as holding a credential and narrowed accordingly — named,
+docs/ARCHITECTURE_v2_2026-07-14.md:196:## The gauntlet and the record
+docs/ARCHITECTURE_v2_2026-07-14.md:198:- Every dispatched job gets a row; no silent work. Reviews, verdicts, and evidence
+docs/ARCHITECTURE_v2_2026-07-14.md:218:  dispatch; numbered turns so a stale answer can't override a newer correction.
+docs/ARCHITECTURE_v2_2026-07-14.md:231:- **OWNER DECISION E (2026-07-17): voice-originated jobs merge autonomously too.**
+docs/ARCHITECTURE_v2_2026-07-14.md:236:  risk knowingly.** The blast radius of that acceptance is bounded by admission rules:
+docs/ARCHITECTURE_v2_2026-07-14.md:240:  the routine budget, and (per Decision E) cause unwanted-but-reversible merges in
+docs/ARCHITECTURE_v2_2026-07-14.md:249:  restore must not revive revoked credentials or dead paths.
+docs/ARCHITECTURE_v2_2026-07-14.md:263:- Direct runner launch from dispatch, and **every other direct host launch** — the
+docs/ARCHITECTURE_v2_2026-07-14.md:285:- Grok CLI does not touch the Arch EMR repo until the upload allegation is disproven.
+docs/ARCHITECTURE_v2_2026-07-14.md:295:   or find any reusable credential.
+docs/ARCHITECTURE_v2_2026-07-14.md:299:   can't rewrite history, change repo settings or branch rules, publish releases or
+docs/ARCHITECTURE_v2_2026-07-14.md:300:   packages, or touch any repo outside the allowlist.
+docs/ARCHITECTURE_v2_2026-07-14.md:303:4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
+docs/ARCHITECTURE_v2_2026-07-14.md:304:   automation is refused autonomous merge; the EMR cannot be added by config alone;
+docs/ARCHITECTURE_v2_2026-07-14.md:305:   an agent cannot edit any admission record, the allowlist, or a tool approval;
+docs/ARCHITECTURE_v2_2026-07-14.md:308:   cancels admission before it can be pushed.
+docs/ARCHITECTURE_v2_2026-07-14.md:309:4c. The operation filter holds: using the broker's own credential, attempts to create
+docs/ARCHITECTURE_v2_2026-07-14.md:310:   a release or tag, change settings or branch rules, fire automation dispatch, or
+docs/ARCHITECTURE_v2_2026-07-14.md:311:   touch a repo outside the allowlist are all blocked by the filter — including when
+docs/ARCHITECTURE_v2_2026-07-14.md:313:4d. Sequencing holds: no branch containing unreviewed agent code can be pushed at
+docs/ARCHITECTURE_v2_2026-07-14.md:314:   all; the gauntlet verdict is bound to the exact version that is then pushed and
+docs/ARCHITECTURE_v2_2026-07-14.md:319:7. Partial speech, reconnection, rollover, or a stale queued answer cannot dispatch
+docs/ARCHITECTURE_v2_2026-07-14.md:328:  reversibility, admission rules, absence of credentials/production/customer data in
+docs/ARCHITECTURE_v2_2026-07-14.md:330:  that code, it can harm production — the manual step stops autonomous release; it
+docs/ARCHITECTURE_v2_2026-07-14.md:337:  reliably scanned away. Scope (no EMR, no customer data) is the mitigation.
+docs/ARCHITECTURE_v2_2026-07-14.md:341:  start work and (Decision E) merge it. The record, budgets, admission rules, and
+docs/ARCHITECTURE_v2_2026-07-14.md:348:- Same-Mac VM escape via hypervisor bug: mitigated by patching; migration to separate
+docs/ARCHITECTURE_v2_2026-07-14.md:353:  allowances, queue flooding, or a failed broker can stop the harness without damage.
+docs/ARCHITECTURE_v2_2026-07-14.md:360:- **A (2026-07-15/16):** made under the autonomous-release framing; superseded by D.
+docs/ARCHITECTURE_v2_2026-07-14.md:361:  Its residue: the gauntlet always runs, and the per-repo tap-to-merge dial exists.
+docs/ARCHITECTURE_v2_2026-07-14.md:364:- **C (2026-07-15):** the PHI-bearing EMR is out of scope; revisit requires
+docs/ARCHITECTURE_v2_2026-07-14.md:369:  the gauntlet; production deployment stays manual; irreversible powers stay behind
+
+exec
+/bin/zsh -lc "sed -n '1,220p' docs/ARCHITECTURE_v2_2026-07-14.md" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+# Chief Command — Architecture of Record (v3, 2026-07-17)
+
+Seven adversarial reviews got here. Rounds 4–6 proved something important, then
+over-proved it: because earlier drafts gave the machine the power to deploy itself to
+production, Sol correctly demanded the full security apparatus of an autonomous release
+authority — signing-key governance, independent build reproduction, multi-person
+administrator custody — an architecture a one-person project cannot build or operate,
+with demands deepening every round rather than converging.
+
+The owner ended the spiral with the observation that resets the whole frame: **he ships
+agent-written code from his terminal every day.** Claude Code and Codex writing,
+reviewing, and pushing code under standard tooling is normal practice for millions of
+developers. The previous drafts weren't wrong about the attacks; they were wrong about
+the scope. This version fixes the scope.
+
+Plain English throughout, because the owner cannot read code.
+
+---
+
+## OWNER DECISION D (2026-07-17) — the proportionality reset
+
+**The benchmark, stated the honest way (Sol round 7):** compared to the owner running
+Claude Code in his terminal today, this harness is **safer in blast radius** — the VM,
+credential absence, and hard caps protect the Mac, the secrets, production, and the
+wallet better than a bare terminal does — and **more autonomous**: it runs unattended,
+takes voice-triggered work, operates at overnight scale, and reads more injectable
+content than a supervised session. The extra autonomy brings several new risks the
+terminal doesn't have: *unwanted-but-source-reversible repository changes, routine
+spend at scale, continuous audio going to the voice provider, more project material
+flowing to model providers, and queue flooding that costs availability* — all named in
+the residual-risk list and accepted explicitly by the owner (Decisions D and E). It is a *development* harness. It is not, and
+does not claim to be, an autonomous production-release authority.
+
+Concretely:
+
+- **"Ship" means landing code on the owner's own repos** — the thing git makes
+  reversible, and the thing agents already do from his terminal daily. After the
+  gauntlet passes, work merges autonomously by default, exactly like his terminal
+  workflow — with GitHub branch protection blocking the one irreversible git action
+  (rewriting history) on repos where it's enabled.
+- **Autonomous merge is only available to ADMITTED repos.** Admission is a recorded,
+  per-repo decision proving that **merging does nothing but change source**: merging
+  does not deploy a site or service; the repo is not itself the live product; no other
+  machine auto-pulls its main branch; no push/PR publishes a package, updates
+  infrastructure, alters scheduled work, or contacts outside systems; no repository
+  automation holds production secrets; no automation runs agent-written code before
+  the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
+  or the owner's authenticated tap is designated as the manual deploy step — which
+  only counts where the tap **physically starts** the separate deployment; it cannot
+  rescue a repo where merging itself deploys or the repo is already the live product.
+  Projects are an explicit **allowlist** — a repo that was never admitted simply does
+  not exist to the harness, and **the EMR is structurally refused**: adding it
+  requires a new recorded owner decision, not a config edit.
+- **Admission is owner-controlled and continuously valid, not a one-time stamp.**
+  Only the authenticated owner can create, change, or revoke an admission, the
+  allowlist, a connected-tool approval, or the EMR refusal — and these records live
+  outside anything an agent can edit (not in a repo the agents work on, not in
+  agent-writable config). Admission does not survive drift: the broker re-checks the
+  live repository state (automation, webhooks, integrations, publishing settings)
+  against the recorded proof before each action and **refuses when they differ**; and
+  a proposed change that would itself ADD deployment, publishing, or privileged
+  automation behavior **cancels the repo's admission** — it cannot be pushed or merged
+  until the owner re-admits the repo with the new behavior assessed. Repos are
+  identified by GitHub's permanent repository ID, not by a name that can be renamed
+  or reused.
+- **Deploying to a live production service is out of scope for agents.** Where a
+  project has a real production deployment, that step stays a manual owner action, as
+  it is today. No deployer identity, no signing chain, no production kill switch —
+  because there is no machine release path to protect.
+- **Per-repo dial.** The owner can mark any repo (or change class) as
+  *tap-to-merge* — the gauntlet passes, the PR waits for his one-tap merge on GitHub,
+  which branch protection enforces server-side. Default for ordinary personal repos is
+  autonomous merge; the dial exists for anything he decides matters more.
+- **The PHI-bearing EMR remains fully out of scope** (Decision C) — not a dial
+  setting; it is absent from the harness's world entirely.
+
+This supersedes the round-5/6 release-chain design (preserved in git history and in
+`SOL_VERDICT_ROUND5/6`). The reviewer-seat model (Decision A) applied to an autonomous
+release authority; with release authority removed, it collapses to something the owner
+already does: deciding what merges into his own projects. Its useful residue survives
+as the per-repo dial and the standing rule that the gauntlet runs before anything
+lands.
+
+### What Sol is asked to do now
+
+Not to certify that no attack path exists — Sol itself proved that question has no
+finite answer for any system that runs powerful agents. Sol's job is: **verify the
+design honestly does what it claims, verify the claims match the code as built, and
+name the residual risks in plain English so the owner accepts them knowingly** — the
+same risks he already accepts, unnamed, every time he opens his terminal.
+
+---
+
+## The one-sentence shape
+
+**OpenClaw drives the car. Agents work in a sealed workspace with no keys, everything
+they do is recorded and reviewed, work lands on the owner's repos like it does from his
+terminal — and the few genuinely irreversible things (history rewrite, production
+deploys, spending beyond the fixed limits, patient data) sit behind doors no agent can
+open.**
+
+---
+
+## The threat model
+
+Not the owner. The real threats, in order:
+
+1. **An agent doing something nobody asked for.**
+2. **Prompt injection** — poisoned text in a file, dependency, issue, or web page turns
+   a fooled-but-authorized agent into an attacker's hands. Load-bearing, because the
+   agent is *allowed* to read the repo.
+3. **Mishearing** — road noise, a passenger, a bad transcript.
+4. **Code that passes honest review** (the round-4 finding, still true at this scope):
+   a subtle payload can survive the gauntlet and land in a repo. What contains it here
+   is not review but *consequence limits*: it lands in a git-reversible repo, in a
+   project with no customer data, with no credentials to steal in the workspace, no
+   production to reach, and a record of exactly which job produced it.
+
+## What protects against those threats — the doors, honestly labeled
+
+| Protection | Kind | What it actually stops |
+|---|---|---|
+| GitHub branch protection | Server-side boundary | History rewrite and direct pushes to protected branches; enforces tap-to-merge where dialed |
+| Credentials absent from agent reach | Absence | Exfiltration and misuse of what isn't there |
+| The sealed workspace (VM) | Kernel/hypervisor boundary | Agents touching the owner's files, business, or network |
+| Brokered GitHub/provider access | Narrow authority | Agents holding reusable keys; runaway spend at brokered providers |
+| Provider-side hard caps | External boundary | Spend past the cap, where the provider offers a real one |
+| The gauntlet + job record | Quality gate + audit | Bad work landing *unexamined*; "what did the overnight run do?" going unanswerable |
+| Git itself | Reversibility of SOURCE | Makes a bad merge usually recoverable as a source change |
+
+The table is the design's honesty mechanism: the first five are boundaries; the
+gauntlet is explicitly *not* one (round 4's lesson). And git's reversibility is stated
+precisely: **git reverses source, not consequences.** It cannot unpublish a leaked
+secret, undo automation that already ran, retract a downloaded package, or repair
+damaged live data — which is exactly why repos where a merge *has* consequences are
+refused admission to autonomous merge.
+
+---
+
+## Where agents run — the sealed workspace
+
+**DECIDED (Neill, 2026-07-15): a dedicated VM on this Mac**, migratable to separate
+hardware by config. The profile keeps everything cheap-and-real from round 6; the
+honest caveat stands — this protects against ordinary containment failures, and the
+owner knowingly accepts the residual risk of hostile execution sharing his business
+Mac:
+
+- No shared folders, clipboard, or device passthrough; no credential connections; no
+  host-management channel; no Tailscale identity inside; no inbound connections.
+- Outgoing traffic only through the named brokers, enforced by a host-side firewall the
+  guest cannot reconfigure.
+- Fixed-size disk; hard CPU, memory, process, time, and network limits — an agent must
+  not be able to brick the Mac by exhaustion. Disk-full/memory/flood/crash responses
+  tested.
+- Isolated clones per agent — never shared working copies (a git worktree shares
+  history and hooks; a clone doesn't).
+- The profile covers every runner (Claude Code, Codex, Ollama), child process, hook,
+  MCP server, scheduled job, retry, and recovery path. Local MCP servers run inside.
+  Connected tools are governed by an **exclusion rule, not per-tool documentation**:
+  no connected tool may hold production credentials, cloud administration, publishing
+  authority, repository administration, branch-rule bypass, live-database access, or
+  patient data. A tool that would recreate the removed release authority is refused,
+  period.
+- Kernel sandbox on, strict, as the second layer inside the VM. Startup checks detect
+  drift; the VM is the wall.
+- Prompt security updates for the Mac and VM software; snapshots and crash dumps
+  treated as sensitive.
+
+## No keys in agent hands — the brokers
+
+- **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
+  the broker — and **only work whose exact version has already passed the gauntlet**:
+  review happens inside the harness on the agent's isolated clone, *before* the first
+  push, so no repository automation ever runs unreviewed agent code (this resolves
+  the round-8 sequencing conflict; there is no pre-review push path at all). The
+  broker then pushes the branch, opens the PR, and — on admitted repos — merges.
+  **Honest permission reality (Sol round 8, from GitHub's own docs):** the permission
+  that allows pushing content also suffices to create releases and trigger certain
+  automation — so token scoping alone cannot make "the broker can't publish a
+  release" true. The broker therefore sits behind an **independently enforced
+  operation filter** — a separate component, under a separate identity the broker
+  cannot alter, that permits only the exact operations (push branch, open PR, merge
+  PR, on allowlisted repo IDs) and blocks release, tag, settings, dispatch, and every
+  other call — designed to hold even if the broker itself is fooled or compromised,
+  and attacked as part of the build. Repos dialed to tap-to-merge are enforced by
+  branch protection, not by the broker's good behavior.
+- **Provider broker.** Agent runners get no reusable API or subscription credentials;
+  the broker applies per-job budget *before* each call and is the only path to a
+  provider. Hard provider-side caps wherever offered — stated honestly: only the
+  provider's own cap is a real financial boundary; elsewhere the broker is a strong
+  mitigation. Provider *responses* are untrusted input.
+- Subscription runners that technically require login material inside their
+  environment are treated as holding a credential and narrowed accordingly — named,
+  not hidden.
+
+## The gauntlet and the record
+
+- Every dispatched job gets a row; no silent work. Reviews, verdicts, and evidence
+  bind to the exact commit they examined (the round-3 lesson: a verdict that outlives
+  the code it reviewed is worthless). A fail condemns a version, not the job forever;
+  verdicts can't be deleted or edited pass-ward. **Honest status (Sol round 7): these
+  rules are hardened in the schema source but the LIVE database still runs the old,
+  weaker rules — startup never migrated it.** No credit is claimed until the live
+  record is migrated and re-attacked; the same applies to review-to-version binding,
+  which the current build does not yet enforce.
+- Local model output never lands without higher-tier review (same caveat: enforced in
+  schema source; live migration required before credit).
+- The record is the *audit*, not the jailer — agents have no write access to it, and
+  the doors above don't consult it to work. A corrupted record misleads; it doesn't
+  unlock anything.
+
+## The voice + Chief layer
+
+Unchanged from round 5's design — the settled rules hold:
+
+- Voice is a telephone; it classifies nothing. Every input door (voice, text app, web)
+  goes through one deterministic turn controller: only committed instructions
+  dispatch; numbered turns so a stale answer can't override a newer correction.
+- Critical warnings, amounts, and confirmations delivered from fixed stored text —
+  never model-paraphrased. Chief confirms its own read-back; approval attaches to the
+
+exec
+/bin/zsh -lc "sed -n '221,420p' docs/ARCHITECTURE_v2_2026-07-14.md && sed -n '1,120p' docs/SOL_VERDICT_ROUND8_2026-07-17.md" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+  read-back.
+- A hardwired emergency stop that doesn't route through Chief, reachable while
+  driving; honest semantics — it reports confirmed-dead versus unknown, and kills
+  jobs (there is no production workload to kill at this scope).
+- Separate cancellation for speech, Chief's thought, queued work, running builders.
+  Latency guard: hard timeout → "I'm struggling, nothing's started," spoken only after
+  the record confirms nothing started.
+- No dangerous approvals by voice; the per-repo tap-to-merge tap happens on GitHub,
+  stopped, authenticated as a person (Tailscale is network privacy, not identity —
+  the web app authenticates the user).
+- **OWNER DECISION E (2026-07-17): voice-originated jobs merge autonomously too.**
+  Sol offered a choice — an authenticated non-voice "yes I really asked for that" tap
+  before voice-originated work merges, or explicit acceptance of the risk that a
+  misheard or ambient-speech instruction produces merged (source-reversible, admitted-
+  repo-only) changes nobody wanted. **Neill chose fully hands-free and accepts that
+  risk knowingly.** The blast radius of that acceptance is bounded by admission rules:
+  a wrong merge changes source in a repo where merges have no consequences beyond
+  source.
+- Ambient speakers stated plainly as an open risk: voice can create work, spend from
+  the routine budget, and (per Decision E) cause unwanted-but-reversible merges in
+  admitted repos; it can never open a door.
+- Chief is `gpt-5.6-terra` streaming (~1.4s), escalating to `gpt-5.6-sol` on pushback;
+  Chief is not a security boundary. Realistic driving test set before trusting the
+  voice beyond calm, stopped conversation.
+
+## Resilience
+
+- Off-machine backups of the record, config, and memory, with tested restores; a
+  restore must not revive revoked credentials or dead paths.
+- Crash recovery reconciles in-progress jobs on startup; duplicate protection so a
+  retry can't double-start a job.
+- Secret lifecycle: rotation, expiration, revocation, device-loss response.
+- Version-pin local software; deliberate, sandbox-first upgrades (OpenClaw pinned
+  `2026.6.11`); security updates for the Mac and VM software are not deferred. Remote
+  model/provider behavior can only be version-selected and monitored — said plainly.
+
+## Decommissioning
+
+Before the new paths are trusted, the old ones die, verified — "v1 is dead" is not
+sufficient while the paths remain runnable (Sol round 7 found these live in the repo
+today):
+
+- Direct runner launch from dispatch, and **every other direct host launch** — the
+  current voice/text paths start Codex/Claude directly on the business Mac, outside
+  the record, brokers, and VM, which quietly restores the authority Decision D
+  removed.
+- Harness-written verdicts; the old autonomous shipping path.
+- The provider key held in the web service; model-based speech-turn detection.
+- **The live production deploy command (Netlify), the public Cloudflare tunnel config
+  and the startup machinery that opens it, and the installer that creates a default
+  password** — removed or physically disabled, not just unused, because agents working
+  on this repo can read and edit anything runnable.
+- The live database migrated to the hardened rules (the old, weaker triggers are what
+  actually run today).
+- v1 `backend/`/`frontend/` stay dead.
+
+---
+
+## Standing constraints (unchanged)
+
+- Text works fully without voice. Voice is a skin.
+- Tailscale only, nothing public — plus real user authentication on top.
+- Never OpenClaw exec policy `full`/YOLO.
+- No Google/Gemini. Providers referenced by seat, never by name.
+- Grok CLI does not touch the Arch EMR repo until the upload allegation is disproven.
+
+---
+
+## The acceptance test — proportionate and finite
+
+Sol reviews this document against the claims table and residual-risk list, then the
+build proves, as executed attacks:
+
+1. An agent in the VM cannot read owner files, reach the host/tailnet/local network,
+   or find any reusable credential.
+2. Resource attacks (disk fill, fork bomb, memory, network flood) leave the Mac
+   usable.
+3. An agent cannot push, merge, or spend except through its broker; broker tokens
+   can't rewrite history, change repo settings or branch rules, publish releases or
+   packages, or touch any repo outside the allowlist.
+4. Tap-to-merge repos: nothing merges without the owner's authenticated tap —
+   enforced by GitHub with the broker's token unable to bypass it.
+4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
+   automation is refused autonomous merge; the EMR cannot be added by config alone;
+   an agent cannot edit any admission record, the allowlist, or a tool approval;
+   automation quietly added to an admitted repo causes the broker to refuse its next
+   action (drift check); a change that would itself add deploy/publish behavior
+   cancels admission before it can be pushed.
+4c. The operation filter holds: using the broker's own credential, attempts to create
+   a release or tag, change settings or branch rules, fire automation dispatch, or
+   touch a repo outside the allowlist are all blocked by the filter — including when
+   issued by the broker process itself.
+4d. Sequencing holds: no branch containing unreviewed agent code can be pushed at
+   all; the gauntlet verdict is bound to the exact version that is then pushed and
+   merged.
+5. Spend stops at provider-side caps under concurrent and retried requests.
+6. The record refuses agent writes; verdicts can't be deleted or edited pass-ward;
+   evidence binds to the commit it examined.
+7. Partial speech, reconnection, rollover, or a stale queued answer cannot dispatch
+   or override a newer correction; the emergency stop reports truthfully.
+8. Every decommissioned legacy path is confirmed dead.
+9. Re-run on every upgrade of anything pinned.
+
+**Residual risks, named for the owner to accept knowingly** (expanded per Sol round
+7 — these are accepted, not contained):
+
+- A subtle payload can pass honest review and land in a repo — contained by source
+  reversibility, admission rules, absence of credentials/production/customer data in
+  scope, and the audit trail; not prevented. **If the owner later manually deploys
+  that code, it can harm production — the manual step stops autonomous release; it
+  does not make the code correct.**
+- **Reverting source cannot undo consequences**: a disclosed secret, corrupted live
+  data, a published package, or an external action already taken stays done.
+- Source code and project content necessarily flow to the model providers the seats
+  use; an injected instruction could deliberately include private project material in
+  a legitimate request — and encoded exfiltration through an allowed channel cannot be
+  reliably scanned away. Scope (no EMR, no customer data) is the mitigation.
+  **Continuous voice additionally sends the owner's speech — and possibly nearby
+  conversation — to the voice provider.**
+- An always-on harness acts without the owner watching; misheard or ambient speech can
+  start work and (Decision E) merge it. The record, budgets, admission rules, and
+  voice status reports are the compensations.
+- **Many individually harmless merges can accumulate into a dangerous whole that no
+  single review sees** — the audit trail is the recovery tool, not a preventer.
+- A bug or compromise in a broker, a GitHub account, a model provider, a connected
+  tool, or a software update could grant more authority than intended; the record can
+  be incomplete or written falsely by a compromised trusted service.
+- Same-Mac VM escape via hypervisor bug: mitigated by patching; migration to separate
+  hardware is a config change.
+- A compromised or spoofed voice/text session can create work and burn routine budget
+  (never open doors).
+- **Availability is not guaranteed**: provider outages, exhausted subscription
+  allowances, queue flooding, or a failed broker can stop the harness without damage.
+- Agent-written code can carry licensing or ownership problems even when it works.
+
+---
+
+## ✅ OWNER DECISIONS — record
+
+- **A (2026-07-15/16):** made under the autonomous-release framing; superseded by D.
+  Its residue: the gauntlet always runs, and the per-repo tap-to-merge dial exists.
+- **B (2026-07-15):** agents run in a dedicated VM on this Mac; residual same-Mac risk
+  accepted; migration stays a config change.
+- **C (2026-07-15):** the PHI-bearing EMR is out of scope; revisit requires
+  attack-tested medical-data egress controls first.
+- **D (2026-07-17):** the proportionality reset. The harness is a development harness
+  benchmarked honestly against the owner's daily terminal use of coding agents (safer
+  in blast radius, more autonomous); agents merge to ADMITTED repos autonomously after
+  the gauntlet; production deployment stays manual; irreversible powers stay behind
+  server-side and physical doors; Sol names residual risks rather than certifying
+  impossibility.
+- **E (2026-07-17):** voice-originated jobs merge autonomously like typed ones. Neill
+  knowingly accepts that misheard or ambient speech can produce unwanted,
+  source-reversible merges in admitted repos, rather than adding a confirm-intent tap.
+# Sol's Verdict — Round 8 (2026-07-17)
+
+Full transcript: `docs/sol/sol_round5.out`. **Verdict: not yet — but four narrow items
+from sign-off**, and Sol committed: *"Once those are added, I would regard the remaining
+work … as build-phase proof rather than further architectural debate."*
+
+Scorecard on its round-7 conditions: claims/benchmark corrections **pass**; Decision E
+**honestly recorded**; connected-tool exclusions **mostly pass**; admission rules
+**partly** — governance of the admission process itself was missing.
+
+## The four remaining items
+
+1. **Owner-controlled, continuously valid admission (design).** Only the authenticated
+   owner may create/change/revoke admissions, the allowlist, connected-tool approvals,
+   or the EMR refusal — stored outside anything an agent can edit. Admission is not
+   permanent: the broker re-checks the live repository state against the recorded proof
+   at each action, and a proposed change that would ADD deploy/publish/privileged
+   automation behavior cancels the repo's admission before it can be pushed or merged.
+   Repos identified by GitHub's permanent ID, not renameable names. The "owner's tap =
+   manual deploy step" exception only counts where the tap physically starts the
+   deployment — it cannot rescue a repo where merge itself deploys.
+2. **Gauntlet before the first push (design).** Sol caught a sequencing conflict: the
+   admission rule said no automation runs agent code before review, but the broker text
+   contemplated pushing branches pre-review. Resolution: the exact reviewed version
+   passes the gauntlet BEFORE its first branch push; no repository automation ever runs
+   unreviewed agent code.
+3. **A genuinely narrower GitHub action path (design).** GitHub's own permission model
+   bundles contents-write (needed to push/merge) with release creation — so "the broker's
+   token can't create releases" is factually unachievable with token scoping alone
+   (Sol cited GitHub's docs). The broker needs an independently enforced outer operation
+   filter that permits only the exact push/PR/merge operations and survives the broker
+   itself being fooled or compromised; the build must attack it.
+4. **Two overstatements (wording).** "Real money" is not behind a door — routine spend
+   is allowed; say "spending beyond the fixed limits." And the autonomy risk doesn't
+   land "almost entirely" on merges and spend — continuous audio exposure, queue
+   flooding, and provider disclosure are also new versus the terminal.
+
+## Confirmed honest by Sol's code spot-check
+
+The doc's no-credit-claimed stance matches reality: admission system and GitHub broker
+not built; live record still allows verdict deletion; the one "shipped" job lacks run
+identity; provider credential and direct execution paths still present — all correctly
+presented as unfinished build/decommissioning work.
+
+codex
+All four additions are present in the places that matter, not merely mentioned in a summary. I’m now checking their interactions: whether admission can be bypassed through connected tools or naming, whether the filter actually covers the dangerous GitHub actions, and whether the “review first” rule remains consistent throughout the document.
+exec
+/bin/zsh -lc 'git status --short && git log --oneline --decorate -8 -- docs/ARCHITECTURE_v2_2026-07-14.md docs/SOL_VERDICT_ROUND8_2026-07-17.md && git diff -- docs/ARCHITECTURE_v2_2026-07-14.md docs/SOL_VERDICT_ROUND8_2026-07-17.md' in /Users/user/code-projects/chief-command
+ succeeded in 7306ms:
+2026-07-17 13:27:48.869 xcodebuild[99542:2236385]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:49.139 xcodebuild[99542:2236384] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-763JWM2i' (errno=Operation not permitted)
+2026-07-17 13:27:49.798 xcodebuild[99544:2236395]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:49.965 xcodebuild[99544:2236394] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+?? chief-work.png
+?? docs/sol/sol_round6.out
+?? forge-append-after.png
+?? forge-append-alphabet.png
+?? forge-final-state.png
+?? forge-multibubble.png
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-kB5O8ONf' (errno=Operation not permitted)
+2026-07-17 13:27:51.250 xcodebuild[99554:2236459]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:51.416 xcodebuild[99554:2236458] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-jvLDxBpy' (errno=Operation not permitted)
+2026-07-17 13:27:51.973 xcodebuild[99556:2236469]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:52.137 xcodebuild[99556:2236467] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+4ef7cf9 (HEAD -> main) docs(arch): close Sol's four round-8 items — admission governance, review-before-push, operation filter, wording
+022f265 docs(arch): fold in Sol's round-7 conditions — admission rules, exclusions by rule, honest claims, Decision E
+93a2584 docs(arch): v3 — Decision D proportionality reset; harness is a dev harness, not a release authority
+29e3f66 docs(arch): rewrite for Sol round-5 rejection — fail-closed reviewer seat, authority-based classification
+6820c0b docs(arch): record Neill's three owner decisions; update Sol prompt for round 5
+78c132b docs(arch): reframe around Sol round-4 rejection — honest core claim + 3 owner decisions
+694c042 docs(arch): rewrite to answer Sol's eight review questions head-on
+48c47fc docs: design freeze — handoff, TODO, architecture v2 draft, Sol's verdict
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-bMVuHJwe' (errno=Operation not permitted)
+2026-07-17 13:27:53.408 xcodebuild[99563:2236499]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:53.570 xcodebuild[99563:2236498] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-OFPQnDfg' (errno=Operation not permitted)
+2026-07-17 13:27:54.129 xcodebuild[99565:2236514]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:27:54.292 xcodebuild[99565:2236513] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+
+exec
+/bin/zsh -lc 'git show --stat --oneline 4ef7cf9 && git show --format=fuller --no-ext-diff --unified=80 4ef7cf9 -- docs/ARCHITECTURE_v2_2026-07-14.md' in /Users/user/code-projects/chief-command
+ succeeded in 4273ms:
+2026-07-17 13:28:01.674 xcodebuild[99579:2236625]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:28:01.842 xcodebuild[99579:2236624] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-aqL5b1GG' (errno=Operation not permitted)
+2026-07-17 13:28:02.402 xcodebuild[99586:2236644]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:28:02.567 xcodebuild[99586:2236643] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+4ef7cf9 docs(arch): close Sol's four round-8 items — admission governance, review-before-push, operation filter, wording
+ docs/ARCHITECTURE_v2_2026-07-14.md    |   66 +-
+ docs/SOL_VERDICT_ROUND8_2026-07-17.md |   43 +
+ docs/sol/sol_design_review.txt        |   31 +-
+ docs/sol/sol_round5.out               | 3122 +++++++++++++++++++++++++++++++++
+ 4 files changed, 3223 insertions(+), 39 deletions(-)
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-zFXfnMNz' (errno=Operation not permitted)
+2026-07-17 13:28:03.838 xcodebuild[99590:2236668]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:28:04.001 xcodebuild[99590:2236667] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-XsE8cHoM' (errno=Operation not permitted)
+2026-07-17 13:28:04.564 xcodebuild[99596:2236687]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-17 13:28:04.729 xcodebuild[99596:2236686] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+commit 4ef7cf9303fa5b19f02eac60913515bf83c28192
+Author:     timmonsneill <neill@archtofreedom.org>
+AuthorDate: Fri Jul 17 13:27:10 2026 -0400
+Commit:     timmonsneill <neill@archtofreedom.org>
+CommitDate: Fri Jul 17 13:27:10 2026 -0400
+
+    docs(arch): close Sol's four round-8 items — admission governance, review-before-push, operation filter, wording
+    
+    Round 8 left exactly four items, with Sol committing that everything after
+    them is build-phase proof. All four are in:
+    
+    1. Admission is owner-controlled and continuously valid: only the
+       authenticated owner edits admissions/allowlist/tool approvals/EMR refusal,
+       stored outside agent-writable material; the broker drift-checks live repo
+       state against the recorded proof each action; a change that would add
+       deploy/publish behavior cancels admission; repos identified by permanent
+       GitHub ID; the manual-deploy tap only counts where it physically starts
+       the deployment.
+    2. Sequencing resolved as round 7 required: the gauntlet passes the exact
+       version BEFORE its first push — no pre-review push path exists, so no
+       repository automation ever touches unreviewed agent code.
+    3. GitHub permission reality admitted (contents-write bundles release
+       creation): the broker sits behind an independently enforced operation
+       filter under a separate identity, allowing only push/PR/merge on
+       allowlisted repo IDs, designed to survive broker compromise and attacked
+       in the build (new acceptance cases 4b-4d).
+    4. Wording: 'real money' -> 'spending beyond the fixed limits'; autonomy
+       risks now name audio exposure, provider disclosure, and queue flooding
+       alongside merges and spend.
+    
+    Round-8 transcript preserved; round 9 asks for the final sign-off.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01CF98TPYxgZnGYEe3AdSzxR
+
+diff --git a/docs/ARCHITECTURE_v2_2026-07-14.md b/docs/ARCHITECTURE_v2_2026-07-14.md
+index aeda086..08e4739 100644
+--- a/docs/ARCHITECTURE_v2_2026-07-14.md
++++ b/docs/ARCHITECTURE_v2_2026-07-14.md
+@@ -1,342 +1,374 @@
+ # Chief Command — Architecture of Record (v3, 2026-07-17)
+ 
+ Seven adversarial reviews got here. Rounds 4–6 proved something important, then
+ over-proved it: because earlier drafts gave the machine the power to deploy itself to
+ production, Sol correctly demanded the full security apparatus of an autonomous release
+ authority — signing-key governance, independent build reproduction, multi-person
+ administrator custody — an architecture a one-person project cannot build or operate,
+ with demands deepening every round rather than converging.
+ 
+ The owner ended the spiral with the observation that resets the whole frame: **he ships
+ agent-written code from his terminal every day.** Claude Code and Codex writing,
+ reviewing, and pushing code under standard tooling is normal practice for millions of
+ developers. The previous drafts weren't wrong about the attacks; they were wrong about
+ the scope. This version fixes the scope.
+ 
+ Plain English throughout, because the owner cannot read code.
+ 
+ ---
+ 
+ ## OWNER DECISION D (2026-07-17) — the proportionality reset
+ 
+ **The benchmark, stated the honest way (Sol round 7):** compared to the owner running
+ Claude Code in his terminal today, this harness is **safer in blast radius** — the VM,
+ credential absence, and hard caps protect the Mac, the secrets, production, and the
+ wallet better than a bare terminal does — and **more autonomous**: it runs unattended,
+ takes voice-triggered work, operates at overnight scale, and reads more injectable
+-content than a supervised session. The extra autonomy risk lands almost entirely on
+-*unwanted-but-source-reversible repository changes and routine spend*, and the owner
+-accepts that explicitly (Decision E). It is a *development* harness. It is not, and
++content than a supervised session. The extra autonomy brings several new risks the
++terminal doesn't have: *unwanted-but-source-reversible repository changes, routine
++spend at scale, continuous audio going to the voice provider, more project material
++flowing to model providers, and queue flooding that costs availability* — all named in
++the residual-risk list and accepted explicitly by the owner (Decisions D and E). It is a *development* harness. It is not, and
+ does not claim to be, an autonomous production-release authority.
+ 
+ Concretely:
+ 
+ - **"Ship" means landing code on the owner's own repos** — the thing git makes
+   reversible, and the thing agents already do from his terminal daily. After the
+   gauntlet passes, work merges autonomously by default, exactly like his terminal
+   workflow — with GitHub branch protection blocking the one irreversible git action
+   (rewriting history) on repos where it's enabled.
+ - **Autonomous merge is only available to ADMITTED repos.** Admission is a recorded,
+   per-repo decision proving that **merging does nothing but change source**: merging
+   does not deploy a site or service; the repo is not itself the live product; no other
+   machine auto-pulls its main branch; no push/PR publishes a package, updates
+   infrastructure, alters scheduled work, or contacts outside systems; no repository
+   automation holds production secrets; no automation runs agent-written code before
+   the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
+-  or the owner's authenticated tap is explicitly designated as the manual deploy step.
++  or the owner's authenticated tap is designated as the manual deploy step — which
++  only counts where the tap **physically starts** the separate deployment; it cannot
++  rescue a repo where merging itself deploys or the repo is already the live product.
+   Projects are an explicit **allowlist** — a repo that was never admitted simply does
+   not exist to the harness, and **the EMR is structurally refused**: adding it
+   requires a new recorded owner decision, not a config edit.
++- **Admission is owner-controlled and continuously valid, not a one-time stamp.**
++  Only the authenticated owner can create, change, or revoke an admission, the
++  allowlist, a connected-tool approval, or the EMR refusal — and these records live
++  outside anything an agent can edit (not in a repo the agents work on, not in
++  agent-writable config). Admission does not survive drift: the broker re-checks the
++  live repository state (automation, webhooks, integrations, publishing settings)
++  against the recorded proof before each action and **refuses when they differ**; and
++  a proposed change that would itself ADD deployment, publishing, or privileged
++  automation behavior **cancels the repo's admission** — it cannot be pushed or merged
++  until the owner re-admits the repo with the new behavior assessed. Repos are
++  identified by GitHub's permanent repository ID, not by a name that can be renamed
++  or reused.
+ - **Deploying to a live production service is out of scope for agents.** Where a
+   project has a real production deployment, that step stays a manual owner action, as
+   it is today. No deployer identity, no signing chain, no production kill switch —
+   because there is no machine release path to protect.
+ - **Per-repo dial.** The owner can mark any repo (or change class) as
+   *tap-to-merge* — the gauntlet passes, the PR waits for his one-tap merge on GitHub,
+   which branch protection enforces server-side. Default for ordinary personal repos is
+   autonomous merge; the dial exists for anything he decides matters more.
+ - **The PHI-bearing EMR remains fully out of scope** (Decision C) — not a dial
+   setting; it is absent from the harness's world entirely.
+ 
+ This supersedes the round-5/6 release-chain design (preserved in git history and in
+ `SOL_VERDICT_ROUND5/6`). The reviewer-seat model (Decision A) applied to an autonomous
+ release authority; with release authority removed, it collapses to something the owner
+ already does: deciding what merges into his own projects. Its useful residue survives
+ as the per-repo dial and the standing rule that the gauntlet runs before anything
+ lands.
+ 
+ ### What Sol is asked to do now
+ 
+ Not to certify that no attack path exists — Sol itself proved that question has no
+ finite answer for any system that runs powerful agents. Sol's job is: **verify the
+ design honestly does what it claims, verify the claims match the code as built, and
+ name the residual risks in plain English so the owner accepts them knowingly** — the
+ same risks he already accepts, unnamed, every time he opens his terminal.
+ 
+ ---
+ 
+ ## The one-sentence shape
+ 
+ **OpenClaw drives the car. Agents work in a sealed workspace with no keys, everything
+ they do is recorded and reviewed, work lands on the owner's repos like it does from his
+ terminal — and the few genuinely irreversible things (history rewrite, production
+-deploys, real money, patient data) sit behind doors no agent can open.**
++deploys, spending beyond the fixed limits, patient data) sit behind doors no agent can
++open.**
+ 
+ ---
+ 
+ ## The threat model
+ 
+ Not the owner. The real threats, in order:
+ 
+ 1. **An agent doing something nobody asked for.**
+ 2. **Prompt injection** — poisoned text in a file, dependency, issue, or web page turns
+    a fooled-but-authorized agent into an attacker's hands. Load-bearing, because the
+    agent is *allowed* to read the repo.
+ 3. **Mishearing** — road noise, a passenger, a bad transcript.
+ 4. **Code that passes honest review** (the round-4 finding, still true at this scope):
+    a subtle payload can survive the gauntlet and land in a repo. What contains it here
+    is not review but *consequence limits*: it lands in a git-reversible repo, in a
+    project with no customer data, with no credentials to steal in the workspace, no
+    production to reach, and a record of exactly which job produced it.
+ 
+ ## What protects against those threats — the doors, honestly labeled
+ 
+ | Protection | Kind | What it actually stops |
+ |---|---|---|
+ | GitHub branch protection | Server-side boundary | History rewrite and direct pushes to protected branches; enforces tap-to-merge where dialed |
+ | Credentials absent from agent reach | Absence | Exfiltration and misuse of what isn't there |
+ | The sealed workspace (VM) | Kernel/hypervisor boundary | Agents touching the owner's files, business, or network |
+ | Brokered GitHub/provider access | Narrow authority | Agents holding reusable keys; runaway spend at brokered providers |
+ | Provider-side hard caps | External boundary | Spend past the cap, where the provider offers a real one |
+ | The gauntlet + job record | Quality gate + audit | Bad work landing *unexamined*; "what did the overnight run do?" going unanswerable |
+ | Git itself | Reversibility of SOURCE | Makes a bad merge usually recoverable as a source change |
+ 
+ The table is the design's honesty mechanism: the first five are boundaries; the
+ gauntlet is explicitly *not* one (round 4's lesson). And git's reversibility is stated
+ precisely: **git reverses source, not consequences.** It cannot unpublish a leaked
+ secret, undo automation that already ran, retract a downloaded package, or repair
+ damaged live data — which is exactly why repos where a merge *has* consequences are
+ refused admission to autonomous merge.
+ 
+ ---
+ 
+ ## Where agents run — the sealed workspace
+ 
+ **DECIDED (Neill, 2026-07-15): a dedicated VM on this Mac**, migratable to separate
+ hardware by config. The profile keeps everything cheap-and-real from round 6; the
+ honest caveat stands — this protects against ordinary containment failures, and the
+ owner knowingly accepts the residual risk of hostile execution sharing his business
+ Mac:
+ 
+ - No shared folders, clipboard, or device passthrough; no credential connections; no
+   host-management channel; no Tailscale identity inside; no inbound connections.
+ - Outgoing traffic only through the named brokers, enforced by a host-side firewall the
+   guest cannot reconfigure.
+ - Fixed-size disk; hard CPU, memory, process, time, and network limits — an agent must
+   not be able to brick the Mac by exhaustion. Disk-full/memory/flood/crash responses
+   tested.
+ - Isolated clones per agent — never shared working copies (a git worktree shares
+   history and hooks; a clone doesn't).
+ - The profile covers every runner (Claude Code, Codex, Ollama), child process, hook,
+   MCP server, scheduled job, retry, and recovery path. Local MCP servers run inside.
+   Connected tools are governed by an **exclusion rule, not per-tool documentation**:
+   no connected tool may hold production credentials, cloud administration, publishing
+   authority, repository administration, branch-rule bypass, live-database access, or
+   patient data. A tool that would recreate the removed release authority is refused,
+   period.
+ - Kernel sandbox on, strict, as the second layer inside the VM. Startup checks detect
+   drift; the VM is the wall.
+ - Prompt security updates for the Mac and VM software; snapshots and crash dumps
+   treated as sensitive.
+ 
+ ## No keys in agent hands — the brokers
+ 
+ - **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
+-  the broker, which pushes the branch, opens the PR, and — on admitted repos — merges
+-  after the gauntlet passes. Its token has the narrowest scope GitHub allows, and the
+-  broker is **unable** (not just untasked) to change repository settings, branch
+-  rules, releases, packages, deployment environments, or repos outside the allowlist.
+-  Because pushing a branch can itself start repository automation *before* the
+-  gauntlet, **the broker refuses the push** unless that automation is known (from the
+-  admission record) to hold no valuable credentials, no broad repo authority, and no
+-  production effect. Repos dialed to tap-to-merge are enforced by branch protection,
+-  not by the broker's good behavior.
++  the broker — and **only work whose exact version has already passed the gauntlet**:
++  review happens inside the harness on the agent's isolated clone, *before* the first
++  push, so no repository automation ever runs unreviewed agent code (this resolves
++  the round-8 sequencing conflict; there is no pre-review push path at all). The
++  broker then pushes the branch, opens the PR, and — on admitted repos — merges.
++  **Honest permission reality (Sol round 8, from GitHub's own docs):** the permission
++  that allows pushing content also suffices to create releases and trigger certain
++  automation — so token scoping alone cannot make "the broker can't publish a
++  release" true. The broker therefore sits behind an **independently enforced
++  operation filter** — a separate component, under a separate identity the broker
++  cannot alter, that permits only the exact operations (push branch, open PR, merge
++  PR, on allowlisted repo IDs) and blocks release, tag, settings, dispatch, and every
++  other call — designed to hold even if the broker itself is fooled or compromised,
++  and attacked as part of the build. Repos dialed to tap-to-merge are enforced by
++  branch protection, not by the broker's good behavior.
+ - **Provider broker.** Agent runners get no reusable API or subscription credentials;
+   the broker applies per-job budget *before* each call and is the only path to a
+   provider. Hard provider-side caps wherever offered — stated honestly: only the
+   provider's own cap is a real financial boundary; elsewhere the broker is a strong
+   mitigation. Provider *responses* are untrusted input.
+ - Subscription runners that technically require login material inside their
+   environment are treated as holding a credential and narrowed accordingly — named,
+   not hidden.
+ 
+ ## The gauntlet and the record
+ 
+ - Every dispatched job gets a row; no silent work. Reviews, verdicts, and evidence
+   bind to the exact commit they examined (the round-3 lesson: a verdict that outlives
+   the code it reviewed is worthless). A fail condemns a version, not the job forever;
+   verdicts can't be deleted or edited pass-ward. **Honest status (Sol round 7): these
+   rules are hardened in the schema source but the LIVE database still runs the old,
+   weaker rules — startup never migrated it.** No credit is claimed until the live
+   record is migrated and re-attacked; the same applies to review-to-version binding,
+   which the current build does not yet enforce.
+ - Local model output never lands without higher-tier review (same caveat: enforced in
+   schema source; live migration required before credit).
+ - The record is the *audit*, not the jailer — agents have no write access to it, and
+   the doors above don't consult it to work. A corrupted record misleads; it doesn't
+   unlock anything.
+ 
+ ## The voice + Chief layer
+ 
+ Unchanged from round 5's design — the settled rules hold:
+ 
+ - Voice is a telephone; it classifies nothing. Every input door (voice, text app, web)
+   goes through one deterministic turn controller: only committed instructions
+   dispatch; numbered turns so a stale answer can't override a newer correction.
+ - Critical warnings, amounts, and confirmations delivered from fixed stored text —
+   never model-paraphrased. Chief confirms its own read-back; approval attaches to the
+   read-back.
+ - A hardwired emergency stop that doesn't route through Chief, reachable while
+   driving; honest semantics — it reports confirmed-dead versus unknown, and kills
+   jobs (there is no production workload to kill at this scope).
+ - Separate cancellation for speech, Chief's thought, queued work, running builders.
+   Latency guard: hard timeout → "I'm struggling, nothing's started," spoken only after
+   the record confirms nothing started.
+ - No dangerous approvals by voice; the per-repo tap-to-merge tap happens on GitHub,
+   stopped, authenticated as a person (Tailscale is network privacy, not identity —
+   the web app authenticates the user).
+ - **OWNER DECISION E (2026-07-17): voice-originated jobs merge autonomously too.**
+   Sol offered a choice — an authenticated non-voice "yes I really asked for that" tap
+   before voice-originated work merges, or explicit acceptance of the risk that a
+   misheard or ambient-speech instruction produces merged (source-reversible, admitted-
+   repo-only) changes nobody wanted. **Neill chose fully hands-free and accepts that
+   risk knowingly.** The blast radius of that acceptance is bounded by admission rules:
+   a wrong merge changes source in a repo where merges have no consequences beyond
+   source.
+ - Ambient speakers stated plainly as an open risk: voice can create work, spend from
+   the routine budget, and (per Decision E) cause unwanted-but-reversible merges in
+   admitted repos; it can never open a door.
+ - Chief is `gpt-5.6-terra` streaming (~1.4s), escalating to `gpt-5.6-sol` on pushback;
+   Chief is not a security boundary. Realistic driving test set before trusting the
+   voice beyond calm, stopped conversation.
+ 
+ ## Resilience
+ 
+ - Off-machine backups of the record, config, and memory, with tested restores; a
+   restore must not revive revoked credentials or dead paths.
+ - Crash recovery reconciles in-progress jobs on startup; duplicate protection so a
+   retry can't double-start a job.
+ - Secret lifecycle: rotation, expiration, revocation, device-loss response.
+ - Version-pin local software; deliberate, sandbox-first upgrades (OpenClaw pinned
+   `2026.6.11`); security updates for the Mac and VM software are not deferred. Remote
+   model/provider behavior can only be version-selected and monitored — said plainly.
+ 
+ ## Decommissioning
+ 
+ Before the new paths are trusted, the old ones die, verified — "v1 is dead" is not
+ sufficient while the paths remain runnable (Sol round 7 found these live in the repo
+ today):
+ 
+ - Direct runner launch from dispatch, and **every other direct host launch** — the
+   current voice/text paths start Codex/Claude directly on the business Mac, outside
+   the record, brokers, and VM, which quietly restores the authority Decision D
+   removed.
+ - Harness-written verdicts; the old autonomous shipping path.
+ - The provider key held in the web service; model-based speech-turn detection.
+ - **The live production deploy command (Netlify), the public Cloudflare tunnel config
+   and the startup machinery that opens it, and the installer that creates a default
+   password** — removed or physically disabled, not just unused, because agents working
+   on this repo can read and edit anything runnable.
+ - The live database migrated to the hardened rules (the old, weaker triggers are what
+   actually run today).
+ - v1 `backend/`/`frontend/` stay dead.
+ 
+ ---
+ 
+ ## Standing constraints (unchanged)
+ 
+ - Text works fully without voice. Voice is a skin.
+ - Tailscale only, nothing public — plus real user authentication on top.
+ - Never OpenClaw exec policy `full`/YOLO.
+ - No Google/Gemini. Providers referenced by seat, never by name.
+ - Grok CLI does not touch the Arch EMR repo until the upload allegation is disproven.
+ 
+ ---
+ 
+ ## The acceptance test — proportionate and finite
+ 
+ Sol reviews this document against the claims table and residual-risk list, then the
+ build proves, as executed attacks:
+ 
+ 1. An agent in the VM cannot read owner files, reach the host/tailnet/local network,
+    or find any reusable credential.
+ 2. Resource attacks (disk fill, fork bomb, memory, network flood) leave the Mac
+    usable.
+ 3. An agent cannot push, merge, or spend except through its broker; broker tokens
+    can't rewrite history, change repo settings or branch rules, publish releases or
+    packages, or touch any repo outside the allowlist.
+ 4. Tap-to-merge repos: nothing merges without the owner's authenticated tap —
+    enforced by GitHub with the broker's token unable to bypass it.
+ 4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
+-   automation is refused autonomous merge; a push whose branch automation would run
+-   with valuable credentials is refused by the broker; the EMR cannot be added by
+-   config alone.
++   automation is refused autonomous merge; the EMR cannot be added by config alone;
++   an agent cannot edit any admission record, the allowlist, or a tool approval;
++   automation quietly added to an admitted repo causes the broker to refuse its next
++   action (drift check); a change that would itself add deploy/publish behavior
++   cancels admission before it can be pushed.
++4c. The operation filter holds: using the broker's own credential, attempts to create
++   a release or tag, change settings or branch rules, fire automation dispatch, or
++   touch a repo outside the allowlist are all blocked by the filter — including when
++   issued by the broker process itself.
++4d. Sequencing holds: no branch containing unreviewed agent code can be pushed at
++   all; the gauntlet verdict is bound to the exact version that is then pushed and
++   merged.
+ 5. Spend stops at provider-side caps under concurrent and retried requests.
+ 6. The record refuses agent writes; verdicts can't be deleted or edited pass-ward;
+    evidence binds to the commit it examined.
+ 7. Partial speech, reconnection, rollover, or a stale queued answer cannot dispatch
+    or override a newer correction; the emergency stop reports truthfully.
+ 8. Every decommissioned legacy path is confirmed dead.
+ 9. Re-run on every upgrade of anything pinned.
+ 
+ **Residual risks, named for the owner to accept knowingly** (expanded per Sol round
+ 7 — these are accepted, not contained):
+ 
+ - A subtle payload can pass honest review and land in a repo — contained by source
+   reversibility, admission rules, absence of credentials/production/customer data in
+   scope, and the audit trail; not prevented. **If the owner later manually deploys
+   that code, it can harm production — the manual step stops autonomous release; it
+   does not make the code correct.**
+ - **Reverting source cannot undo consequences**: a disclosed secret, corrupted live
+   data, a published package, or an external action already taken stays done.
+ - Source code and project content necessarily flow to the model providers the seats
+   use; an injected instruction could deliberately include private project material in
+   a legitimate request — and encoded exfiltration through an allowed channel cannot be
+   reliably scanned away. Scope (no EMR, no customer data) is the mitigation.
+   **Continuous voice additionally sends the owner's speech — and possibly nearby
+   conversation — to the voice provider.**
+ - An always-on harness acts without the owner watching; misheard or ambient speech can
+   start work and (Decision E) merge it. The record, budgets, admission rules, and
+   voice status reports are the compensations.
+ - **Many individually harmless merges can accumulate into a dangerous whole that no
+   single review sees** — the audit trail is the recovery tool, not a preventer.
+ - A bug or compromise in a broker, a GitHub account, a model provider, a connected
+   tool, or a software update could grant more authority than intended; the record can
+   be incomplete or written falsely by a compromised trusted service.
+ - Same-Mac VM escape via hypervisor bug: mitigated by patching; migration to separate
+   hardware is a config change.
+ - A compromised or spoofed voice/text session can create work and burn routine budget
+   (never open doors).
+ - **Availability is not guaranteed**: provider outages, exhausted subscription
+   allowances, queue flooding, or a failed broker can stop the harness without damage.
+ - Agent-written code can carry licensing or ownership problems even when it works.
+ 
+ ---
+ 
+ ## ✅ OWNER DECISIONS — record
+ 
+ - **A (2026-07-15/16):** made under the autonomous-release framing; superseded by D.
+   Its residue: the gauntlet always runs, and the per-repo tap-to-merge dial exists.
+ - **B (2026-07-15):** agents run in a dedicated VM on this Mac; residual same-Mac risk
+   accepted; migration stays a config change.
+ - **C (2026-07-15):** the PHI-bearing EMR is out of scope; revisit requires
+   attack-tested medical-data egress controls first.
+ - **D (2026-07-17):** the proportionality reset. The harness is a development harness
+   benchmarked honestly against the owner's daily terminal use of coding agents (safer
+   in blast radius, more autonomous); agents merge to ADMITTED repos autonomously after
+   the gauntlet; production deployment stays manual; irreversible powers stay behind
+   server-side and physical doors; Sol names residual risks rather than certifying
+   impossibility.
+ - **E (2026-07-17):** voice-originated jobs merge autonomously like typed ones. Neill
+   knowingly accepts that misheard or ambient speech can produce unwanted,
+   source-reversible merges in admitted repos, rather than adding a confirm-intent tap.
+
+exec
+/bin/zsh -lc 'rg -n -C 8 "Once those are added|continuously valid|operation filter|first push|exact version|real money|almost entirely|top three|sign off" docs/sol/sol_round5.out docs/sol/sol_design_review.txt' in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+docs/sol/sol_design_review.txt:1:You have reviewed this system eight times. Round 7: conditional approval of the proportionality reset pending four design changes. Round 8: you verified the four changes, passed the claims/benchmark corrections and Decision E's honesty, and left exactly four remaining items — three design changes and one wording change — stating: "Once those are added, I would regard the remaining work — VM escape attempts, credential searches, live-record migration, exact-version binding, branch-protection attacks, spend races, hostile voice tests, and verified removal of the old paths — as build-phase proof rather than further architectural debate."
+docs/sol/sol_design_review.txt-2-
+docs/sol/sol_design_review.txt-3-All four are now in the document:
+docs/sol/sol_design_review.txt-4-
+docs/sol/sol_design_review.txt-5-1. OWNER-CONTROLLED, CONTINUOUSLY VALID ADMISSION. Only the authenticated owner can create, change, or revoke admissions, the allowlist, connected-tool approvals, or the EMR refusal; these records live outside anything an agent can edit. Admission does not survive drift: the broker re-checks live repository state (automation, webhooks, integrations, publishing settings) against the recorded proof before each action and refuses on mismatch; a proposed change that would itself add deployment/publishing/privileged-automation behavior cancels the repo's admission until the owner re-admits. Repos are identified by GitHub's permanent repository ID. The "owner's tap = manual deploy step" exception now only counts where the tap physically starts the separate deployment and cannot rescue a repo where merge itself deploys.
+docs/sol/sol_design_review.txt-6-
+docs/sol/sol_design_review.txt:7:2. GAUNTLET BEFORE THE FIRST PUSH. The sequencing conflict you found is resolved in the direction round 7 required: review happens inside the harness on the agent's isolated clone BEFORE the first push; there is no pre-review push path at all; no repository automation ever runs unreviewed agent code; the verdict binds to the exact version that is then pushed and merged.
+docs/sol/sol_design_review.txt-8-
+docs/sol/sol_design_review.txt:9:3. THE OPERATION FILTER. The document now states GitHub's permission reality plainly (contents-write suffices to create releases and trigger certain automation, per GitHub's docs you cited), abandons the claim that token scoping alone delivers the prohibition, and places the broker behind an independently enforced operation filter — a separate component under a separate identity the broker cannot alter, permitting only push-branch / open-PR / merge-PR on allowlisted repo IDs and blocking release, tag, settings, and dispatch calls — designed to hold even if the broker is fooled or compromised, and attacked as part of the build (new acceptance cases 4b/4c/4d).
+docs/sol/sol_design_review.txt-10-
+docs/sol/sol_design_review.txt:11:4. WORDING. "Real money" became "spending beyond the fixed limits"; the benchmark no longer says the autonomy risk lands "almost entirely" on merges and spend — it now names continuous audio exposure, provider disclosure, and queue flooding alongside them.
+docs/sol/sol_design_review.txt-12-
+docs/sol/sol_design_review.txt-13-READ: /Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md
+docs/sol/sol_design_review.txt-14-Your round-8 verdict summary: /Users/user/code-projects/chief-command/docs/SOL_VERDICT_ROUND8_2026-07-17.md
+docs/sol/sol_design_review.txt-15-
+docs/sol/sol_design_review.txt:16:YOUR JOB: verify the four items are genuinely delivered, check nothing new was broken by the changes, and give your final answer: DO YOU SIGN OFF on this design as proportionate and honest for its stated scope — a one-person development harness — with the remaining work being the build-phase proofs you listed and the knowing owner acceptances recorded in the document? If yes, say so plainly and name the top three things to watch during the build. If no, name exactly what is left, precisely, and whether each item is a design change or a build proof.
+docs/sol/sol_design_review.txt-17-
+docs/sol/sol_design_review.txt-18-Write in PLAIN ENGLISH for a non-technical reader.
+--
+docs/sol/sol_round5.out-6-provider: openai
+docs/sol/sol_round5.out-7-approval: never
+docs/sol/sol_round5.out-8-sandbox: read-only
+docs/sol/sol_round5.out-9-reasoning effort: high
+docs/sol/sol_round5.out-10-reasoning summaries: none
+docs/sol/sol_round5.out-11-session id: 019f7116-5744-7773-8350-db6b42e1cf98
+docs/sol/sol_round5.out-12---------
+docs/sol/sol_round5.out-13-user
+docs/sol/sol_round5.out:14:You have reviewed this system seven times. In round 7 you accepted the proportionality reset (Decision D: a development harness with no autonomous release authority, benchmarked against the owner's daily terminal use) and gave a conditional verdict: "Once the four narrow design changes above are made and the build proves the listed doors, I would sign off on it as an honest one-person development harness."
+docs/sol/sol_round5.out-15-
+docs/sol/sol_round5.out-16-The four design changes have now been made in the document:
+docs/sol/sol_round5.out-17-
+docs/sol/sol_round5.out-18-1. REPOSITORY ADMISSION RULES. Autonomous merge exists only for ADMITTED repos, and admission is a recorded per-repo decision proving a merge does nothing but change source: no deploy-on-merge, repo is not itself the live product, no machine auto-pulls main, no push/PR publishes packages or updates infrastructure or contacts outside systems, no automation with production secrets, no automation running agent code before the gauntlet. Any "yes" → automation disabled, repo excluded, or the owner's authenticated tap is explicitly the manual deploy step. Projects are an explicit allowlist; the EMR is structurally refused (a new recorded owner decision, not a config edit, would be required). The GitHub broker refuses a branch push unless the admission record shows that branch automation holds no valuable credentials and has no production effect.
+docs/sol/sol_round5.out-19-
+docs/sol/sol_round5.out-20-2. EXCLUSIONS BY RULE. No connected tool may hold production credentials, cloud administration, publishing authority, repository administration, branch-rule bypass, live-database access, or patient data — a rule, not per-tool documentation. The GitHub broker is unable (not just untasked) to change repo settings, branch rules, releases, packages, deployment environments, or repos outside the allowlist.
+docs/sol/sol_round5.out-21-
+docs/sol/sol_round5.out-22-3. CORRECTED CLAIMS AND BENCHMARK. The document now states: git reverses source, not consequences (with the examples you gave); the harness is "safer in blast radius, more autonomous" than terminal use — not "no more dangerous"; the extra autonomy risk lands on unwanted-but-source-reversible merges and routine spend. The "already built and regression-tested" credit for the record guards was removed — the document now states plainly that the live database still runs the old weaker rules and no credit is claimed until it is migrated and re-attacked, and that review-to-version binding is not yet enforced in the build. Your expanded residual-risk list (manual deploy of fooled code, source-revert ≠ consequence-revert, broker/account/provider compromise, cumulative merges, availability, voice audio to the provider, licensing) was folded in for explicit owner acceptance.
+--
+docs/sol/sol_round5.out-34-YOUR JOB now:
+docs/sol/sol_round5.out-35-
+docs/sol/sol_round5.out-36-1. Verify each of your four required changes is genuinely addressed — not just addressed in words. Name any load-bearing sentence whose mechanism doesn't deliver.
+docs/sol/sol_round5.out-37-
+docs/sol/sol_round5.out-38-2. Check Decision E's recording is honest: is the acceptance correctly scoped and stated, or does hands-free voice still reach something beyond unwanted-but-source-reversible merges in admitted repos, given the admission rules?
+docs/sol/sol_round5.out-39-
+docs/sol/sol_round5.out-40-3. Anything NEW the changes introduced (an admission process that can itself be gamed, an allowlist that can be edited by an agent, etc.)?
+docs/sol/sol_round5.out-41-
+docs/sol/sol_round5.out:42:4. FINALLY: do you SIGN OFF on this design as proportionate and honest for its stated scope, with the remaining items being build-phase proofs and knowing owner acceptances? If yes, say so plainly and name the top three things to watch during the build. If no, name exactly what is left, ranked, and whether it is a design change or a build proof.
+docs/sol/sol_round5.out-43-
+docs/sol/sol_round5.out-44-Write in PLAIN ENGLISH for a non-technical reader. Be specific.
+docs/sol/sol_round5.out-45-codex
+docs/sol/sol_round5.out-46-I’m going to compare the revised design directly against the round-7 conditions, then spot-check the current harness only where the document makes a claim about what already exists. I’ll keep the verdict focused on whether the safety boundaries are real in the design, not whether the future build has already proved them.
+docs/sol/sol_round5.out-47-exec
+docs/sol/sol_round5.out-48-/bin/zsh -lc "wc -l docs/ARCHITECTURE_v2_2026-07-14.md docs/SOL_VERDICT_ROUND7_2026-07-17.md && sed -n '1,260p' docs/SOL_VERDICT_ROUND7_2026-07-17.md" in /Users/user/code-projects/chief-command
+docs/sol/sol_round5.out-49- succeeded in 0ms:
+docs/sol/sol_round5.out-50-     342 docs/ARCHITECTURE_v2_2026-07-14.md
+docs/sol/sol_round5.out-51-      73 docs/SOL_VERDICT_ROUND7_2026-07-17.md
+docs/sol/sol_round5.out-52-     415 total
+docs/sol/sol_round5.out-53-# Sol's Verdict — Round 7, on the v3 re-scoped design (2026-07-17)
+docs/sol/sol_round5.out-54-
+docs/sol/sol_round5.out-55-Full transcript: `docs/sol/sol_round4.out`. **Verdict: conditional — the closest to
+docs/sol/sol_round5.out-56-approval in seven rounds.**
+docs/sol/sol_round5.out-57-
+docs/sol/sol_round5.out-58-Closing line: *"The proportionality reset is correct. Once the four narrow design
+docs/sol/sol_round5.out:59:changes above are made and the build proves the listed doors, I would sign off on it as
+docs/sol/sol_round5.out-60-an honest one-person development harness."*
+docs/sol/sol_round5.out-61-
+docs/sol/sol_round5.out-62----
+docs/sol/sol_round5.out-63-
+docs/sol/sol_round5.out-64-## The four design changes required for sign-off
+docs/sol/sol_round5.out-65-
+docs/sol/sol_round5.out-66-1. **Repository admission rules.** The big one. Before any repo gets autonomous merge,
+docs/sol/sol_round5.out-67-   a recorded admission decision must prove **merging does nothing but change source**:
+--
+docs/sol/sol_round5.out-98-  allowlist with the EMR permanently refused absent a new recorded owner decision.
+docs/sol/sol_round5.out-99-
+docs/sol/sol_round5.out-100-## Corrections to the record's claims
+docs/sol/sol_round5.out-101-
+docs/sol/sol_round5.out-102-- The live database still runs the OLD schema: verdicts deletable, tester countable as
+docs/sol/sol_round5.out-103-  a reviewer — the hardened triggers exist in source but were never applied to the
+docs/sol/sol_round5.out-104-  existing DB. The doc's "already built and regression-tested" claim must be removed
+docs/sol/sol_round5.out-105-  until the live record is migrated and re-attacked. The one job marked "shipped" has
+docs/sol/sol_round5.out:106:  no run id, branch, or exact version attached.
+docs/sol/sol_round5.out-107-- Reviews are not yet bound to the exact code version merged (the known flaw, still
+docs/sol/sol_round5.out-108-  open in the build).
+docs/sol/sol_round5.out-109-
+docs/sol/sol_round5.out-110-## Benchmark judgment (honest version to adopt)
+docs/sol/sol_round5.out-111-
+docs/sol/sol_round5.out-112-Safer than terminal use for: the Mac, credentials, production access, spend.
+docs/sol/sol_round5.out-113-More dangerous than terminal use for: unwanted repository changes and routine spend at
+docs/sol/sol_round5.out-114-scale, unattended. Proportionate if stated and accepted that way.
+--
+docs/sol/sol_round5.out-148-    19	
+docs/sol/sol_round5.out-149-    20	## OWNER DECISION D (2026-07-17) — the proportionality reset
+docs/sol/sol_round5.out-150-    21	
+docs/sol/sol_round5.out-151-    22	**The benchmark, stated the honest way (Sol round 7):** compared to the owner running
+docs/sol/sol_round5.out-152-    23	Claude Code in his terminal today, this harness is **safer in blast radius** — the VM,
+docs/sol/sol_round5.out-153-    24	credential absence, and hard caps protect the Mac, the secrets, production, and the
+docs/sol/sol_round5.out-154-    25	wallet better than a bare terminal does — and **more autonomous**: it runs unattended,
+docs/sol/sol_round5.out-155-    26	takes voice-triggered work, operates at overnight scale, and reads more injectable
+docs/sol/sol_round5.out:156:    27	content than a supervised session. The extra autonomy risk lands almost entirely on
+docs/sol/sol_round5.out-157-    28	*unwanted-but-source-reversible repository changes and routine spend*, and the owner
+docs/sol/sol_round5.out-158-    29	accepts that explicitly (Decision E). It is a *development* harness. It is not, and
+docs/sol/sol_round5.out-159-    30	does not claim to be, an autonomous production-release authority.
+docs/sol/sol_round5.out-160-    31	
+docs/sol/sol_round5.out-161-    32	Concretely:
+docs/sol/sol_round5.out-162-    33	
+docs/sol/sol_round5.out-163-    34	- **"Ship" means landing code on the owner's own repos** — the thing git makes
+docs/sol/sol_round5.out-164-    35	  reversible, and the thing agents already do from his terminal daily. After the
+--
+docs/sol/sol_round5.out-204-    75	
+docs/sol/sol_round5.out-205-    76	---
+docs/sol/sol_round5.out-206-    77	
+docs/sol/sol_round5.out-207-    78	## The one-sentence shape
+docs/sol/sol_round5.out-208-    79	
+docs/sol/sol_round5.out-209-    80	**OpenClaw drives the car. Agents work in a sealed workspace with no keys, everything
+docs/sol/sol_round5.out-210-    81	they do is recorded and reviewed, work lands on the owner's repos like it does from his
+docs/sol/sol_round5.out-211-    82	terminal — and the few genuinely irreversible things (history rewrite, production
+docs/sol/sol_round5.out:212:    83	deploys, real money, patient data) sit behind doors no agent can open.**
+docs/sol/sol_round5.out-213-    84	
+docs/sol/sol_round5.out-214-    85	---
+docs/sol/sol_round5.out-215-    86	
+docs/sol/sol_round5.out-216-    87	## The threat model
+docs/sol/sol_round5.out-217-    88	
+docs/sol/sol_round5.out-218-    89	Not the owner. The real threats, in order:
+docs/sol/sol_round5.out-219-    90	
+docs/sol/sol_round5.out-220-    91	1. **An agent doing something nobody asked for.**
+--
+docs/sol/sol_round5.out-1267-   442	  overrides: `autoreview --reviewers codex,claude --model codex=gpt-5.6-sol --thinking codex=high`.
+docs/sol/sol_round5.out-1268-   443	  That is most of §6, for free.
+docs/sol/sol_round5.out-1269-   444	- **Tailnet + launchd** = Gateway binds loopback:18789, **auto-configures Tailscale Serve**,
+docs/sol/sol_round5.out-1270-   445	  serves the Control UI on the same port; `openclaw gateway install` writes the launchd service.
+docs/sol/sol_round5.out-1271-   446	  §2's networking and daemon requirements are shipped features.
+docs/sol/sol_round5.out-1272-   447	
+docs/sol/sol_round5.out-1273-   448	**Version pinning is not optional.** Three breaking releases in under 90 days in Q1 2026
+docs/sol/sol_round5.out-1274-   449	(2026.3.2, 2026.3.8, 2026.3.13). Exact pins are honored and not overwritten by the updater.
+docs/sol/sol_round5.out:1275:   450	This is precisely the vendor-drift risk §9 names — pin an exact version, upgrade deliberately.
+docs/sol/sol_round5.out-1276-   451	
+docs/sol/sol_round5.out-1277-   452	### The voice server half is already built
+docs/sol/sol_round5.out-1278-   453	
+docs/sol/sol_round5.out-1279-   454	**`kwindla/macos-local-voice-agents`** — reference implementation by Pipecat's originator
+docs/sol/sol_round5.out-1280-   455	(Kwindla Kramer, Daily CEO). Stack: Silero VAD · smart-turn v2 · **MLX Whisper · Kokoro TTS** ·
+docs/sol/sol_round5.out-1281-   456	WebRTC · React client. Claims **<800ms voice-to-voice on M-series** *with a local LLM in the loop*.
+docs/sol/sol_round5.out-1282-   457	Our budget is 1.5s to first audio with the orchestrator doing the thinking — real headroom.
+docs/sol/sol_round5.out-1283-   458	⚠️ Only 17 commits and **LICENSE unverified — check before forking.** Treat as demo-grade code
+--
+docs/sol/sol_round5.out-1405-   576	re-architecture**. OpenClaw's provider abstraction gives us this nearly for free. Cheap insurance
+docs/sol/sol_round5.out-1406-   577	against being the next OpenClaw headline.
+docs/sol/sol_round5.out-1407-   578	
+docs/sol/sol_round5.out-1408-   579	---
+docs/sol/sol_round5.out-1409-   580	
+docs/sol/sol_round5.out-1410-   581	## 6. Ranked recommendations
+docs/sol/sol_round5.out-1411-   582	
+docs/sol/sol_round5.out-1412-   583	**Adopt as-is**
+docs/sol/sol_round5.out:1413:   584	- OpenClaw core, **pinned to an exact version** — seats as `agents.list[]`, `codex` plugin for the
+docs/sol/sol_round5.out-1414-   585	  orchestrator, `agentRuntime.id: "claude-cli"` for the Claude seat.
+docs/sol/sol_round5.out-1415-   586	- Native subagents for dispatch (`maxSpawnDepth: 2`, per-spawn `model` override).
+docs/sol/sol_round5.out-1416-   587	- `autoreview` skill as the gauntlet spine.
+docs/sol/sol_round5.out-1417-   588	- `openclaw gateway install` (launchd) + Tailscale Serve auto-config.
+docs/sol/sol_round5.out-1418-   589	- **Pipecat** (BSD-2) as the voice framework; `kokoro-onnx` via `pipecat-ai[kokoro]` for TTS;
+docs/sol/sol_round5.out-1419-   590	  `WhisperSTTServiceMLX` for STT.
+docs/sol/sol_round5.out-1420-   591	
+docs/sol/sol_round5.out-1421-   592	**Fork / vendor**
+--
+docs/sol/sol_round5.out-2933-6|verdict|TEXT|1||0
+docs/sol/sol_round5.out-2934-7|severity|TEXT|0||0
+docs/sol/sol_round5.out-2935-8|summary|TEXT|0||0
+docs/sol/sol_round5.out-2936-9|detail|TEXT|0||0
+docs/sol/sol_round5.out-2937-10|created_at|TEXT|1|datetime('now')|0
+docs/sol/sol_round5.out-2938-1|shipped||
+docs/sol/sol_round5.out-2939-
+docs/sol/sol_round5.out-2940-codex
+docs/sol/sol_round5.out:2941:No—I do not sign off yet. The revision is substantially better, and Decision E is honestly disclosed, but three load-bearing mechanisms remain incomplete. These are design gaps, not merely tests for the build team.
+docs/sol/sol_round5.out-2942-
+docs/sol/sol_round5.out-2943-## The four required changes
+docs/sol/sol_round5.out-2944-
+docs/sol/sol_round5.out-2945-1. Repository admission: partly addressed
+docs/sol/sol_round5.out-2946-
+docs/sol/sol_round5.out-2947-The [admission rule](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:39) asks the right questions and correctly excludes repositories whose merges have real-world effects. The EMR refusal and explicit allowlist are also the right shape.
+docs/sol/sol_round5.out-2948-
+docs/sol/sol_round5.out-2949-What is missing is control of the admission process itself:
+--
+docs/sol/sol_round5.out-2951-- The document does not say that only the authenticated owner can create, change, or revoke an admission record.
+docs/sol/sol_round5.out-2952-- It does not say the admission record and allowlist live outside every place an agent can edit.
+docs/sol/sol_round5.out-2953-- Admission appears permanent. Repository automation, outside integrations, secrets, auto-pulling machines, and publishing settings can change later.
+docs/sol/sol_round5.out-2954-- An admitted repository can itself receive a change that adds publishing or deployment behavior. That must cancel its admission before the change can be pushed or merged.
+docs/sol/sol_round5.out-2955-- Repository identity should use GitHub’s permanent identity, not merely a name that can be renamed or reused.
+docs/sol/sol_round5.out-2956-
+docs/sol/sol_round5.out-2957-There is also a direct sequencing conflict. The admission rule says no automation may run agent-written code before the gauntlet finishes. But the [broker section](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:154) contemplates pushing a branch—and therefore potentially starting automation—before the gauntlet finishes, provided that automation lacks valuable credentials or production effects. Those are different rules.
+docs/sol/sol_round5.out-2958-
+docs/sol/sol_round5.out:2959:The exact reviewed version must pass the gauntlet before its first push, or the admission rule must be weakened honestly. Round 7 required the former.
+docs/sol/sol_round5.out-2960-
+docs/sol/sol_round5.out-2961-Finally, the “owner’s tap becomes the manual deploy step” exception is safe only if that tap physically starts the separate deployment. It cannot rescue a repository where merging itself deploys or where the repository is already the live product.
+docs/sol/sol_round5.out-2962-
+docs/sol/sol_round5.out-2963-2. Connected-tool exclusions: mostly addressed, but one broker claim fails
+docs/sol/sol_round5.out-2964-
+docs/sol/sol_round5.out-2965-The blanket prohibition on production credentials, patient data, publishing authority, live-data access, and administrative authority is now clear and appropriately firm.
+docs/sol/sol_round5.out-2966-
+docs/sol/sol_round5.out-2967-Most of the GitHub restrictions are feasible: GitHub can withhold repository administration, package, deployment, and branch-rule permissions, and it can restrict an app to selected repositories.
+--
+docs/sol/sol_round5.out-2973-GitHub’s permission used for writing repository contents is also sufficient to create a release. GitHub documents both facts: HTTP-based Git access requires repository-content permission, while creating a release also accepts that same permission. That permission can also send certain repository events that start automation. A narrow token alone therefore cannot make the release prohibition true. [GitHub App permission guide](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app), [GitHub release permissions](https://docs.github.com/en/rest/releases/releases?apiVersion=2026-03-10), [complete permission mapping](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps?apiVersion=2026-03-10).
+docs/sol/sol_round5.out-2974-
+docs/sol/sol_round5.out-2975-The broker needs an independently enforced outer filter that permits only the exact push, pull-request, and merge operations. That filter must remain effective even if the broker program is fooled or compromised. Alternatively, the document must admit that the credential retains release authority—but that would broaden the accepted blast radius.
+docs/sol/sol_round5.out-2976-
+docs/sol/sol_round5.out-2977-3. Corrected claims and benchmark: genuinely addressed
+docs/sol/sol_round5.out-2978-
+docs/sol/sol_round5.out-2979-This change passes.
+docs/sol/sol_round5.out-2980-
+docs/sol/sol_round5.out:2981:The document now correctly distinguishes source reversal from consequence reversal, describes the harness as safer in blast radius but more autonomous, gives no credit for the unmigrated live record, admits that reviews are not yet tied to the exact version, and presents the expanded residual risks plainly.
+docs/sol/sol_round5.out-2982-
+docs/sol/sol_round5.out-2983-My spot-check of the current harness supports that honesty:
+docs/sol/sol_round5.out-2984-
+docs/sol/sol_round5.out-2985-- The admission system and GitHub broker are not built yet.
+docs/sol/sol_round5.out-2986-- The live record still lacks the source version’s protection against deleting verdicts.
+docs/sol/sol_round5.out-2987-- The one item marked finished still lacks its run and branch identity.
+docs/sol/sol_round5.out-2988-- The provider credential and old direct execution paths still exist.
+docs/sol/sol_round5.out-2989-
+docs/sol/sol_round5.out-2990-Those are now presented as unfinished build and decommissioning work, not as completed protection.
+docs/sol/sol_round5.out-2991-
+docs/sol/sol_round5.out-2992-Two sentences still need correction:
+docs/sol/sol_round5.out-2993-
+docs/sol/sol_round5.out:2994:- The [one-sentence summary](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:78) says “real money” is behind a door agents cannot open. Agents are explicitly allowed to spend routine amounts. It should say spending beyond fixed limits is behind the door.
+docs/sol/sol_round5.out:2995:- “The extra autonomy risk lands almost entirely” on merges and spend is too narrow. Continuous audio exposure, unattended queue flooding, and extra disclosure to providers are also new risks, even though they are named later.
+docs/sol/sol_round5.out-2996-
+docs/sol/sol_round5.out-2997-4. Decision E: honestly recorded, conditional on fixing admission
+docs/sol/sol_round5.out-2998-
+docs/sol/sol_round5.out-2999-[Decision E](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:208) accurately records the choice offered and the owner’s decision. It does not pretend voice recognition proves intent.
+docs/sol/sol_round5.out-3000-
+docs/sol/sol_round5.out-3001-Hands-free voice reaches beyond unwanted merges:
+docs/sol/sol_round5.out-3002-
+docs/sol/sol_round5.out-3003-- It can spend the routine budget.
+--
+docs/sol/sol_round5.out-3006-- It can fill queues and reduce availability.
+docs/sol/sol_round5.out-3007-
+docs/sol/sol_round5.out-3008-The surrounding document states all of those risks. Therefore E is honest as the record of the specific decision not to require an intent-confirmation tap before merging. The wider acceptances are recorded under D and the residual-risk list.
+docs/sol/sol_round5.out-3009-
+docs/sol/sol_round5.out-3010-However, its promise that a mistaken voice command can cause only source-reversible changes is true only after admission is owner-controlled, current, and checked against the proposed change. As written, that boundary can become stale or potentially be edited away.
+docs/sol/sol_round5.out-3011-
+docs/sol/sol_round5.out-3012-## What remains, ranked
+docs/sol/sol_round5.out-3013-
+docs/sol/sol_round5.out:3014:1. Owner-controlled, continuously valid admission — design change
+docs/sol/sol_round5.out-3015-
+docs/sol/sol_round5.out-3016-Only the authenticated owner may alter admissions, the repository allowlist, connected-tool approvals, or the EMR refusal. These controls must be outside agent-writable material. The broker must refuse when the live repository state differs from the recorded proof or when a proposed change would introduce deployment, publishing, privileged automation, or other external consequences.
+docs/sol/sol_round5.out-3017-
+docs/sol/sol_round5.out-3018-2. Gauntlet before the first consequential repository action — design change
+docs/sol/sol_round5.out-3019-
+docs/sol/sol_round5.out:3020:The exact version reviewed must pass before its first branch push. No automation may run unreviewed agent code. The manual-deploy exception must gate the actual deployment, not merely document owner involvement somewhere in the process.
+docs/sol/sol_round5.out-3021-
+docs/sol/sol_round5.out-3022-3. A genuinely narrower GitHub action path — design change
+docs/sol/sol_round5.out-3023-
+docs/sol/sol_round5.out:3024:Because GitHub’s own permission bundles push/merge authority with release authority, the broker needs a separate, independently enforced operation filter. Then the build must attack that filter and prove release creation and automation-triggering calls are impossible.
+docs/sol/sol_round5.out-3025-
+docs/sol/sol_round5.out-3026-4. Correct the two remaining overstatements — wording change
+docs/sol/sol_round5.out-3027-
+docs/sol/sol_round5.out:3028:Replace “real money” with spending beyond the fixed limits, and stop saying the extra autonomy risk falls almost entirely on merges and spend.
+docs/sol/sol_round5.out-3029-
+docs/sol/sol_round5.out:3030:Once those are added, I would regard the remaining work—VM escape attempts, credential searches, live-record migration, exact-version binding, branch-protection attacks, spend races, hostile voice tests, and verified removal of the old paths—as build-phase proof rather than further architectural debate.
+docs/sol/sol_round5.out-3031-tokens used
+docs/sol/sol_round5.out-3032-91,468
+docs/sol/sol_round5.out:3033:No—I do not sign off yet. The revision is substantially better, and Decision E is honestly disclosed, but three load-bearing mechanisms remain incomplete. These are design gaps, not merely tests for the build team.
+docs/sol/sol_round5.out-3034-
+docs/sol/sol_round5.out-3035-## The four required changes
+docs/sol/sol_round5.out-3036-
+docs/sol/sol_round5.out-3037-1. Repository admission: partly addressed
+docs/sol/sol_round5.out-3038-
+docs/sol/sol_round5.out-3039-The [admission rule](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:39) asks the right questions and correctly excludes repositories whose merges have real-world effects. The EMR refusal and explicit allowlist are also the right shape.
+docs/sol/sol_round5.out-3040-
+docs/sol/sol_round5.out-3041-What is missing is control of the admission process itself:
+--
+docs/sol/sol_round5.out-3043-- The document does not say that only the authenticated owner can create, change, or revoke an admission record.
+docs/sol/sol_round5.out-3044-- It does not say the admission record and allowlist live outside every place an agent can edit.
+docs/sol/sol_round5.out-3045-- Admission appears permanent. Repository automation, outside integrations, secrets, auto-pulling machines, and publishing settings can change later.
+docs/sol/sol_round5.out-3046-- An admitted repository can itself receive a change that adds publishing or deployment behavior. That must cancel its admission before the change can be pushed or merged.
+docs/sol/sol_round5.out-3047-- Repository identity should use GitHub’s permanent identity, not merely a name that can be renamed or reused.
+docs/sol/sol_round5.out-3048-
+docs/sol/sol_round5.out-3049-There is also a direct sequencing conflict. The admission rule says no automation may run agent-written code before the gauntlet finishes. But the [broker section](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:154) contemplates pushing a branch—and therefore potentially starting automation—before the gauntlet finishes, provided that automation lacks valuable credentials or production effects. Those are different rules.
+docs/sol/sol_round5.out-3050-
+docs/sol/sol_round5.out:3051:The exact reviewed version must pass the gauntlet before its first push, or the admission rule must be weakened honestly. Round 7 required the former.
+docs/sol/sol_round5.out-3052-
+docs/sol/sol_round5.out-3053-Finally, the “owner’s tap becomes the manual deploy step” exception is safe only if that tap physically starts the separate deployment. It cannot rescue a repository where merging itself deploys or where the repository is already the live product.
+docs/sol/sol_round5.out-3054-
+docs/sol/sol_round5.out-3055-2. Connected-tool exclusions: mostly addressed, but one broker claim fails
+docs/sol/sol_round5.out-3056-
+docs/sol/sol_round5.out-3057-The blanket prohibition on production credentials, patient data, publishing authority, live-data access, and administrative authority is now clear and appropriately firm.
+docs/sol/sol_round5.out-3058-
+docs/sol/sol_round5.out-3059-Most of the GitHub restrictions are feasible: GitHub can withhold repository administration, package, deployment, and branch-rule permissions, and it can restrict an app to selected repositories.
+--
+docs/sol/sol_round5.out-3065-GitHub’s permission used for writing repository contents is also sufficient to create a release. GitHub documents both facts: HTTP-based Git access requires repository-content permission, while creating a release also accepts that same permission. That permission can also send certain repository events that start automation. A narrow token alone therefore cannot make the release prohibition true. [GitHub App permission guide](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app), [GitHub release permissions](https://docs.github.com/en/rest/releases/releases?apiVersion=2026-03-10), [complete permission mapping](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps?apiVersion=2026-03-10).
+docs/sol/sol_round5.out-3066-
+docs/sol/sol_round5.out-3067-The broker needs an independently enforced outer filter that permits only the exact push, pull-request, and merge operations. That filter must remain effective even if the broker program is fooled or compromised. Alternatively, the document must admit that the credential retains release authority—but that would broaden the accepted blast radius.
+docs/sol/sol_round5.out-3068-
+docs/sol/sol_round5.out-3069-3. Corrected claims and benchmark: genuinely addressed
+docs/sol/sol_round5.out-3070-
+docs/sol/sol_round5.out-3071-This change passes.
+docs/sol/sol_round5.out-3072-
+docs/sol/sol_round5.out:3073:The document now correctly distinguishes source reversal from consequence reversal, describes the harness as safer in blast radius but more autonomous, gives no credit for the unmigrated live record, admits that reviews are not yet tied to the exact version, and presents the expanded residual risks plainly.
+docs/sol/sol_round5.out-3074-
+docs/sol/sol_round5.out-3075-My spot-check of the current harness supports that honesty:
+docs/sol/sol_round5.out-3076-
+docs/sol/sol_round5.out-3077-- The admission system and GitHub broker are not built yet.
+docs/sol/sol_round5.out-3078-- The live record still lacks the source version’s protection against deleting verdicts.
+docs/sol/sol_round5.out-3079-- The one item marked finished still lacks its run and branch identity.
+docs/sol/sol_round5.out-3080-- The provider credential and old direct execution paths still exist.
+docs/sol/sol_round5.out-3081-
+docs/sol/sol_round5.out-3082-Those are now presented as unfinished build and decommissioning work, not as completed protection.
+docs/sol/sol_round5.out-3083-
+docs/sol/sol_round5.out-3084-Two sentences still need correction:
+docs/sol/sol_round5.out-3085-
+docs/sol/sol_round5.out:3086:- The [one-sentence summary](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:78) says “real money” is behind a door agents cannot open. Agents are explicitly allowed to spend routine amounts. It should say spending beyond fixed limits is behind the door.
+docs/sol/sol_round5.out:3087:- “The extra autonomy risk lands almost entirely” on merges and spend is too narrow. Continuous audio exposure, unattended queue flooding, and extra disclosure to providers are also new risks, even though they are named later.
+docs/sol/sol_round5.out-3088-
+docs/sol/sol_round5.out-3089-4. Decision E: honestly recorded, conditional on fixing admission
+docs/sol/sol_round5.out-3090-
+docs/sol/sol_round5.out-3091-[Decision E](/Users/user/code-projects/chief-command/docs/ARCHITECTURE_v2_2026-07-14.md:208) accurately records the choice offered and the owner’s decision. It does not pretend voice recognition proves intent.
+docs/sol/sol_round5.out-3092-
+docs/sol/sol_round5.out-3093-Hands-free voice reaches beyond unwanted merges:
+docs/sol/sol_round5.out-3094-
+docs/sol/sol_round5.out-3095-- It can spend the routine budget.
+--
+docs/sol/sol_round5.out-3098-- It can fill queues and reduce availability.
+docs/sol/sol_round5.out-3099-
+docs/sol/sol_round5.out-3100-The surrounding document states all of those risks. Therefore E is honest as the record of the specific decision not to require an intent-confirmation tap before merging. The wider acceptances are recorded under D and the residual-risk list.
+docs/sol/sol_round5.out-3101-
+docs/sol/sol_round5.out-3102-However, its promise that a mistaken voice command can cause only source-reversible changes is true only after admission is owner-controlled, current, and checked against the proposed change. As written, that boundary can become stale or potentially be edited away.
+docs/sol/sol_round5.out-3103-
+docs/sol/sol_round5.out-3104-## What remains, ranked
+docs/sol/sol_round5.out-3105-
+docs/sol/sol_round5.out:3106:1. Owner-controlled, continuously valid admission — design change
+docs/sol/sol_round5.out-3107-
+docs/sol/sol_round5.out-3108-Only the authenticated owner may alter admissions, the repository allowlist, connected-tool approvals, or the EMR refusal. These controls must be outside agent-writable material. The broker must refuse when the live repository state differs from the recorded proof or when a proposed change would introduce deployment, publishing, privileged automation, or other external consequences.
+docs/sol/sol_round5.out-3109-
+docs/sol/sol_round5.out-3110-2. Gauntlet before the first consequential repository action — design change
+docs/sol/sol_round5.out-3111-
+docs/sol/sol_round5.out:3112:The exact version reviewed must pass before its first branch push. No automation may run unreviewed agent code. The manual-deploy exception must gate the actual deployment, not merely document owner involvement somewhere in the process.
+docs/sol/sol_round5.out-3113-
+docs/sol/sol_round5.out-3114-3. A genuinely narrower GitHub action path — design change
+docs/sol/sol_round5.out-3115-
+docs/sol/sol_round5.out:3116:Because GitHub’s own permission bundles push/merge authority with release authority, the broker needs a separate, independently enforced operation filter. Then the build must attack that filter and prove release creation and automation-triggering calls are impossible.
+docs/sol/sol_round5.out-3117-
+docs/sol/sol_round5.out-3118-4. Correct the two remaining overstatements — wording change
+docs/sol/sol_round5.out-3119-
+docs/sol/sol_round5.out:3120:Replace “real money” with spending beyond the fixed limits, and stop saying the extra autonomy risk falls almost entirely on merges and spend.
+docs/sol/sol_round5.out-3121-
+docs/sol/sol_round5.out:3122:Once those are added, I would regard the remaining work—VM escape attempts, credential searches, live-record migration, exact-version binding, branch-protection attacks, spend races, hostile voice tests, and verified removal of the old paths—as build-phase proof rather than further architectural debate.
+
+exec
+/bin/zsh -lc 'rg -n -i "before.*gauntlet|after.*gauntlet|push|merge|admitt|allowlist|owner decision|connected.tool|EMR|release|publish|deploy|automation|filter|token|credential|real money|almost entirely" docs/ARCHITECTURE_v2_2026-07-14.md' in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+4:over-proved it: because earlier drafts gave the machine the power to deploy itself to
+5:production, Sol correctly demanded the full security apparatus of an autonomous release
+12:reviewing, and pushing code under standard tooling is normal practice for millions of
+20:## OWNER DECISION D (2026-07-17) — the proportionality reset
+24:credential absence, and hard caps protect the Mac, the secrets, production, and the
+32:does not claim to be, an autonomous production-release authority.
+38:  gauntlet passes, work merges autonomously by default, exactly like his terminal
+41:- **Autonomous merge is only available to ADMITTED repos.** Admission is a recorded,
+43:  does not deploy a site or service; the repo is not itself the live product; no other
+44:  machine auto-pulls its main branch; no push/PR publishes a package, updates
+46:  automation holds production secrets; no automation runs agent-written code before
+47:  the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
+48:  or the owner's authenticated tap is designated as the manual deploy step — which
+49:  only counts where the tap **physically starts** the separate deployment; it cannot
+50:  rescue a repo where merging itself deploys or the repo is already the live product.
+51:  Projects are an explicit **allowlist** — a repo that was never admitted simply does
+52:  not exist to the harness, and **the EMR is structurally refused**: adding it
+53:  requires a new recorded owner decision, not a config edit.
+56:  allowlist, a connected-tool approval, or the EMR refusal — and these records live
+59:  live repository state (automation, webhooks, integrations, publishing settings)
+61:  a proposed change that would itself ADD deployment, publishing, or privileged
+62:  automation behavior **cancels the repo's admission** — it cannot be pushed or merged
+66:- **Deploying to a live production service is out of scope for agents.** Where a
+67:  project has a real production deployment, that step stays a manual owner action, as
+68:  it is today. No deployer identity, no signing chain, no production kill switch —
+69:  because there is no machine release path to protect.
+71:  *tap-to-merge* — the gauntlet passes, the PR waits for his one-tap merge on GitHub,
+73:  autonomous merge; the dial exists for anything he decides matters more.
+74:- **The PHI-bearing EMR remains fully out of scope** (Decision C) — not a dial
+77:This supersedes the round-5/6 release-chain design (preserved in git history and in
+79:release authority; with release authority removed, it collapses to something the owner
+80:already does: deciding what merges into his own projects. Its useful residue survives
+99:deploys, spending beyond the fixed limits, patient data) sit behind doors no agent can
+116:   project with no customer data, with no credentials to steal in the workspace, no
+123:| GitHub branch protection | Server-side boundary | History rewrite and direct pushes to protected branches; enforces tap-to-merge where dialed |
+124:| Credentials absent from agent reach | Absence | Exfiltration and misuse of what isn't there |
+129:| Git itself | Reversibility of SOURCE | Makes a bad merge usually recoverable as a source change |
+133:precisely: **git reverses source, not consequences.** It cannot unpublish a leaked
+134:secret, undo automation that already ran, retract a downloaded package, or repair
+135:damaged live data — which is exactly why repos where a merge *has* consequences are
+136:refused admission to autonomous merge.
+148:- No shared folders, clipboard, or device passthrough; no credential connections; no
+159:  Connected tools are governed by an **exclusion rule, not per-tool documentation**:
+160:  no connected tool may hold production credentials, cloud administration, publishing
+162:  patient data. A tool that would recreate the removed release authority is refused,
+171:- **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
+174:  push, so no repository automation ever runs unreviewed agent code (this resolves
+175:  the round-8 sequencing conflict; there is no pre-review push path at all). The
+176:  broker then pushes the branch, opens the PR, and — on admitted repos — merges.
+178:  that allows pushing content also suffices to create releases and trigger certain
+179:  automation — so token scoping alone cannot make "the broker can't publish a
+180:  release" true. The broker therefore sits behind an **independently enforced
+181:  operation filter** — a separate component, under a separate identity the broker
+182:  cannot alter, that permits only the exact operations (push branch, open PR, merge
+183:  PR, on allowlisted repo IDs) and blocks release, tag, settings, dispatch, and every
+185:  and attacked as part of the build. Repos dialed to tap-to-merge are enforced by
+187:- **Provider broker.** Agent runners get no reusable API or subscription credentials;
+193:  environment are treated as holding a credential and narrowed accordingly — named,
+222:- A hardwired emergency stop that doesn't route through Chief, reachable while
+228:- No dangerous approvals by voice; the per-repo tap-to-merge tap happens on GitHub,
+231:- **OWNER DECISION E (2026-07-17): voice-originated jobs merge autonomously too.**
+233:  before voice-originated work merges, or explicit acceptance of the risk that a
+234:  misheard or ambient-speech instruction produces merged (source-reversible, admitted-
+237:  a wrong merge changes source in a repo where merges have no consequences beyond
+240:  the routine budget, and (per Decision E) cause unwanted-but-reversible merges in
+241:  admitted repos; it can never open a door.
+242:- Chief is `gpt-5.6-terra` streaming (~1.4s), escalating to `gpt-5.6-sol` on pushback;
+249:  restore must not revive revoked credentials or dead paths.
+269:- **The live production deploy command (Netlify), the public Cloudflare tunnel config
+285:- Grok CLI does not touch the Arch EMR repo until the upload allegation is disproven.
+295:   or find any reusable credential.
+298:3. An agent cannot push, merge, or spend except through its broker; broker tokens
+299:   can't rewrite history, change repo settings or branch rules, publish releases or
+300:   packages, or touch any repo outside the allowlist.
+301:4. Tap-to-merge repos: nothing merges without the owner's authenticated tap —
+302:   enforced by GitHub with the broker's token unable to bypass it.
+303:4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
+304:   automation is refused autonomous merge; the EMR cannot be added by config alone;
+305:   an agent cannot edit any admission record, the allowlist, or a tool approval;
+306:   automation quietly added to an admitted repo causes the broker to refuse its next
+307:   action (drift check); a change that would itself add deploy/publish behavior
+308:   cancels admission before it can be pushed.
+309:4c. The operation filter holds: using the broker's own credential, attempts to create
+310:   a release or tag, change settings or branch rules, fire automation dispatch, or
+311:   touch a repo outside the allowlist are all blocked by the filter — including when
+313:4d. Sequencing holds: no branch containing unreviewed agent code can be pushed at
+314:   all; the gauntlet verdict is bound to the exact version that is then pushed and
+315:   merged.
+320:   or override a newer correction; the emergency stop reports truthfully.
+328:  reversibility, admission rules, absence of credentials/production/customer data in
+329:  scope, and the audit trail; not prevented. **If the owner later manually deploys
+330:  that code, it can harm production — the manual step stops autonomous release; it
+333:  data, a published package, or an external action already taken stays done.
+337:  reliably scanned away. Scope (no EMR, no customer data) is the mitigation.
+341:  start work and (Decision E) merge it. The record, budgets, admission rules, and
+343:- **Many individually harmless merges can accumulate into a dangerous whole that no
+358:## ✅ OWNER DECISIONS — record
+360:- **A (2026-07-15/16):** made under the autonomous-release framing; superseded by D.
+361:  Its residue: the gauntlet always runs, and the per-repo tap-to-merge dial exists.
+364:- **C (2026-07-15):** the PHI-bearing EMR is out of scope; revisit requires
+368:  in blast radius, more autonomous); agents merge to ADMITTED repos autonomously after
+369:  the gauntlet; production deployment stays manual; irreversible powers stay behind
+372:- **E (2026-07-17):** voice-originated jobs merge autonomously like typed ones. Neill
+374:  source-reversible merges in admitted repos, rather than adding a confirm-intent tap.
+
+codex
+Yes. I sign off on this design as proportionate and honest for a one-person development harness.
+
+All four round-eight requirements are genuinely delivered:
+
+- Admission is owner-controlled, continuously rechecked, tied to permanent repository identity, and cancelled by changes that introduce deployment, publishing, or privileged automation.
+- Review now happens before the first push, with approval tied to the exact version subsequently pushed and merged.
+- The document acknowledges GitHub’s real permission limits and adds an independently enforced operation filter designed to remain effective even if the broker is compromised.
+- Both misleading statements were corrected, and the wider risks of continuous audio, provider disclosure, routine spending, and queue flooding are stated plainly.
+
+I found no new contradiction or accidental weakening caused by these additions. Decision E is now correctly bounded: a mistaken voice instruction can merge source changes only into a currently admitted repository, while its other consequences are separately and honestly accepted.
+
+This is approval of the design—not a declaration that the unfinished system is safe to operate autonomously. The remaining work is build-phase proof and verified removal of the old paths, exactly as previously listed. No further design change is required.
+
+The top three things to watch during the build are:
+
+1. **The repository gate.** Attack admission checks, branch protection, and the operation filter together. In particular, prove that timing changes, disguised operations, renamed repositories, or a compromised broker cannot turn an allowed source change into publishing, deployment, administration, or access to an excluded project.
+
+2. **The review-to-version chain.** Prove that the exact reviewed version—and no later alteration—is what gets pushed and merged. Upgrade the live record, prevent old approvals from being reused, and make failures impossible to erase or turn into passes.
+
+3. **Hidden bypasses.** Prove the sealed workspace cannot reach the Mac, local network, or reusable credentials, and verify that every old direct-running, public-access, provider-key, and automatic-deployment path is physically unusable—not merely abandoned by convention.
+
+The spending-race tests, hostile voice tests, recovery tests, and upgrade re-tests remain mandatory parts of acceptance. The owner’s recorded acceptance covers the residual risks that cannot honestly be designed away.
+tokens used
+65,482
+Yes. I sign off on this design as proportionate and honest for a one-person development harness.
+
+All four round-eight requirements are genuinely delivered:
+
+- Admission is owner-controlled, continuously rechecked, tied to permanent repository identity, and cancelled by changes that introduce deployment, publishing, or privileged automation.
+- Review now happens before the first push, with approval tied to the exact version subsequently pushed and merged.
+- The document acknowledges GitHub’s real permission limits and adds an independently enforced operation filter designed to remain effective even if the broker is compromised.
+- Both misleading statements were corrected, and the wider risks of continuous audio, provider disclosure, routine spending, and queue flooding are stated plainly.
+
+I found no new contradiction or accidental weakening caused by these additions. Decision E is now correctly bounded: a mistaken voice instruction can merge source changes only into a currently admitted repository, while its other consequences are separately and honestly accepted.
+
+This is approval of the design—not a declaration that the unfinished system is safe to operate autonomously. The remaining work is build-phase proof and verified removal of the old paths, exactly as previously listed. No further design change is required.
+
+The top three things to watch during the build are:
+
+1. **The repository gate.** Attack admission checks, branch protection, and the operation filter together. In particular, prove that timing changes, disguised operations, renamed repositories, or a compromised broker cannot turn an allowed source change into publishing, deployment, administration, or access to an excluded project.
+
+2. **The review-to-version chain.** Prove that the exact reviewed version—and no later alteration—is what gets pushed and merged. Upgrade the live record, prevent old approvals from being reused, and make failures impossible to erase or turn into passes.
+
+3. **Hidden bypasses.** Prove the sealed workspace cannot reach the Mac, local network, or reusable credentials, and verify that every old direct-running, public-access, provider-key, and automatic-deployment path is physically unusable—not merely abandoned by convention.
+
+The spending-race tests, hostile voice tests, recovery tests, and upgrade re-tests remain mandatory parts of acceptance. The owner’s recorded acceptance covers the residual risks that cannot honestly be designed away.
