@@ -24,9 +24,11 @@ Claude Code in his terminal today, this harness is **safer in blast radius** —
 credential absence, and hard caps protect the Mac, the secrets, production, and the
 wallet better than a bare terminal does — and **more autonomous**: it runs unattended,
 takes voice-triggered work, operates at overnight scale, and reads more injectable
-content than a supervised session. The extra autonomy risk lands almost entirely on
-*unwanted-but-source-reversible repository changes and routine spend*, and the owner
-accepts that explicitly (Decision E). It is a *development* harness. It is not, and
+content than a supervised session. The extra autonomy brings several new risks the
+terminal doesn't have: *unwanted-but-source-reversible repository changes, routine
+spend at scale, continuous audio going to the voice provider, more project material
+flowing to model providers, and queue flooding that costs availability* — all named in
+the residual-risk list and accepted explicitly by the owner (Decisions D and E). It is a *development* harness. It is not, and
 does not claim to be, an autonomous production-release authority.
 
 Concretely:
@@ -43,10 +45,24 @@ Concretely:
   infrastructure, alters scheduled work, or contacts outside systems; no repository
   automation holds production secrets; no automation runs agent-written code before
   the gauntlet finishes. Any "yes" → the automation is disabled, the repo is excluded,
-  or the owner's authenticated tap is explicitly designated as the manual deploy step.
+  or the owner's authenticated tap is designated as the manual deploy step — which
+  only counts where the tap **physically starts** the separate deployment; it cannot
+  rescue a repo where merging itself deploys or the repo is already the live product.
   Projects are an explicit **allowlist** — a repo that was never admitted simply does
   not exist to the harness, and **the EMR is structurally refused**: adding it
   requires a new recorded owner decision, not a config edit.
+- **Admission is owner-controlled and continuously valid, not a one-time stamp.**
+  Only the authenticated owner can create, change, or revoke an admission, the
+  allowlist, a connected-tool approval, or the EMR refusal — and these records live
+  outside anything an agent can edit (not in a repo the agents work on, not in
+  agent-writable config). Admission does not survive drift: the broker re-checks the
+  live repository state (automation, webhooks, integrations, publishing settings)
+  against the recorded proof before each action and **refuses when they differ**; and
+  a proposed change that would itself ADD deployment, publishing, or privileged
+  automation behavior **cancels the repo's admission** — it cannot be pushed or merged
+  until the owner re-admits the repo with the new behavior assessed. Repos are
+  identified by GitHub's permanent repository ID, not by a name that can be renamed
+  or reused.
 - **Deploying to a live production service is out of scope for agents.** Where a
   project has a real production deployment, that step stays a manual owner action, as
   it is today. No deployer identity, no signing chain, no production kill switch —
@@ -80,7 +96,8 @@ same risks he already accepts, unnamed, every time he opens his terminal.
 **OpenClaw drives the car. Agents work in a sealed workspace with no keys, everything
 they do is recorded and reviewed, work lands on the owner's repos like it does from his
 terminal — and the few genuinely irreversible things (history rewrite, production
-deploys, real money, patient data) sit behind doors no agent can open.**
+deploys, spending beyond the fixed limits, patient data) sit behind doors no agent can
+open.**
 
 ---
 
@@ -152,15 +169,21 @@ Mac:
 ## No keys in agent hands — the brokers
 
 - **GitHub broker.** Agents don't hold GitHub credentials. They hand finished work to
-  the broker, which pushes the branch, opens the PR, and — on admitted repos — merges
-  after the gauntlet passes. Its token has the narrowest scope GitHub allows, and the
-  broker is **unable** (not just untasked) to change repository settings, branch
-  rules, releases, packages, deployment environments, or repos outside the allowlist.
-  Because pushing a branch can itself start repository automation *before* the
-  gauntlet, **the broker refuses the push** unless that automation is known (from the
-  admission record) to hold no valuable credentials, no broad repo authority, and no
-  production effect. Repos dialed to tap-to-merge are enforced by branch protection,
-  not by the broker's good behavior.
+  the broker — and **only work whose exact version has already passed the gauntlet**:
+  review happens inside the harness on the agent's isolated clone, *before* the first
+  push, so no repository automation ever runs unreviewed agent code (this resolves
+  the round-8 sequencing conflict; there is no pre-review push path at all). The
+  broker then pushes the branch, opens the PR, and — on admitted repos — merges.
+  **Honest permission reality (Sol round 8, from GitHub's own docs):** the permission
+  that allows pushing content also suffices to create releases and trigger certain
+  automation — so token scoping alone cannot make "the broker can't publish a
+  release" true. The broker therefore sits behind an **independently enforced
+  operation filter** — a separate component, under a separate identity the broker
+  cannot alter, that permits only the exact operations (push branch, open PR, merge
+  PR, on allowlisted repo IDs) and blocks release, tag, settings, dispatch, and every
+  other call — designed to hold even if the broker itself is fooled or compromised,
+  and attacked as part of the build. Repos dialed to tap-to-merge are enforced by
+  branch protection, not by the broker's good behavior.
 - **Provider broker.** Agent runners get no reusable API or subscription credentials;
   the broker applies per-job budget *before* each call and is the only path to a
   provider. Hard provider-side caps wherever offered — stated honestly: only the
@@ -278,9 +301,18 @@ build proves, as executed attacks:
 4. Tap-to-merge repos: nothing merges without the owner's authenticated tap —
    enforced by GitHub with the broker's token unable to bypass it.
 4b. Admission holds: a repo whose merge deploys, publishes, or triggers privileged
-   automation is refused autonomous merge; a push whose branch automation would run
-   with valuable credentials is refused by the broker; the EMR cannot be added by
-   config alone.
+   automation is refused autonomous merge; the EMR cannot be added by config alone;
+   an agent cannot edit any admission record, the allowlist, or a tool approval;
+   automation quietly added to an admitted repo causes the broker to refuse its next
+   action (drift check); a change that would itself add deploy/publish behavior
+   cancels admission before it can be pushed.
+4c. The operation filter holds: using the broker's own credential, attempts to create
+   a release or tag, change settings or branch rules, fire automation dispatch, or
+   touch a repo outside the allowlist are all blocked by the filter — including when
+   issued by the broker process itself.
+4d. Sequencing holds: no branch containing unreviewed agent code can be pushed at
+   all; the gauntlet verdict is bound to the exact version that is then pushed and
+   merged.
 5. Spend stops at provider-side caps under concurrent and retried requests.
 6. The record refuses agent writes; verdicts can't be deleted or edited pass-ward;
    evidence binds to the commit it examined.
