@@ -3,6 +3,15 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
+> ⚠️ **2026-07-20: the current consolidated state + all open todos live in
+> `docs/HANDOFF_2026-07-20.md`. Read that first.** In one session the build went from
+> "a dashboard that lied" to a working system: all 3 Sol build gates closed, dispatch
+> is real, the app installs as a PWA, the command center is real (projects, per-project
+> todos, timeline, uploads), and voice is wired. 113 tests pass. Remaining core: full
+> gauntlet (#10), gatekeeper (#11), safety rails (#13), streaming Chief into voice
+> (#12), Chief's real project list (#18). Neill's key rotations + branch protection
+> remain the highest-leverage open items. The sections below are preserved history.
+
 Last updated: 2026-07-17 (session 3 — rounds 5 AND 6 rejected with deepening demands;
 Neill called the spiral: **Decision D, the proportionality reset**. Arch doc rewritten
 v3; Sol's role reframed; round 7 running)
