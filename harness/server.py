@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from db.jobs import connect, init_db, month_spend
 
@@ -386,3 +386,41 @@ def voice_page():
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (Path(__file__).resolve().parent / "web" / "index.html").read_text()
+
+
+# ---------------------------------------------------------------------------
+# PWA plumbing — lets Neill "install" the command center as a desktop/phone app
+# straight from the browser. No service worker on purpose: the app is useless
+# without its server anyway, and a stale offline cache showing yesterday's fleet
+# as if it were live would be a lie of exactly the kind this harness exists to
+# prevent.
+# ---------------------------------------------------------------------------
+_WEB = Path(__file__).resolve().parent / "web"
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse(_WEB / "manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/icon.svg")
+def icon_svg():
+    return FileResponse(_WEB / "icon.svg", media_type="image/svg+xml")
+
+
+@app.get("/icon-192.png")
+def icon_192():
+    return FileResponse(_WEB / "icon-192.png", media_type="image/png")
+
+
+@app.get("/icon-512.png")
+def icon_512():
+    return FileResponse(_WEB / "icon-512.png", media_type="image/png")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Loopback only. Reaching this from the phone goes through Tailscale
+    # (`tailscale serve`), never a public bind — AGENTS.md rule 3.
+    uvicorn.run(app, host="127.0.0.1", port=8787)
