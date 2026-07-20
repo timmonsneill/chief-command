@@ -34,6 +34,7 @@ _ALLOWED_ROOTS: tuple[Path, ...] = (
     (Path.home() / "Desktop").resolve(),
     (Path.home() / "Documents" / "GitHub").resolve(),
     (Path.home() / "code-projects" / "GitHub").resolve(),
+    (Path.home() / "code-projects").resolve(),   # Chief Command lives here now
 )
 
 
@@ -59,7 +60,7 @@ def _is_under_allowed_root(resolved: Path) -> bool:
 # project, not a separate scope. No separate repo entry.
 _REPO_PATHS: dict[str, Path] = {
     "Arch": Path.home() / "code-projects" / "GitHub" / "arch-to-freedom-emr",
-    "Chief Command": Path.home() / "Desktop" / "chief-command",
+    "Chief Command": Path.home() / "code-projects" / "chief-command",
     "Personal Assist": Path.home() / "Desktop" / "personal-assist",
 }
 
