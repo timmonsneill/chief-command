@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from db.jobs import connect, init_db, month_spend
@@ -145,6 +145,8 @@ def state():
         j["blocked_because"] = _why_blocked(c, j)
         jobs.append(j)
 
+    from db.planning import todos_for, attachments_for
+
     projects = [dict(r) for r in c.execute("SELECT * FROM projects WHERE archived=0")]
     for p in projects:
         p["memory"] = [dict(m) for m in c.execute(
@@ -154,6 +156,11 @@ def state():
         p["plan"] = [dict(x) for x in c.execute(
             "SELECT * FROM plan_items WHERE project_id=? ORDER BY position, id", (p["id"],)
         )]
+        p["todos"] = todos_for(c, p["id"])
+        p["todo_open"] = c.execute(
+            "SELECT COUNT(*) n FROM todos WHERE project_id=? AND done=0", (p["id"],)
+        ).fetchone()["n"]
+        p["attachments"] = attachments_for(c, p["id"])
         p["job_count"] = c.execute(
             "SELECT COUNT(*) n FROM jobs WHERE project_id=?", (p["id"],)
         ).fetchone()["n"]
@@ -342,6 +349,86 @@ async def dispatch_endpoint(request: Request):
     else:
         reply = f"{who} is on it. A stronger model will check the work before it's called done."
     return {"job_id": d.job_id, "reused": d.reused, "reply": reply, "builder": builder}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TODOS — the checklist that lives in the command center, grouped by project and by
+# the owner's own sections ("Now", "Later", "Post-launch"). No more jumping windows.
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.post("/api/projects/{project_id}/todos")
+async def add_todo_endpoint(project_id: str, request: Request):
+    from db.planning import add_todo
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Say what the todo is."}, status_code=400)
+    c = db()
+    if c.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone() is None:
+        return JSONResponse({"error": "No such project."}, status_code=404)
+    tid = add_todo(c, project_id, text,
+                   section=body.get("section"), owner_only=bool(body.get("owner_only")))
+    return {"id": tid}
+
+
+@app.post("/api/todos/{todo_id}/toggle")
+def toggle_todo_endpoint(todo_id: int):
+    from db.planning import toggle_todo
+    toggle_todo(db(), todo_id)
+    return {"ok": True}
+
+
+@app.post("/api/todos/{todo_id}/delete")
+def delete_todo_endpoint(todo_id: int):
+    from db.planning import delete_todo
+    delete_todo(db(), todo_id)
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPLOADS — images and files the owner drops in, pinned to a project. Bytes live on
+# disk (gitignored); a row in `attachments` is how the UI finds them.
+# ═══════════════════════════════════════════════════════════════════════════════
+UPLOADS = Path(__file__).resolve().parent / "uploads"
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"}
+
+
+@app.post("/api/upload")
+async def upload_endpoint(
+    file: "UploadFile" = File(...),
+    project_id: str = Form(None),
+    job_id: int = Form(None),
+):
+    from db.planning import add_attachment
+
+    UPLOADS.mkdir(exist_ok=True)
+    raw = await file.read()
+    # A safe on-disk name — never trust the client's path. Keep the extension so the
+    # browser renders images; prefix with the attachment id after insert for uniqueness.
+    safe = "".join(ch for ch in (file.filename or "file")
+                   if ch.isalnum() or ch in "._- ").strip() or "file"
+    ext = Path(safe).suffix.lower()
+    kind = "image" if ext in _IMAGE_EXT else "file"
+
+    c = db()
+    # Insert first to get an id, then write bytes under an unambiguous name.
+    att_id = add_attachment(c, filename=safe, stored_path="", kind=kind,
+                            project_id=project_id or None,
+                            job_id=int(job_id) if job_id else None,
+                            size_bytes=len(raw))
+    dest = UPLOADS / f"{att_id}_{safe}"
+    dest.write_bytes(raw)
+    c.execute("UPDATE attachments SET stored_path=? WHERE id=?", (str(dest), att_id))
+    return {"id": att_id, "filename": safe, "kind": kind, "size_bytes": len(raw)}
+
+
+@app.get("/api/attachments/{att_id}")
+def get_attachment(att_id: int):
+    row = db().execute(
+        "SELECT filename, stored_path, kind FROM attachments WHERE id=?", (att_id,)
+    ).fetchone()
+    if row is None or not row["stored_path"] or not Path(row["stored_path"]).exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(row["stored_path"], filename=row["filename"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

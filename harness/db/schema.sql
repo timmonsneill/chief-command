@@ -134,6 +134,51 @@ CREATE TABLE IF NOT EXISTS plan_items (
 CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_items(project_id, position);
 
 -- ---------------------------------------------------------------------------
+-- Todos: the checklist that belongs to a PROJECT, so it stops living in a
+-- terminal window and following nobody. Owner's annoyance, verbatim: "right now I
+-- have persistent todos that has to jump from window to window, which is annoying."
+--
+-- `owner_only` marks the items only Neill can do (rotate a key, flip a setting) —
+-- the ones the fleet must never quietly tick off on his behalf.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS todos (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    -- Sub-category WITHIN a project, so a project can hold several running lists
+    -- ("Security", "Build", "My tasks"). Owner: "ideally we can create a sub
+    -- category under each project as well." NULL / '' folds into a "General" list.
+    section       TEXT,
+    text          TEXT NOT NULL,
+    done          INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),
+    owner_only    INTEGER NOT NULL DEFAULT 0 CHECK (owner_only IN (0, 1)),
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    done_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project_id, section, position, id);
+
+-- ---------------------------------------------------------------------------
+-- Attachments: images and files Neill drops in — a screenshot of a bug, a mockup,
+-- a document — pinned to a project or a specific job. The bytes live on disk
+-- (gitignored); this row is how the UI finds them. captured_by is always the owner
+-- here; agent-produced evidence is the `artifacts` table, which has its own guards.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS attachments (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    filename      TEXT NOT NULL,             -- the original name, for display
+    stored_path   TEXT NOT NULL,             -- where the bytes actually live
+    kind          TEXT NOT NULL CHECK (kind IN ('image', 'file')),
+    size_bytes    INTEGER,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments(project_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_job ON attachments(job_id);
+
+-- ---------------------------------------------------------------------------
 -- Jobs: one row per dispatched unit of work. This is the audit trail.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS jobs (

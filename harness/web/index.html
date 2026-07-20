@@ -110,10 +110,66 @@
   .plan li.active::before{background:var(--run);box-shadow:0 0 8px var(--run)}
   .plan li.blocked::before{background:var(--warn)}
   .plan .why{font-size:12px;color:var(--warn);margin-top:2px}
-  .mem{margin-top:16px}
+  .mem{}
   .mem div{font-size:13px;color:var(--dim);padding:7px 0;border-top:1px solid var(--rule)}
+  .mem div:first-child{border-top:0}
   .mem .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
           color:var(--faint);margin-right:8px}
+
+  /* ── project dashboard ── */
+  .pswitch{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .pchip{background:var(--panel);border:1px solid var(--rule);color:var(--dim);
+         font-family:var(--mono);font-size:12px;padding:8px 14px;cursor:pointer;display:flex;
+         align-items:center;gap:7px}
+  .pchip.on{background:var(--raised);border-color:var(--rule-hi);color:var(--ink)}
+  .pchip .c{background:var(--run);color:#04120C;font-weight:700;border-radius:9px;
+            padding:0 6px;font-size:10px;min-width:16px;text-align:center}
+  .phead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+  .phead h3{margin:0;font-size:19px}
+  .pmeta{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .pcard{border:1px solid var(--rule);background:var(--panel);padding:15px;margin-bottom:12px}
+  .cardh{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+         color:var(--faint);margin-bottom:12px}
+  .tsec{margin-bottom:14px}
+  .th{font-family:var(--mono);font-size:11px;color:var(--run);margin:0 0 6px;font-weight:700}
+  .todo{display:flex;align-items:flex-start;gap:9px;padding:6px 0;font-size:14px;color:var(--ink)}
+  .todo .box{cursor:pointer;color:var(--dim);user-select:none;line-height:1.35}
+  .todo .tx{flex:1;cursor:pointer;line-height:1.35}
+  .todo .del{color:var(--faint);cursor:pointer;opacity:0;padding:0 4px;font-size:16px}
+  .todo:hover .del{opacity:1}
+  .todo.done .tx{color:var(--faint);text-decoration:line-through}
+  .todo.done .box{color:var(--ok)}
+  .todo.you .tx::after{content:"you";font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;
+         color:var(--warn);border:1px solid var(--warn);border-radius:3px;padding:1px 4px;margin-left:8px;
+         vertical-align:middle;text-decoration:none;display:inline-block}
+  .addtodo{display:flex;gap:6px;margin-top:12px;border-top:1px solid var(--rule);padding-top:12px}
+  .addtodo .tsecin{width:130px;flex:none}
+  .addtodo input{background:var(--deck);border:1px solid var(--rule-hi);color:var(--ink);
+         padding:10px;font-size:14px;font-family:var(--sans);outline:none;flex:1;min-width:0}
+  .addtodo input:focus{border-color:var(--ok)}
+  .addtodo button{background:var(--raised);border:1px solid var(--rule-hi);color:var(--ink);
+         font-family:var(--mono);font-size:12px;padding:0 16px;cursor:pointer}
+  .empty2{color:var(--faint);font-size:13px;padding:6px 0}
+  .tl{display:flex;flex-direction:column}
+  .tli{display:flex;align-items:flex-start;gap:12px;padding:9px 0 9px 6px;position:relative;font-size:14px}
+  .tli .dotp{width:8px;height:8px;border-radius:50%;background:var(--faint);margin-top:5px;flex:none}
+  .tli.done .dotp{background:var(--ok)} .tli.done b{color:var(--faint);text-decoration:line-through}
+  .tli.active .dotp{background:var(--run);box-shadow:0 0 8px var(--run)}
+  .tli.blocked .dotp{background:var(--warn)}
+  .tlx{flex:1}
+  .tli .ph{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-left:8px;text-transform:uppercase}
+  .tli .st{font-family:var(--mono);font-size:10px;color:var(--faint);text-transform:uppercase}
+  .tli .why{font-size:12px;color:var(--warn);margin-top:2px}
+  .files{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+  .att{width:96px;text-decoration:none;color:var(--dim);font-size:10px;display:block;overflow:hidden}
+  .att img{width:96px;height:72px;object-fit:cover;border:1px solid var(--rule);display:block}
+  .att span{display:block;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .att.file{width:96px;height:72px;border:1px solid var(--rule);background:var(--deck);
+         display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+  .att.file .fi{font-size:26px;color:var(--faint)}
+  .upl{display:inline-block;font-family:var(--mono);font-size:12px;color:var(--dim);
+       border:1px dashed var(--rule-hi);padding:10px 16px;cursor:pointer}
+  .upl:hover{color:var(--ink);border-color:var(--ok)}
 </style>
 </head>
 <body>
@@ -264,17 +320,112 @@ async function refresh() {
     </div>`;
   }).join('');
 
-  $('#projects').innerHTML = s.projects.length ? s.projects.map(p => `
-    <div class="proj">
-      <h3>${esc(p.name)}</h3>
-      <div class="meta">${p.job_count} job${p.job_count===1?'':'s'}</div>
-      ${p.plan.length ? `<ul class="plan">${p.plan.map(i => `
-        <li class="${i.status}">${esc(i.title)}
-        ${i.blocked_on ? `<div class="why">${esc(i.blocked_on)}</div>` : ''}</li>`).join('')}</ul>` : ''}
-      ${p.memory.length ? `<div class="mem">${p.memory.map(m =>
-        `<div><span class="k">${m.kind}</span>${esc(m.fact)}</div>`).join('')}</div>` : ''}
-    </div>`).join('') : '<div class="empty">No projects yet.</div>';
+  window.STATE = s;
+  renderProjects(s);
 }
+
+// ── The project dashboard: switch projects, and per project see its todos
+//    (grouped into your own sections), timeline, files, and what it has learned. ──
+let SELECTED_PROJECT = null;
+
+function renderProjects(s) {
+  const box = $('#projects');
+  if (!s || !s.projects || !s.projects.length) {
+    box.innerHTML = '<div class="empty">No projects yet.</div>'; return;
+  }
+  if (!SELECTED_PROJECT || !s.projects.find(p => p.id === SELECTED_PROJECT))
+    SELECTED_PROJECT = s.projects[0].id;
+  const p = s.projects.find(x => x.id === SELECTED_PROJECT);
+
+  const chips = s.projects.map(x => `
+    <button class="pchip ${x.id===SELECTED_PROJECT?'on':''}" onclick="selectProject('${x.id}')">
+      ${esc(x.name)}${x.todo_open ? `<span class="c">${x.todo_open}</span>` : ''}
+    </button>`).join('');
+
+  const todos = p.todos.length ? p.todos.map(g => `
+    <div class="tsec">
+      <div class="th">${esc(g.section)}</div>
+      ${g.items.map(t => `
+        <div class="todo ${t.done?'done':''} ${t.owner_only?'you':''}">
+          <span class="box" onclick="toggleTodo(${t.id})">${t.done?'☑':'☐'}</span>
+          <span class="tx" onclick="toggleTodo(${t.id})">${esc(t.text)}</span>
+          <span class="del" onclick="deleteTodo(${t.id})" title="remove">×</span>
+        </div>`).join('')}
+    </div>`).join('') : '<div class="empty2">No todos yet — add one below.</div>';
+
+  const timeline = p.plan.length ? `<div class="tl">${p.plan.map(i => `
+    <div class="tli ${i.status}"><span class="dotp"></span>
+      <div class="tlx"><b>${esc(i.title)}</b>${i.phase?`<span class="ph">${esc(i.phase)}</span>`:''}
+        ${i.blocked_on?`<div class="why">${esc(i.blocked_on)}</div>`:''}</div>
+      <span class="st">${esc(i.status)}</span>
+    </div>`).join('')}</div>` : '<div class="empty2">No timeline yet.</div>';
+
+  const files = (p.attachments && p.attachments.length) ? `<div class="files">${p.attachments.map(a =>
+    a.kind==='image'
+      ? `<a class="att" href="/api/attachments/${a.id}" target="_blank"><img src="/api/attachments/${a.id}" alt=""><span>${esc(a.filename)}</span></a>`
+      : `<a class="att file" href="/api/attachments/${a.id}" target="_blank"><span class="fi">▤</span><span>${esc(a.filename)}</span></a>`
+    ).join('')}</div>` : '';
+
+  const mem = p.memory.length ? `<div class="mem">${p.memory.map(m =>
+    `<div><span class="k">${esc(m.kind)}</span>${esc(m.fact)}</div>`).join('')}</div>`
+    : '<div class="empty2">Nothing learned yet.</div>';
+
+  box.innerHTML = `
+    <div class="pswitch">${chips}</div>
+    <div class="phead"><h3>${esc(p.name)}</h3>
+      <div class="pmeta">${p.todo_open||0} open · ${p.job_count} job${p.job_count===1?'':'s'}</div></div>
+
+    <div class="pcard">
+      <div class="cardh">Todos</div>
+      ${todos}
+      <form class="addtodo" onsubmit="return addTodo(event,'${p.id}')">
+        <input class="tsecin" placeholder="Section (Now, Later…)" list="secs-${p.id}" autocomplete="off">
+        <datalist id="secs-${p.id}">${p.todos.map(g=>`<option value="${esc(g.section)}">`).join('')}</datalist>
+        <input class="ttextin" placeholder="Add a todo…" autocomplete="off">
+        <button>Add</button>
+      </form>
+    </div>
+
+    <div class="pcard"><div class="cardh">Timeline</div>${timeline}</div>
+
+    <div class="pcard">
+      <div class="cardh">Files &amp; images</div>
+      ${files}
+      <label class="upl">＋ Upload an image or file
+        <input type="file" style="display:none" onchange="uploadFile(this,'${p.id}')">
+      </label>
+    </div>
+
+    <div class="pcard"><div class="cardh">What this project knows</div>${mem}</div>`;
+}
+
+window.selectProject = id => { SELECTED_PROJECT = id; renderProjects(window.STATE); };
+window.toggleTodo = async id => { await fetch('/api/todos/'+id+'/toggle',{method:'POST'}); refresh(); };
+window.deleteTodo = async id => { await fetch('/api/todos/'+id+'/delete',{method:'POST'}); refresh(); };
+window.addTodo = async (e, pid) => {
+  e.preventDefault();
+  const f = e.target;
+  const text = f.querySelector('.ttextin').value.trim(); if (!text) return false;
+  const section = f.querySelector('.tsecin').value.trim();
+  await fetch('/api/projects/'+pid+'/todos', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text, section})
+  });
+  f.querySelector('.ttextin').value = '';
+  refresh();
+  return false;
+};
+window.uploadFile = async (input, pid) => {
+  if (!input.files || !input.files[0]) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  fd.append('project_id', pid);
+  const lbl = input.parentNode; const t = lbl.firstChild.textContent;
+  lbl.firstChild.textContent = 'Uploading…';
+  try { await fetch('/api/upload', {method:'POST', body:fd}); } finally { lbl.firstChild.textContent = t; }
+  input.value = '';
+  refresh();
+};
 
 refresh();
 setInterval(() => { if (!$('#talk').classList.contains('on')) refresh(); }, 4000);
