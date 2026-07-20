@@ -122,8 +122,8 @@ def state():
         j["tone"] = tone
         j["color"] = FAMILY_COLOR.get(j["builder_family"], "#7E90A8")
         j["verdicts"] = [dict(v) for v in c.execute(
-            "SELECT reviewer_seat, model_family, role, verdict, summary FROM verdicts "
-            "WHERE job_id=? ORDER BY id", (j["id"],)
+            "SELECT reviewer_seat, reviewer_tier, model_family, role, verdict, summary "
+            "FROM verdicts WHERE job_id=? ORDER BY id", (j["id"],)
         )]
         for v in j["verdicts"]:
             v["color"] = FAMILY_COLOR.get(v["model_family"], "#7E90A8")
