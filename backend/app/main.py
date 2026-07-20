@@ -1,4 +1,22 @@
-"""Chief Command Center — FastAPI application entry point."""
+"""Chief Command Center — FastAPI application entry point.
+
+v1 IS RETIRED. Reference and parts salvage only (AGENTS.md).
+"""
+
+import os
+import sys
+
+# Sol build gate 2 (2026-07-20): old paths must be PHYSICALLY unusable, not
+# abandoned by convention. v1 served itself through a public Cloudflare tunnel
+# with a default password; that whole world is dead. This import-time refusal is
+# the kill switch — reading the code stays free, running it takes a deliberate,
+# named act that no launcher script performs anymore.
+if os.environ.get("CHIEF_V1_REFERENCE_EXHIBIT") != "1":
+    sys.exit(
+        "chief-command v1 is retired and does not run. It is kept for reference "
+        "only. The live system is harness/. (To study v1 anyway, set "
+        "CHIEF_V1_REFERENCE_EXHIBIT=1 — and do not expose it to a network.)"
+    )
 
 import asyncio
 import logging
