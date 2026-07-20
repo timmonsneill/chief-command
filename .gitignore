@@ -53,6 +53,9 @@ logs/
 *.db-shm
 *.db-wal
 
+# Live-DB backups taken before migrations — local state, same as the DB itself
+harness/db/backups/
+
 # Local tool state
 .playwright-mcp/
 openclaw-workspace-state.json
