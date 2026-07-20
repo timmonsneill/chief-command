@@ -14,11 +14,38 @@ Design rules, all downstream of one fact — HE CANNOT READ CODE:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+# ---------------------------------------------------------------------------
+# Keys live in ~/.chief/env (chmod 600, never in the repo). Load them here so the
+# server can mint voice tokens and reach the seats however it was launched. This
+# is the intended config path — the file, not a hardcode. Existing environment
+# values win, so a key set in the shell is never clobbered.
+# ---------------------------------------------------------------------------
+def _load_chief_env() -> None:
+    env_file = Path.home() / ".chief" / "env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip().strip('"').strip("'")
+        os.environ.setdefault(key, val)
+
+
+_load_chief_env()
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse

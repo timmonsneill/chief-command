@@ -37,6 +37,10 @@
              font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
              padding:9px 4px;cursor:pointer}
   nav button.on{background:var(--raised);color:var(--ink)}
+  nav .voicebtn{flex:none;display:flex;align-items:center;gap:4px;background:none;border:0;
+       color:var(--faint);font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+       text-transform:uppercase;padding:0 16px;text-decoration:none;cursor:pointer}
+  nav .voicebtn:hover{color:var(--ok)}
 
   main{padding:16px;max-width:900px;margin:0 auto}
   .tab{display:none} .tab.on{display:block}
@@ -180,6 +184,7 @@
     <button data-t="work">Work</button>
     <button data-t="fleet">Fleet</button>
     <button data-t="proj">Projects</button>
+    <a class="voicebtn" href="/voice">🎙 Voice</a>
   </nav>
 </header>
 
