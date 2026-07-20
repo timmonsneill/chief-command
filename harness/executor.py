@@ -1,0 +1,269 @@
+"""The worker. This is the thing that was missing — the reason nothing ran.
+
+Dispatch (dispatch.py) decides a job MAY run and records it. This module is what
+actually DOES it: it takes a queued job, runs the work on the assigned seat's real
+model, writes down every step as it goes, and lands a real result. Before this file
+existed, Chief said "putting Riggs on it" and no worker ever started.
+
+Two hard rules, both structural rather than polite:
+
+  1. THE WORK HAPPENS IN AN ISOLATED WORKTREE, never the live project. A builder gets
+     its own private copy of the repo (a git worktree). It physically cannot scribble
+     on main while it works — main is untouched until something is reviewed and merged
+     by the one service allowed to merge. "One worktree per agent" (owner + Sol).
+
+  2. LOCAL OUTPUT CANNOT COMPLETE ON ITS OWN. When the free local model finishes, the
+     job parks at 'review'. The database guards (schema.sql) refuse to let it reach
+     'done' without a higher-tier reviewer passing THIS version. We do not route
+     around that here; we feed it.
+
+Runs in a background thread so the app never blocks — the whole point of the
+architecture. sessions come and go; the job row is the durable truth.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import threading
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from db.jobs import (
+    GuardViolation,
+    connect,
+    record_verdict,
+    seat,
+    set_head_version,
+    set_status,
+)
+
+HARNESS = Path(__file__).resolve().parent
+DB_PATH = HARNESS / "db" / "chief.db"
+WORKTREES = HARNESS / ".worktrees"       # gitignored; one subdir per job
+OUTPUT_DIRNAME = "chief_output"          # where a builder drops standalone work
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+
+
+# ---------------------------------------------------------------------------
+# Event trail — this is what the app's activity view reads. Every step, live.
+# ---------------------------------------------------------------------------
+def _event(conn, job_id: int, seat_row, kind: str, detail: str = "", target: str = "") -> None:
+    conn.execute(
+        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, target, detail) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (job_id, seat_row["id"], seat_row["id"], seat_row["model"],
+         seat_row["family"], kind, target or None, detail or None),
+    )
+
+
+def _version_of(text: str) -> str:
+    """The exact content being put forward, as a short hash. This is what the whole
+    review-to-version chain binds to: change the output, change the version, and every
+    earlier approval silently stops counting (schema.sql, gate 3)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Worktree isolation — a builder never touches the live project.
+# ---------------------------------------------------------------------------
+def _make_worktree(job_id: int, branch: str) -> tuple[Path | None, str]:
+    """Give this job its own private copy of the repo. Returns (path, note).
+
+    If git worktrees aren't usable for any reason, fall back to a plain isolated
+    directory and SAY SO — a silent fallback that quietly drops isolation would be
+    exactly the kind of unspoken gap this project keeps getting bitten by.
+    """
+    WORKTREES.mkdir(exist_ok=True)
+    dest = WORKTREES / f"job-{job_id}"
+    if dest.exists():
+        return dest, "reused"
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(dest)],
+            cwd=HARNESS.parent, capture_output=True, text=True, timeout=60, check=True,
+        )
+        return dest, "worktree"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        # Isolation still holds (separate dir, outside the repo tree) — it just isn't a
+        # git worktree, so we record that honestly.
+        dest.mkdir(parents=True, exist_ok=True)
+        detail = getattr(exc, "stderr", "") or str(exc)
+        return dest, f"plain-dir ({str(detail)[:60].strip()})"
+
+
+def cleanup_worktree(job_id: int) -> None:
+    """Remove a job's worktree once its work is merged or abandoned."""
+    dest = WORKTREES / f"job-{job_id}"
+    if not dest.exists():
+        return
+    subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
+                   cwd=HARNESS.parent, capture_output=True, text=True)
+    if dest.exists():
+        subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+
+
+# ---------------------------------------------------------------------------
+# The actual builders, one per provider. Add a provider = add a function.
+# ---------------------------------------------------------------------------
+def _ollama_build(seat_row, request: str, model: str) -> str:
+    """The free local coder actually writes the code."""
+    payload = json.dumps({"model": model, "prompt": request, "stream": False}).encode()
+    req = urllib.request.Request(
+        OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=300) as r:
+        return json.loads(r.read())["response"].strip()
+
+
+_BUILDERS = {
+    "ollama": _ollama_build,
+}
+
+
+# ---------------------------------------------------------------------------
+# Optional single reviewer — enough to close the loop and honor the guards.
+# The FULL parallel gauntlet is task #10; this is the one real cross-tier pass
+# that lets a local job legitimately complete.
+# ---------------------------------------------------------------------------
+def _claude_review(request: str, code: str) -> tuple[str, str]:
+    """A higher-tier model reads the work and judges it. Returns (verdict, summary)."""
+    prompt = (
+        "You are reviewing another model's code. Reply with EXACTLY one line: "
+        "'PASS <one-line reason>' or 'FAIL <one-line reason>'.\n\n"
+        f"The task was: {request}\n\nThe code:\n{code}"
+    )
+    out = subprocess.run(
+        ["claude", "-p", prompt], capture_output=True, text=True, timeout=180
+    ).stdout.strip()
+    verdict = "pass" if out.upper().lstrip().startswith("PASS") else "fail"
+    return verdict, out[:280]
+
+
+_REVIEWERS = {
+    "claude-cli": _claude_review,
+}
+
+
+# ---------------------------------------------------------------------------
+# The run loop — everything above, in order, for one job.
+# ---------------------------------------------------------------------------
+def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
+    """Take one recorded job and actually do it. Safe to call in a thread.
+
+    Opens its own database connection (sqlite + threads). WAL mode lets this write
+    while the web server reads. Never raises to the caller — a worker that dies must
+    leave a legible 'failed' row, not a stack trace nobody sees.
+    """
+    conn = connect(DB_PATH)
+    try:
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job is None:
+            return {"job_id": job_id, "status": "missing"}
+        seat_row = seat(conn, job["builder_seat"])
+        if seat_row is None:
+            set_status(conn, job_id, "failed", error=f"unknown seat {job['builder_seat']}")
+            return {"job_id": job_id, "status": "failed"}
+
+        builder = _BUILDERS.get(seat_row["provider"])
+        if builder is None:
+            # A provider we don't have a local runner for (codex/xai/claude-cli builds
+            # go through OpenClaw, not this in-process worker). Say so plainly.
+            set_status(conn, job_id, "failed",
+                       error=f"no in-process builder for provider '{seat_row['provider']}' "
+                             "— this seat dispatches through OpenClaw")
+            _event(conn, job_id, seat_row, "error",
+                   "This worker only runs the local model directly.")
+            return {"job_id": job_id, "status": "failed"}
+
+        # 1. Isolate.
+        wt, wt_note = _make_worktree(job_id, job["branch"] or f"job/{job_id}")
+        conn.execute("UPDATE jobs SET worktree = ? WHERE id = ?", (str(wt), job_id))
+        _event(conn, job_id, seat_row, "dispatched", f"Working in its own copy ({wt_note}).")
+
+        # 2. Build.
+        model = job["tier"] and _model_for(seat_row, job["tier"]) or seat_row["model"]
+        _event(conn, job_id, seat_row, "thinking", "Working out how to do it.")
+        try:
+            result = builder(seat_row, job["request"], model)
+        except Exception as exc:  # network, model, timeout — all land here
+            set_status(conn, job_id, "failed", error=f"builder error: {exc}")
+            _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
+            return {"job_id": job_id, "status": "failed"}
+
+        # 3. Land the output in the isolated copy, and version it.
+        out_dir = wt / OUTPUT_DIRNAME
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"job_{job_id}.txt").write_text(result)
+        version = _version_of(result)
+        set_head_version(conn, job_id, version)
+        _event(conn, job_id, seat_row, "write",
+               f"Wrote {len(result)} characters of work.", target=str(out_dir))
+
+        # 4. Park for review. The guards will hold it here until a real reviewer passes
+        #    THIS version — we never force it past them.
+        set_status(conn, job_id, "review", result=result)
+
+        # 5. If a reviewer is wired and available, run the one real cross-tier pass.
+        if reviewer_seat:
+            _run_one_review(conn, job_id, job["request"], result, version, reviewer_seat)
+
+        final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
+        return {"job_id": job_id, "status": final, "version": version}
+    finally:
+        conn.close()
+
+
+def _model_for(seat_row, tier: str) -> str:
+    try:
+        from tiering import resolve_model
+        return resolve_model(seat_row, tier)[0]
+    except Exception:
+        return seat_row["model"]
+
+
+def _run_one_review(conn, job_id, request, code, version, reviewer_seat) -> None:
+    rev = seat(conn, reviewer_seat)
+    if rev is None or not rev["enabled"]:
+        return
+    reviewer = _REVIEWERS.get(rev["provider"])
+    if reviewer is None:
+        return
+    _event(conn, job_id, rev, "thinking", "A stronger model is checking the work.")
+    try:
+        verdict, summary = reviewer(request, code)
+    except Exception as exc:
+        _event(conn, job_id, rev, "error", "The reviewer couldn't finish.")
+        return
+    # reviewed_version defaults to the job's head_version inside record_verdict, which
+    # is exactly `version` — so this verdict is bound to what was actually reviewed.
+    try:
+        record_verdict(conn, job_id, reviewer_seat, verdict=verdict,
+                       summary=summary, role="reviewer")
+    except GuardViolation:
+        return
+    _event(conn, job_id, rev, "verdict", "Passed the check." if verdict == "pass"
+           else "Sent it back with notes.")
+
+    if verdict == "pass":
+        try:
+            set_status(conn, job_id, "done",
+                       spoken_summary="Built and checked. Ready for you.")
+        except GuardViolation:
+            # Some other gate still holds (e.g. panel size). Leave it parked, honestly.
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget: start a worker in the background so the app stays responsive.
+# ---------------------------------------------------------------------------
+def start_in_background(job_id: int, *, reviewer_seat: str | None = None) -> threading.Thread:
+    t = threading.Thread(
+        target=run_job, args=(job_id,), kwargs={"reviewer_seat": reviewer_seat},
+        name=f"job-{job_id}", daemon=True,
+    )
+    t.start()
+    return t

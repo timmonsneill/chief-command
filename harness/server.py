@@ -280,6 +280,71 @@ def _handle_directly(u: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DISPATCH — where "putting someone on it" stops being a figure of speech.
+#
+# This starts a REAL worker. Today it runs the free local coder, so the whole loop
+# can be exercised with no money and no keys: you type a job, a real model builds it
+# in its own isolated copy of the code, and a stronger model checks it before it can
+# be called done. The paid coding seats will hang off this same path through OpenClaw.
+# ═══════════════════════════════════════════════════════════════════════════════
+def _pick_local_builder(c) -> str | None:
+    """The free local coder, whatever it's named in this database."""
+    row = c.execute(
+        "SELECT id FROM seats WHERE provider = 'ollama' AND enabled = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _pick_reviewer(c) -> str | None:
+    """A stronger model to check the local work — a Claude seat (its own login, no
+    metered key involved), so the loop can close without touching anything that still
+    needs rotating."""
+    row = c.execute(
+        "SELECT id FROM seats WHERE provider = 'claude-cli' AND enabled = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+@app.post("/api/dispatch")
+async def dispatch_endpoint(request: Request):
+    """Give the team a real job. Non-blocking: returns as soon as it's recorded and
+    the worker has started, so the page stays live while the work grinds."""
+    import dispatch as dispatch_mod
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Say what to build."}, status_code=400)
+    # The client stamps a nonce so a double-tap or a re-send can't start it twice.
+    nonce = (body.get("nonce") or "").strip() or None
+
+    c = db()
+    builder = _pick_local_builder(c)
+    if not builder:
+        return JSONResponse(
+            {"error": "The free local coder isn't available on this machine right now."},
+            status_code=503,
+        )
+    reviewer = _pick_reviewer(c)
+
+    try:
+        d = dispatch_mod.dispatch_local(
+            c, text, builder,
+            origin="text", dispatch_key=nonce, reviewer_seat=reviewer,
+            required_reviews=1,
+        )
+    except dispatch_mod.DispatchRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    who = builder.title()
+    if d.reused:
+        reply = f"Already on it — {who} picked that up a moment ago."
+    else:
+        reply = f"{who} is on it. A stronger model will check the work before it's called done."
+    return {"job_id": d.job_id, "reused": d.reused, "reply": reply, "builder": builder}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # VOICE
 # ═══════════════════════════════════════════════════════════════════════════════
 import os  # noqa: E402

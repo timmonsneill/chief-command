@@ -62,6 +62,10 @@
   .ask button{background:var(--ok);border:0;color:#04120C;font-weight:700;padding:0 20px;
               font-family:var(--mono);font-size:13px;cursor:pointer}
   .ask button:disabled{opacity:.4}
+  /* the "give the team a job" box sits at the TOP of the work tab, not stuck to the
+     bottom like the chat composer */
+  .ask.give{position:static;padding:0 0 6px}
+  .givemsg{color:var(--dim);font-size:13px;min-height:18px;padding:0 0 10px}
 
   /* ── jobs ── */
   .job{border:1px solid var(--rule);background:var(--panel);margin-bottom:10px}
@@ -132,7 +136,15 @@
     </form>
   </section>
 
-  <section id="work" class="tab"><h2>What's happening</h2><div id="jobs"></div></section>
+  <section id="work" class="tab">
+    <h2>What's happening</h2>
+    <form class="ask give" id="give">
+      <input id="giveIn" placeholder="Give the team a job to build…" autocomplete="off">
+      <button id="giveBtn">Build it</button>
+    </form>
+    <div id="giveMsg" class="givemsg"></div>
+    <div id="jobs"></div>
+  </section>
   <section id="fleet" class="tab"><h2>The fleet</h2><div id="seats"></div></section>
   <section id="proj" class="tab"><h2>Projects</h2><div id="projects"></div></section>
 </main>
@@ -189,6 +201,30 @@ $('#ask').onsubmit = async e => {
     bubble('chief', 'Chief', "Couldn't reach the machine. Is it still running?");
   }
   $('#send').disabled = false; $('#in').focus();
+};
+
+// Give the team a real job. Generates a one-time nonce so a double-tap can't start
+// the same work twice — the server dedupes on it.
+$('#give').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('#giveIn').value.trim(); if (!text) return;
+  const nonce = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+  $('#giveIn').value = ''; $('#giveBtn').disabled = true;
+  $('#giveMsg').textContent = 'Sending it over…';
+  try {
+    const r = await fetch('/api/dispatch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, nonce})
+    }).then(r => r.json());
+    $('#giveMsg').textContent = r.reply || r.error || '';
+    refresh();
+    // Poll quickly for a bit so the work appears to move in near-real-time.
+    let ticks = 0;
+    const fast = setInterval(() => { refresh(); if (++ticks > 40) clearInterval(fast); }, 1500);
+  } catch (err) {
+    $('#giveMsg').textContent = "Couldn't reach the machine. Is it still running?";
+  }
+  $('#giveBtn').disabled = false; $('#giveIn').focus();
 };
 
 async function refresh() {

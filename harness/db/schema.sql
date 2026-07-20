@@ -217,12 +217,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     spoken_summary TEXT,
 
     attempts      INTEGER NOT NULL DEFAULT 0,
-    parent_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL
+    parent_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+
+    -- DUPLICATE PROTECTION. A retry — a double-tap, a dropped connection, the voice
+    -- re-sending — must not start the same work twice. The caller stamps a key; a
+    -- second dispatch with the same key returns the existing job instead of spawning
+    -- a new one. NULL = no key given (nothing to dedupe against). The unique index
+    -- below lets many NULLs coexist but forbids two rows sharing a real key.
+    dispatch_key  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status  ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_run     ON jobs(run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dispatch_key ON jobs(dispatch_key)
+    WHERE dispatch_key IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Verdicts: the gauntlet's output (§6). One row per reviewer per job.

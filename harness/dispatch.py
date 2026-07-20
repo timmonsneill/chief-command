@@ -49,6 +49,85 @@ class DispatchRefused(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# The REAL, in-process dispatch path (task #9).
+#
+# dispatch()/_spawn() below hand work to OpenClaw — the production path, for the
+# paid coding seats. This one runs the free LOCAL model directly, in a background
+# worker, so the whole spine can be exercised end-to-end today with no money and no
+# exposed keys. Same recording, same guards, same worktree isolation.
+# ---------------------------------------------------------------------------
+@dataclass
+class LocalDispatch:
+    job_id: int
+    seat_id: str
+    reused: bool          # True = a duplicate key matched an existing job
+    tier: str
+    tier_reason: str
+
+
+def dispatch_local(
+    conn,
+    request: str,
+    builder_seat: str,
+    *,
+    origin: str = "text",
+    dispatch_key: str | None = None,
+    reviewer_seat: str | None = None,
+    required_reviews: int = 1,
+    start: bool = True,
+) -> LocalDispatch:
+    """Record a job and start a real local worker on it. Non-blocking.
+
+    Order is load-bearing: we check the seat and the budget, dedupe, THEN write the
+    row, THEN start the worker — the store is the source of truth, nothing runs
+    without a row. Duplicate protection: a repeated dispatch_key returns the job that
+    already exists instead of starting the work twice.
+    """
+    from db.jobs import create_job, over_budget, seat
+    from tiering import tier_for_build
+    import executor
+
+    # Duplicate protection — a retry must not start the same work twice.
+    if dispatch_key:
+        existing = conn.execute(
+            "SELECT id, builder_seat, tier, tier_reason FROM jobs WHERE dispatch_key = ?",
+            (dispatch_key,),
+        ).fetchone()
+        if existing is not None:
+            return LocalDispatch(
+                job_id=existing["id"], seat_id=existing["builder_seat"],
+                reused=True, tier=existing["tier"] or "standard",
+                tier_reason=existing["tier_reason"] or "",
+            )
+
+    row = seat(conn, builder_seat)
+    if row is None:
+        raise DispatchRefused(f"unknown seat: {builder_seat}")
+    if not row["enabled"]:
+        raise DispatchRefused(f"seat '{builder_seat}' is turned off")
+    if over_budget(conn, builder_seat):
+        raise DispatchRefused(f"seat '{builder_seat}' is over its budget for today")
+
+    call = tier_for_build(request)
+
+    job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+    conn.execute(
+        "UPDATE jobs SET required_reviews = ?, tier = ?, tier_reason = ?, "
+        "dispatch_key = ?, branch = ? WHERE id = ?",
+        (required_reviews, call.tier, call.reason, dispatch_key, f"job/{job_id}", job_id),
+    )
+    set_status(conn, job_id, "in_progress")
+
+    if start:
+        executor.start_in_background(job_id, reviewer_seat=reviewer_seat)
+
+    return LocalDispatch(
+        job_id=job_id, seat_id=builder_seat, reused=False,
+        tier=call.tier, tier_reason=call.reason,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 def load_config(path: Path = CONFIG) -> dict[str, Any]:

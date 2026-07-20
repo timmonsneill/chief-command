@@ -56,6 +56,9 @@ logs/
 # Live-DB backups taken before migrations — local state, same as the DB itself
 harness/db/backups/
 
+# Per-job isolated worktrees — runtime scratch, one dir per dispatched job
+harness/.worktrees/
+
 # Local tool state
 .playwright-mcp/
 openclaw-workspace-state.json
