@@ -186,6 +186,22 @@ def attach_run(
 
 
 @_guarded
+def set_head_version(conn: sqlite3.Connection, job_id: int, version: str) -> None:
+    """Record the exact version (git commit id) the builder is putting forward.
+
+    This is the pivot of the review-to-version chain: every completion guard only
+    counts verdicts whose reviewed_version matches this. Calling it again after the
+    builder iterates voids all earlier approvals by construction — nothing needs to
+    remember to revoke them. Frozen by the schema once the job is done.
+    """
+    if not version or not version.strip():
+        raise ValueError("a version must actually name a version")
+    conn.execute(
+        "UPDATE jobs SET head_version = ? WHERE id = ?", (version.strip(), job_id)
+    )
+
+
+@_guarded
 def set_status(
     conn: sqlite3.Connection,
     job_id: int,
@@ -264,6 +280,7 @@ def record_verdict(
     summary: str | None = None,
     detail: str | None = None,
     role: str = "reviewer",
+    reviewed_version: str | None = None,
 ) -> int:
     """Record one seat's verdict.
 
@@ -273,6 +290,12 @@ def record_verdict(
                     from the builder's — Playwright stops a tester fabricating what
                     happened; only a different mind stops it rationalizing it.
 
+    reviewed_version is WHAT the reviewer looked at. The gauntlet runner pins the
+    version before handing work to a reviewer and must pass it explicitly. When
+    omitted, it defaults to the job's current head_version — correct only when
+    nothing moved between review and recording, which the runner must guarantee.
+    A verdict whose version stops matching the job simply stops counting.
+
     tier and family are snapshotted from the seat at write time, so re-tiering or
     re-pointing a seat later cannot retroactively legitimize a job.
     """
@@ -280,15 +303,22 @@ def record_verdict(
     if row is None:
         raise ValueError(f"unknown seat: {reviewer_seat}")
 
+    if reviewed_version is None:
+        job_row = conn.execute(
+            "SELECT head_version FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if job_row is not None:
+            reviewed_version = job_row["head_version"]
+
     cur = conn.execute(
         """
         INSERT INTO verdicts
             (job_id, reviewer_seat, reviewer_tier, role, model_family,
-             verdict, severity, summary, detail)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             verdict, severity, summary, detail, reviewed_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (job_id, reviewer_seat, row["tier"], role, row["family"],
-         verdict, severity, summary, detail),
+         verdict, severity, summary, detail, reviewed_version),
     )
     return int(cur.lastrowid)
 

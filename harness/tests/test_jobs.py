@@ -26,6 +26,7 @@ from db.jobs import (  # noqa: E402
     record_usage,
     record_verdict,
     resolve_escalation,
+    set_head_version,
     set_status,
     upsert_seat,
 )
@@ -79,6 +80,7 @@ def test_local_job_cannot_ship_on_a_failing_review(conn):
 
 def test_local_job_ships_once_a_higher_tier_seat_passes_it(conn):
     job = create_job(conn, "scaffold the auth module", builder_seat="grinder")
+    set_head_version(conn, job, "abc123")
     record_verdict(conn, job, "orchestrator", verdict="pass")
 
     set_status(conn, job, "done", result="merged to main")
@@ -90,6 +92,7 @@ def test_local_job_ships_once_a_higher_tier_seat_passes_it(conn):
 def test_subscription_built_job_needs_no_such_rescue(conn):
     """The guard targets local output specifically; it must not block everything else."""
     job = create_job(conn, "big refactor", builder_seat="workhorse")
+    set_head_version(conn, job, "abc123")
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
 
@@ -125,6 +128,7 @@ def test_unresolved_escalation_blocks_completion(conn):
 
 def test_resolved_escalation_unblocks_completion(conn):
     job = create_job(conn, "tricky migration", builder_seat="workhorse")
+    set_head_version(conn, job, "abc123")
     vid = record_verdict(conn, job, "orchestrator", verdict="needs_human")
 
     resolve_escalation(conn, vid, "pass")
@@ -176,6 +180,7 @@ def test_a_model_may_never_claim_to_have_captured_an_artifact(conn):
 def test_a_plain_reviewer_needs_no_artifacts(conn):
     """The artifact guard is for testers, who drive the app. Reviewers read diffs."""
     job = create_job(conn, "add the login form", builder_seat="orchestrator")
+    set_head_version(conn, job, "abc123")
     record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
@@ -222,6 +227,7 @@ def test_the_same_family_may_still_REVIEW_its_own_build(conn):
     """
     upsert_seat(conn, Seat("claude_builder", "claude-cli", "claude-opus-4-8", "claude", "subscription"))
     job = create_job(conn, "add the login form", builder_seat="claude_builder")
+    set_head_version(conn, job, "abc123")
     record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")  # claude reviewing claude
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
@@ -238,6 +244,7 @@ def test_a_fully_gauntleted_job_ships_itself(conn):
     """The happy path. Nobody had to wake Neill up."""
     upsert_seat(conn, Seat("gpt_tester", "codex", "gpt-5.6-sol", "gpt", "subscription"))
     job = create_job(conn, "add the login form", builder_seat="reviewer")  # claude built it
+    set_head_version(conn, job, "abc123")
     record_artifact(conn, job, kind="screenshot", path="/tmp/login.png")
     record_verdict(conn, job, "gpt_tester", verdict="pass", role="tester")  # different family
     set_status(conn, job, "done")
@@ -250,6 +257,7 @@ def test_a_fully_gauntleted_job_ships_itself(conn):
 def test_nothing_ships_without_a_tester_actually_driving_it(conn):
     """A code review is not a test. Somebody has to have RUN the thing."""
     job = create_job(conn, "add the login form", builder_seat="orchestrator")
+    set_head_version(conn, job, "abc123")
     record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")  # read the diff only
     set_status(conn, job, "done")
 
@@ -378,6 +386,7 @@ def test_a_different_family_can_fact_check_it(conn):
 def test_a_build_job_needs_no_sources(conn):
     """The citation guard is for research. It must not block ordinary code."""
     job = create_job(conn, "add the login form", builder_seat="orchestrator")
+    set_head_version(conn, job, "abc123")
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
 
@@ -435,6 +444,7 @@ def test_capped_seat_blocks_once_the_cap_is_hit(conn):
 # ---------------------------------------------------------------------------
 def test_overnight_report_answers_the_voice_query(conn):
     job = create_job(conn, "backfill the tests", builder_seat="grinder", origin="voice")
+    set_head_version(conn, job, "abc123")
     record_verdict(conn, job, "orchestrator", verdict="pass")
     record_verdict(conn, job, "workhorse", verdict="pass")
     set_status(conn, job, "done", spoken_summary="Backfilled 14 tests. All green.")

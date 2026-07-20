@@ -181,6 +181,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     branch        TEXT,
     worktree      TEXT,
 
+    -- THE VERSION UNDER REVIEW (Sol build gate 3, 2026-07-20). The exact content
+    -- hash the builder is putting forward — a git commit id. Reviews bind to this:
+    -- a verdict only counts toward completion while its reviewed_version matches.
+    -- The moment the builder changes the code, this changes, and every earlier
+    -- approval silently stops counting. Sol called the alternative the most
+    -- dangerous flaw in the system: "believable green checks on code nobody
+    -- reviewed." The gatekeeper's job at push time is to verify the code leaving
+    -- the building IS this hash — the DB proves the chain, git proves the content.
+    head_version  TEXT,
+
     -- 'done'    = the gauntlet passed. The machine is satisfied.
     -- 'shipped' = NEILL said it works on his device. Only he can move this.
     -- These are NOT the same thing, and conflating them is how agents launder
@@ -234,6 +244,11 @@ CREATE TABLE IF NOT EXISTS verdicts (
     -- model family is snapshotted here so §6's "at least two families" rule is
     -- auditable, and so the no-self-family-testing guard has something to check.
     model_family  TEXT NOT NULL,
+    -- WHAT, exactly, did this reviewer look at? Snapshotted at write time. A verdict
+    -- whose version no longer matches the job's head_version is history, not
+    -- approval — it stops counting the moment the code moves on. This is the other
+    -- half of the review-to-version chain.
+    reviewed_version TEXT,
     verdict       TEXT NOT NULL CHECK (verdict IN ('pass', 'fail', 'needs_human')),
     severity      TEXT CHECK (severity IN ('p0', 'p1', 'p2', 'p3')),
     summary       TEXT,
@@ -608,6 +623,50 @@ BEGIN
     SELECT RAISE(ABORT, 'guard: who reviewed this cannot be rewritten after the fact');
 END;
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- THE REVIEW-TO-VERSION CHAIN (Sol build gate 3, 2026-07-20).
+--
+-- Sol's most dangerous flaw: "approve version A, builder changes it to B, the old
+-- approval still counts — believable green checks on code nobody reviewed."
+--
+-- The fix is not another approval ceremony; it is arithmetic. A verdict carries the
+-- version it reviewed. A job carries the version it is putting forward. Completion
+-- guards only count verdicts whose versions MATCH — so moving the code voids the
+-- approvals by construction, nothing needs to remember to revoke anything. And a
+-- FAIL condemns the version it saw, not the job forever: fix the code, the version
+-- changes, the old fail becomes history. (A fail with no recorded version blocks
+-- everything — fail-closed, because it condemned we-don't-know-what.)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- A versioned job accepts no unversioned verdicts. (Unversioned legacy jobs keep
+-- their old semantics; the gatekeeper will not push anything unversioned anyway.)
+CREATE TRIGGER IF NOT EXISTS guard_verdict_must_cite_what_it_reviewed
+BEFORE INSERT ON verdicts
+WHEN (SELECT head_version FROM jobs WHERE id = NEW.job_id) IS NOT NULL
+     AND TRIM(COALESCE(NEW.reviewed_version, '')) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'guard: this job is versioned — a verdict must say which version it reviewed');
+END;
+
+-- A build cannot finish without declaring WHICH code is finished.
+CREATE TRIGGER IF NOT EXISTS guard_a_build_finishes_a_version
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+     AND NEW.kind = 'build'
+     AND TRIM(COALESCE(NEW.head_version, '')) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'guard: a build cannot finish without naming the exact version that is finished');
+END;
+
+-- Once finished, WHAT finished is history. Rewriting head_version after done would
+-- let approved-hash-A ship as hash-B while every record still looks green.
+CREATE TRIGGER IF NOT EXISTS guard_finished_version_is_frozen
+BEFORE UPDATE OF head_version ON jobs
+WHEN OLD.status IN ('done', 'shipped') AND OLD.head_version IS NOT NEW.head_version
+BEGIN
+    SELECT RAISE(ABORT, 'guard: what version finished cannot be rewritten after the fact');
+END;
+
 -- A verdict cannot be DELETED. (Sol, round 3 — verified 2026-07-14.)
 --
 -- "Append-only" was enforced only against UPDATE, so a failing review that couldn't be
@@ -653,6 +712,8 @@ BEGIN
         WHERE v.job_id = NEW.id
           AND v.reviewer_tier IN ('subscription', 'metered')
           AND v.verdict = 'pass'
+          -- gate 3: a pass only counts for the version it actually reviewed
+          AND v.reviewed_version IS NEW.head_version
     );
 END;
 
@@ -719,6 +780,8 @@ BEGIN
         -- the panel could be "filled" by the wrong kinds of check entirely.
         SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
         WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+          -- gate 3: the panel must have reviewed THIS version, not an earlier one
+          AND v.reviewed_version IS NEW.head_version
     ) < NEW.required_reviews;
 END;
 
@@ -739,7 +802,14 @@ WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
 BEGIN
     SELECT RAISE(ABORT, 'guard: a reviewer failed this — it does not get outvoted')
     WHERE EXISTS (
-        SELECT 1 FROM verdicts v WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+        SELECT 1 FROM verdicts v
+        WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+          -- gate 3: a fail condemns the VERSION it reviewed, not the job forever.
+          -- A fail with no version condemned we-don't-know-what: it blocks
+          -- everything. Same if the job itself is unversioned. Fail-closed.
+          AND (NEW.head_version IS NULL
+               OR v.reviewed_version IS NULL
+               OR v.reviewed_version = NEW.head_version)
     );
 END;
 
@@ -752,7 +822,14 @@ BEGIN
     SELECT RAISE(ABORT, 'guard: someone raised an objection — it has to be answered first')
     WHERE EXISTS (
         SELECT 1 FROM verdicts v
-        WHERE v.job_id = NEW.id AND v.verdict IN ('needs_human', 'fail')
+        WHERE v.job_id = NEW.id
+          AND (v.verdict = 'needs_human'  -- an unanswered question blocks, always
+               -- gate 3: a fail blocks the version it condemned (fail-closed when
+               -- either side is unversioned)
+               OR (v.verdict = 'fail'
+                   AND (NEW.head_version IS NULL
+                        OR v.reviewed_version IS NULL
+                        OR v.reviewed_version = NEW.head_version)))
     );
 END;
 
@@ -777,6 +854,8 @@ BEGIN
        OR NOT EXISTS (
            SELECT 1 FROM verdicts v
            WHERE v.job_id = NEW.id AND v.role = 'tester' AND v.verdict = 'pass'
+             -- gate 3: the tester must have driven THIS version of the app
+             AND v.reviewed_version IS NEW.head_version
        );
 END;
 

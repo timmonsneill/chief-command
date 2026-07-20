@@ -200,7 +200,7 @@ def test_one_reviewer_cannot_pass_the_same_job_six_times(conn):
 
 def test_three_distinct_reviewers_do_satisfy_the_panel(conn):
     job = create_job(conn, "the login form", builder_seat="riggs")
-    conn.execute("UPDATE jobs SET required_reviews=3 WHERE id=?", (job,))
+    conn.execute("UPDATE jobs SET required_reviews=3, head_version='abc123' WHERE id=?", (job,))
     for s in ("sol", "grok", "coal"):
         record_verdict(conn, job, s, verdict="pass")
     set_status(conn, job, "done")
