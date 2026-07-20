@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS projects (
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- The REAL projects, seeded so Chief knows them on ANY machine (a fresh DB or the Mac
+-- Studio), not just wherever a row happened to be typed. Without this, `projects` is
+-- empty on a new box and Chief goes back to improvising what Neill is working on — the
+-- exact bug this seed exists to kill. OR IGNORE so it never clobbers live edits.
+--
+-- repo_path: Arch is deliberately NULL. Chief may read Arch's NOTES (memory), but the
+-- fleet must never be pointed at its code or its patient data (Decision C, PHI). Dispatch
+-- does not route by repo_path today; if it ever learns to, THAT is where the guard goes.
+--
+-- memory_dir is NOT seeded here on purpose: it's the one genuinely machine-specific value
+-- (where this box keeps the project's notes), so it's set as local config per machine —
+-- keeping this file hardware-agnostic (rule 4).
+INSERT OR IGNORE INTO projects (id, name, repo_path, description, color) VALUES
+  ('chief', 'Chief Command', '~/code-projects/chief-command',
+   'The thing you talk to. This.', '#2E9BFF'),
+  ('jess', 'Jess', '~/code-projects/personal-assist',
+   'Personal assistant. Connects to Chief over the tailnet later.', '#A78BFA'),
+  ('arch', 'Arch (Arch to Freedom EMR)', NULL,
+   'The records system for the addiction-recovery facility — staff, beds, roles, approvals, the voice assistant Archie. Voice-first. Held at arm''s length here on purpose: Chief can read its notes but the fleet does not touch its code or its patient data.',
+   '#22c55e');
+
 -- Project memory: facts that belong to the PROJECT, not to an agent and not to a job.
 -- "The API returns snake_case." "Never touch the billing table directly."
 CREATE TABLE IF NOT EXISTS project_memory (

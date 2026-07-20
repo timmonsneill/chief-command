@@ -273,10 +273,20 @@ async def say(request: Request):
 
 
 def _project_context() -> str:
+    """What Chief needs to know before answering: the REAL project list first (so it
+    stops improvising what Neill is working on), then loose facts we've gathered."""
+    from db.projects import projects_context
+
     c = db()
+    parts = []
+    real = projects_context(c)
+    if real:
+        parts.append(real)
     rows = c.execute("SELECT fact FROM project_memory ORDER BY id DESC LIMIT 12").fetchall()
     facts = " ".join(r["fact"] for r in rows)
-    return f"What we know about this project: {facts}" if facts else ""
+    if facts:
+        parts.append(f"What we know about this project: {facts}")
+    return "\n\n".join(parts)
 
 
 def _handle_directly(u: str) -> str:
@@ -412,6 +422,31 @@ def delete_todo_endpoint(todo_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PROJECT MEMORY — a project's own accumulated notes, readable inside Chief Command.
+# We serve the curated MEMORY.md index (the agents ⭐-mark what matters) and any one
+# named file from it. These are NOTES — conventions, rulings, architecture. A project's
+# live data (e.g. Arch's patient records) is not, and must never be, reachable here.
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.get("/api/projects/{project_id}/memory")
+def project_memory_index(project_id: str):
+    from db.projects import memory_index
+    text = memory_index(db(), project_id)
+    if text is None:
+        return JSONResponse({"error": "This project has no readable memory."},
+                            status_code=404)
+    return {"project_id": project_id, "index": text}
+
+
+@app.get("/api/projects/{project_id}/memory/{name}")
+def project_memory_file(project_id: str, name: str):
+    from db.projects import memory_file
+    text = memory_file(db(), project_id, name)
+    if text is None:
+        return JSONResponse({"error": "No such memory."}, status_code=404)
+    return {"project_id": project_id, "name": name, "text": text}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # UPLOADS — images and files the owner drops in, pinned to a project. Bytes live on
 # disk (gitignored); a row in `attachments` is how the UI finds them.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -507,7 +542,12 @@ async def voice_token():
                     "model": VOICE_MODEL,
                     "instructions": MOUTH_INSTRUCTIONS,
                     "tools": [ASK_CHIEF_TOOL],
-                    "tool_choice": "auto",
+                    # FORCE the call (Sol's bug #1). With "auto" the mouth could decide a
+                    # "yes" or a status question wasn't worth sending and answer it itself
+                    # — which is exactly the judgment that leaked twice. Required means
+                    # every single thing Neill says goes to Chief. The mouth cannot
+                    # freelance.
+                    "tool_choice": "required",
                     "audio": {
                         "input": {
                             # SEMANTIC turn detection, not plain silence detection.
@@ -526,6 +566,36 @@ async def voice_token():
     return r.json()
 
 
+# The live conversation behind the voice. ONE session, held for the whole conversation,
+# so "yeah" / "no, the other one" mean something and there's no 3-5s process relaunch on
+# every utterance (that relaunch was the whole reason talking felt like hanging up and
+# redialling). See chief_live.py. Serialized with a lock: one mouth, one thread of
+# thought at a time. Rebuilt if it dies so a bad turn can't wedge the conversation.
+import asyncio  # noqa: E402
+
+from chief import CHIEF_MODEL as _CHIEF_MODEL  # noqa: E402
+
+_chief_session = None
+_chief_lock = asyncio.Lock()
+
+
+def _live_session():
+    """Lazily build the live Chief, seeded with the real project list.
+
+    The project list is baked in ONCE, when the session is born, because a held session
+    IS the point — it's what makes "yeah" cost a second instead of eight. The trade: a
+    project renamed mid-conversation won't reach Chief until the session next rebuilds
+    (on error, or a fresh boot). That's the right call for a single owner talking; the
+    list rarely changes inside one drive.
+    """
+    global _chief_session
+    if _chief_session is None:
+        from chief_live import ChiefSession
+        from db.projects import projects_context
+        _chief_session = ChiefSession(extra_context=projects_context(db()))
+    return _chief_session
+
+
 @app.post("/api/voice/ask")
 async def voice_ask(request: Request):
     """The mouth's ONE tool. Everything Neill says arrives here and goes to Chief.
@@ -540,11 +610,40 @@ async def voice_ask(request: Request):
         return {"spoken": "I didn't catch that."}
 
     from mouth import is_pushback
-    out = ask_chief(
-        said,
-        context=body.get("context", ""),
-        pushed_back=is_pushback(said),
-    )
+    pushed_back = is_pushback(said)
+
+    # The fast path: the LIVE streaming session (metered API, but text is pennies, and
+    # it's the difference between a one-second "yeah" and an eight-second one). Falls
+    # back to the free-but-slow subprocess brain when there's no API key to think with.
+    if os.environ.get("OPENAI_API_KEY"):
+        async with _chief_lock:
+            session = _live_session()
+            try:
+                pieces: list[str] = []
+                async for sentence in session.say(said, deep=pushed_back):
+                    pieces.append(sentence)
+                answer = " ".join(pieces).strip()
+            except Exception:
+                # A wedged session must not wedge the conversation. Drop it; the next
+                # utterance rebuilds a clean one. We do NOT silently guess an answer.
+                global _chief_session
+                _chief_session = None
+                answer = ""
+        if answer:
+            from chief import _for_speech
+            out = {"spoken": _for_speech(answer), "full": answer,
+                   "model": _CHIEF_MODEL, "failed": False}
+        else:
+            out = {"spoken": "Something went wrong on my end. Nothing's started.",
+                   "full": "Chief returned nothing. No work was dispatched.",
+                   "model": _CHIEF_MODEL, "failed": True}
+    else:
+        # No live session to carry the thread, so the fallback must be handed BOTH the
+        # real project list AND what they were just talking about — otherwise it loses the
+        # per-turn continuity the streaming path keeps in session memory.
+        talking_about = (body.get("context") or "").strip()
+        context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
+        out = ask_chief(said, context=context, pushed_back=pushed_back)
 
     # Everything Chief says goes on the record, so the text channel always has the full
     # version of anything he only half-heard in the car.
@@ -552,7 +651,7 @@ async def voice_ask(request: Request):
     c.execute(
         "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
         "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
-        (out.get("model", CHIEF_MODEL), out["full"][:500]),
+        (out.get("model", _CHIEF_MODEL), out["full"][:500]),
     )
     return out
 

@@ -115,6 +115,25 @@
   .plan li.blocked::before{background:var(--warn)}
   .plan .why{font-size:12px;color:var(--warn);margin-top:2px}
   .mem{}
+  /* ── project memory (the team's notes) ── */
+  .csub{color:var(--faint);font-weight:400;letter-spacing:0;text-transform:none}
+  .memidx{display:flex;flex-direction:column;gap:2px;max-height:340px;overflow:auto}
+  .memh{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+        color:var(--dim);margin:10px 0 4px}
+  .meml{font-size:13px;line-height:1.5;padding:2px 0;border-left:2px solid transparent;padding-left:8px}
+  .meml.imp{border-left-color:var(--warn)}
+  .meml a{color:var(--run);cursor:pointer;text-decoration:none}
+  .meml a:hover{text-decoration:underline}
+  .memd{color:var(--dim)}
+  .memov{display:none;position:fixed;inset:0;background:rgba(3,5,9,.82);z-index:50;
+         align-items:center;justify-content:center;padding:24px}
+  .memov.on{display:flex}
+  .memovcard{position:relative;background:var(--panel);border:1px solid var(--rule-hi);
+             max-width:820px;width:100%;max-height:82vh;overflow:auto}
+  .memovx{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--dim);
+          font-size:22px;cursor:pointer;line-height:1}
+  #memovbody{margin:0;padding:22px 24px;white-space:pre-wrap;word-break:break-word;
+             font-family:var(--mono);font-size:13px;line-height:1.6;color:var(--ink)}
   .mem div{font-size:13px;color:var(--dim);padding:7px 0;border-top:1px solid var(--rule)}
   .mem div:first-child{border-top:0}
   .mem .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
@@ -209,6 +228,13 @@
   <section id="fleet" class="tab"><h2>The fleet</h2><div id="seats"></div></section>
   <section id="proj" class="tab"><h2>Projects</h2><div id="projects"></div></section>
 </main>
+
+<div id="memov" class="memov" onclick="if(event.target===this)closeMemory()">
+  <div class="memovcard">
+    <button class="memovx" onclick="closeMemory()">×</button>
+    <pre id="memovbody"></pre>
+  </div>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -401,10 +427,71 @@ function renderProjects(s) {
       </label>
     </div>
 
-    <div class="pcard"><div class="cardh">What this project knows</div>${mem}</div>`;
+    <div class="pcard"><div class="cardh">What this project knows</div>${mem}</div>
+
+    <div class="pcard">
+      <div class="cardh">Memory <span class="csub">— the team's notes on this project</span></div>
+      <div id="membody"><div class="empty2">Looking…</div></div>
+    </div>`;
+
+  loadMemory(p.id);
 }
 
-window.selectProject = id => { SELECTED_PROJECT = id; renderProjects(window.STATE); };
+// The project's own memory: the curated index (each ⭐ line is one the team flagged as
+// important), with any file openable inline. These are NOTES — never a project's live
+// data. The 4s poll rebuilds this whole card, so we CACHE the rendered markup per project
+// and repaint from cache — otherwise the card fetches once and then blanks on every tick.
+let MEM_SHOWN_FOR = null;
+const MEM_HTML = {};
+async function loadMemory(pid) {
+  const body = document.querySelector('#membody');
+  MEM_SHOWN_FOR = pid;
+  if (MEM_HTML[pid] !== undefined) { if (body) body.innerHTML = MEM_HTML[pid]; return; }
+  try {
+    const r = await fetch('/api/projects/' + pid + '/memory');
+    if (!r.ok) {
+      MEM_HTML[pid] = '<div class="empty2">No notes for this project yet.</div>';
+    } else {
+      const { index } = await r.json();
+      MEM_HTML[pid] = '<div class="memidx">' + renderMemoryIndex(pid, index) + '</div>';
+    }
+  } catch { MEM_HTML[pid] = '<div class="empty2">Couldn\'t load the notes.</div>'; }
+  // Only paint if the user is still looking at this project (mid-fetch switch guard).
+  if (MEM_SHOWN_FOR === pid && body) body.innerHTML = MEM_HTML[pid];
+}
+
+// Build the index as escaped markup with NO inline handlers. File links carry the target
+// in data- attributes and are opened by ONE delegated listener — so a hostile filename in
+// a note (agent output is low-trust, AGENTS.md rule 6) can never break out into script.
+function renderMemoryIndex(pid, index) {
+  return index.split('\n').map(line => {
+    const t = line.trim();
+    if (!t) return '';
+    if (t.startsWith('#')) return `<div class="memh">${esc(t.replace(/^#+\s*/, ''))}</div>`;
+    const star = t.includes('⭐');
+    const m = t.match(/\[([^\]]+)\]\(([^)]+\.md)\)/);  // first [title](file.md) in the bullet
+    const rest = esc(t.replace(/^[-*⭐\s]+/, '').replace(/\[[^\]]+\]\([^)]+\)/, '').replace(/^\s*[—-]\s*/, ''));
+    if (m) return `<div class="meml ${star?'imp':''}">`
+      + `<a class="memlink" data-pid="${esc(pid)}" data-name="${esc(m[2])}">${esc(m[1])}</a>`
+      + (rest ? ` <span class="memd">${rest}</span>` : '') + '</div>';
+    return `<div class="meml ${star?'imp':''}">${esc(t.replace(/^[-*⭐\s]+/, ''))}</div>`;
+  }).join('');
+}
+
+document.addEventListener('click', e => {
+  const a = e.target.closest('.memlink');
+  if (a) openMemory(a.dataset.pid, a.dataset.name);
+});
+
+async function openMemory(pid, name) {
+  const r = await fetch('/api/projects/' + encodeURIComponent(pid) + '/memory/' + encodeURIComponent(name));
+  const ov = document.querySelector('#memov'), bd = document.querySelector('#memovbody');
+  bd.textContent = r.ok ? (await r.json()).text : 'Could not open that note.';  // textContent, never innerHTML
+  ov.classList.add('on');
+}
+window.closeMemory = () => document.querySelector('#memov').classList.remove('on');
+
+window.selectProject = id => { MEM_SHOWN_FOR = null; SELECTED_PROJECT = id; renderProjects(window.STATE); };
 window.toggleTodo = async id => { await fetch('/api/todos/'+id+'/toggle',{method:'POST'}); refresh(); };
 window.deleteTodo = async id => { await fetch('/api/todos/'+id+'/delete',{method:'POST'}); refresh(); };
 window.addTodo = async (e, pid) => {

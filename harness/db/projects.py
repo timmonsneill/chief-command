@@ -1,0 +1,107 @@
+"""The REAL project list — and each project's own memory.
+
+═══════════════════════════════════════════════════════════════════════════════
+WHY THIS EXISTS (owner, 2026-07-20):
+
+    Asked what he's working on, Chief called the medical-records project "a little
+    medical records project." It wasn't reading anything — it was improvising. Being
+    confidently wrong is the one thing that makes Neill stop trusting it.
+
+The fix is not a smarter model. It's giving Chief the FACTS: read the `projects` table
+and hand it the real list, in plain English, on every path he talks through.
+
+MEMORY READABILITY (owner, 2026-07-20):
+
+    "arch has a fuck ton of memory files... the most important ones should be readable
+     inside Chief Command."
+
+Each project can point at a `memory_dir` — the folder where that project's agents keep
+their accumulated notes. The curated `MEMORY.md` index in that folder IS the
+most-important list (the agents ⭐-mark what matters). We surface that, and let a named
+file be read on demand. We read NOTES here, not the project's live data — Arch's patient
+database is not, and must never be, reachable from this harness (Decision C, PHI).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+
+def real_projects(conn) -> list[dict[str, Any]]:
+    """Every live project, straight from the table. No improvising."""
+    return [dict(r) for r in conn.execute(
+        "SELECT id, name, repo_path, memory_dir, description, color "
+        "FROM projects WHERE archived = 0 ORDER BY rowid"
+    )]
+
+
+def projects_context(conn) -> str:
+    """The real project list, as a plain-English block for Chief's context.
+
+    Deliberately jargon-free and short — this is read by a model that speaks to a man in
+    a car. It states what each project IS, not where its code lives.
+    """
+    projects = real_projects(conn)
+    if not projects:
+        return ""
+    lines = ["THE REAL PROJECTS (these are the only ones — do not invent others):"]
+    for p in projects:
+        desc = (p["description"] or "").strip()
+        lines.append(f"- {p['name']}: {desc}" if desc else f"- {p['name']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# A project's own memory — the curated index, and named files on demand.
+# ---------------------------------------------------------------------------
+def _memory_root(conn, project_id: str) -> Path | None:
+    row = conn.execute(
+        "SELECT memory_dir FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if not row or not row["memory_dir"]:
+        return None
+    root = Path(row["memory_dir"]).expanduser()
+    return root if root.is_dir() else None
+
+
+def memory_index(conn, project_id: str) -> str | None:
+    """The project's MEMORY.md — the agents' own curated 'most important' list.
+
+    Returns None if the project has no memory folder or no index in it, so callers can
+    tell 'nothing to show' apart from an empty string.
+    """
+    root = _memory_root(conn, project_id)
+    if root is None:
+        return None
+    index = root / "MEMORY.md"
+    if not index.is_file():
+        return None
+    return index.read_text(errors="replace")
+
+
+def memory_file(conn, project_id: str, name: str) -> str | None:
+    """Read ONE named memory file from a project's memory folder.
+
+    `name` is a bare filename from the index (e.g. 'feedback_names_mean_roles.md'). We
+    resolve it INSIDE the memory folder and refuse anything that escapes it — a memory
+    name is never allowed to reach out to ~/.ssh or a sibling project. Returns None if
+    it isn't a real file safely inside the folder.
+    """
+    # Notes are markdown, and that's ALL we serve — a memory folder could sit next to
+    # other files, and "read any file in there" is a wider door than intended. Enforcing
+    # the suffix keeps the door the size of the feature.
+    if not name.endswith(".md"):
+        return None
+    root = _memory_root(conn, project_id)
+    if root is None:
+        return None
+    root = root.resolve()
+    target = (root / name).resolve()
+    # Containment check: the resolved target must live under the memory folder. Blocks
+    # '../', absolute paths, and symlink escapes.
+    if root != target and root not in target.parents:
+        return None
+    if not target.is_file():
+        return None
+    return target.read_text(errors="replace")

@@ -68,9 +68,15 @@ class ChiefSession:
     is a colleague who has been in the room the entire time.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, extra_context: str = "") -> None:
+        # The real project list (and anything else the caller knows) rides in the system
+        # message, so Chief has the FACTS from the first word and stops improvising what
+        # Neill is working on. It stays put while the conversation is trimmed around it.
+        system = CHIEF_PROMPT
+        if extra_context.strip():
+            system += f"\n\n## WHAT'S TRUE RIGHT NOW\n{extra_context.strip()}"
         self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": CHIEF_PROMPT}
+            {"role": "system", "content": system}
         ]
         self.key = os.environ.get("OPENAI_API_KEY", "")
 
@@ -115,8 +121,14 @@ class ChiefSession:
                     json=payload,
                 ) as r:
                     if r.status_code >= 400:
+                        # Drop the just-added user turn so a failed exchange doesn't leave
+                        # a dangling, unanswered message that corrupts the thread on the
+                        # next utterance. The raw API error stays in the log below, NEVER
+                        # in what gets spoken — Neill must never hear API jargon.
                         body = (await r.aread()).decode()[:200]
-                        yield f"Something went wrong on my end. Nothing's started. ({body})"
+                        self.messages.pop()
+                        print(f"chief_live: API {r.status_code}: {body}", file=sys.stderr)
+                        yield "Something went wrong on my end. Nothing's started."
                         return
 
                     async for line in r.aiter_lines():
@@ -150,7 +162,9 @@ class ChiefSession:
         except httpx.TimeoutException:
             # Sol: "The system needs a safe failure mode when Chief is unavailable."
             # We do NOT fall back to something dumber making the call. We say so and do
-            # nothing. Silence is safer than an unsupervised guess.
+            # nothing. Silence is safer than an unsupervised guess. Drop the dangling user
+            # turn so the next utterance starts from a clean thread.
+            self.messages.pop()
             yield "I'm having trouble thinking that through. Nothing's started."
             return
 
