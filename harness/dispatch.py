@@ -30,12 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db.jobs import (  # noqa: E402
     Seat,
     attach_run,
-    connect,
     create_job,
-    init_db,
     over_budget,
-    record_artifact,
-    record_verdict,
     seat,
     set_status,
     upsert_seat,
@@ -70,10 +66,9 @@ def dispatch_local(
     request: str,
     builder_seat: str,
     *,
+    cfg: dict[str, Any] | None = None,
     origin: str = "text",
     dispatch_key: str | None = None,
-    reviewer_seat: str | None = None,
-    required_reviews: int = 1,
     start: bool = True,
 ) -> LocalDispatch:
     """Record a job and start a real local worker on it. Non-blocking.
@@ -82,10 +77,22 @@ def dispatch_local(
     row, THEN start the worker — the store is the source of truth, nothing runs
     without a row. Duplicate protection: a repeated dispatch_key returns the job that
     already exists instead of starting the work twice.
+
+    The review requirements come from the GAUNTLET CONFIG, never from the caller
+    (task #10). A caller that could say "one reviewer is enough" is the single-reviewer
+    door this task exists to close.
     """
-    from db.jobs import create_job, over_budget, seat
+    # create_job / over_budget / seat are already imported at module level — re-importing
+    # them here rebound them as LOCALS, which silently shadowed the module's own names.
+    # Anything that swapped them (a test, a future wrapper) was ignored inside this
+    # function while appearing to work everywhere else.
     from tiering import tier_for_build
     import executor
+
+    cfg = load_config() if cfg is None else cfg
+    roster, excluded = panel_roster(conn, cfg)
+    families = int(cfg.get("gauntlet", {}).get("min_model_families", 0))
+    _refuse_a_panel_that_cannot_hold(conn, roster, families)
 
     # Duplicate protection — a retry must not start the same work twice.
     if dispatch_key:
@@ -110,16 +117,47 @@ def dispatch_local(
 
     call = tier_for_build(request)
 
-    job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
-    conn.execute(
-        "UPDATE jobs SET required_reviews = ?, tier = ?, tier_reason = ?, "
-        "dispatch_key = ?, branch = ? WHERE id = ?",
-        (required_reviews, call.tier, call.reason, dispatch_key, f"job/{job_id}", job_id),
-    )
+    # ONE transaction for the whole record of this dispatch. A job must never exist,
+    # even for an instant, without its review requirements stamped on — in autocommit
+    # that gap is a real row with a zero floor. The excluded-reviewer notes go in here
+    # too: if writing them fails, the right outcome is no job at all, not a committed
+    # job whose panel quietly shrank without saying so.
+    #
+    # BEGIN IMMEDIATE, not BEGIN: this reads before it writes, and a deferred
+    # transaction that upgrades to a write after another connection has committed fails
+    # instantly with a snapshot error that the busy-timeout does NOT retry.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+        conn.execute(
+            "UPDATE jobs SET required_reviews = ?, required_review_families = ?, "
+            "tier = ?, tier_reason = ?, dispatch_key = ?, branch = ? WHERE id = ?",
+            (len(roster), families, call.tier, call.reason, dispatch_key,
+             f"job/{job_id}", job_id),
+        )
+        # No silent caps: a reviewer left out of the panel is written down on the job.
+        # (A roster name that isn't a seat at all has no row to hang an event on —
+        # sync_seats refuses that config outright, the earlier and louder place.)
+        for seat_id, why in excluded.items():
+            row = seat(conn, seat_id)
+            if row is None:
+                continue
+            conn.execute(
+                "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (job_id, seat_id, seat_id, row["model"], row["family"], "skipped",
+                 f"not on the panel: {why}"),
+            )
+        conn.execute("COMMIT")
+    except Exception as exc:
+        conn.execute("ROLLBACK")
+        # Anything that goes wrong here is a refusal to dispatch, not a mystery 500 —
+        # and above all not a committed job with no worker coming for it.
+        raise DispatchRefused(f"could not record the job: {exc}") from exc
     set_status(conn, job_id, "in_progress")
 
     if start:
-        executor.start_in_background(job_id, reviewer_seat=reviewer_seat)
+        executor.start_in_background(job_id, cfg=cfg)
 
     return LocalDispatch(
         job_id=job_id, seat_id=builder_seat, reused=False,
@@ -131,16 +169,101 @@ def dispatch_local(
 # Config
 # ---------------------------------------------------------------------------
 def load_config(path: Path = CONFIG) -> dict[str, Any]:
-    # seats.toml uses // comments for readability; strip them before parsing.
-    raw = "\n".join(
-        line for line in path.read_text().splitlines()
-        if not line.lstrip().startswith("//")
-    )
+    # seats.toml uses // comments for readability; TOML has no //, so strip them before
+    # parsing. Must be string-aware: value strings hold `https://…` and `base_url` lines
+    # end in `"…"  // note` — cutting at the first // blindly would eat the URL. So we
+    # only strip a // that sits OUTSIDE a quoted string.
+    raw = "\n".join(_strip_slash_comment(line) for line in path.read_text().splitlines())
     return tomllib.loads(raw)
 
 
+def _strip_slash_comment(line: str) -> str:
+    """Drop an inline/full-line `//` comment, ignoring `//` inside quotes."""
+    quote = ""
+    for i in range(len(line) - 1):
+        ch = line[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "/" and line[i + 1] == "/":
+            return line[:i].rstrip()
+    return line
+
+
+def unresolved_reviewers(cfg: dict[str, Any]) -> list[str]:
+    """Gauntlet reviewers that don't name a real seat. Empty == all resolve.
+
+    A roster entry pointing at a seat that doesn't exist (the old `grinder_paid`) is a
+    silent trap: `over_budget` treats the unknown seat as uncapped, the pre-check says
+    "fine," then the verdict write rejects it. Catch it at startup instead.
+    """
+    seats = cfg.get("seats", {})
+    return [r for r in cfg.get("gauntlet", {}).get("reviewers", []) if r not in seats]
+
+
+def panel_roster(conn, cfg: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Who can actually sit on the panel right now — and who can't, and why.
+
+    A roster entry is only real if the seat exists, is switched on, and we have a way to
+    RUN it on this machine. Grok has no runner until the leaked key is rotated; the
+    codex seat needs its login. Counting those as panel members would produce a required
+    panel that can never report, which fails closed but useless — every job parked
+    forever. Counting them silently would be worse: a panel that shrank without saying
+    so reads exactly like a full one.
+
+    So: exclude them, name them, and let the FAMILY FLOOR (which cannot be lowered) be
+    the thing that decides whether what's left is enough.
+    """
+    import gauntlet
+
+    roster: list[str] = []
+    excluded: dict[str, str] = {}
+    for seat_id in cfg.get("gauntlet", {}).get("reviewers", []):
+        row = seat(conn, seat_id)
+        if row is None:
+            excluded[seat_id] = "that reviewer isn't set up on this machine"
+        elif not row["enabled"]:
+            excluded[seat_id] = "that reviewer is turned off"
+        elif not gauntlet.has_runner(row["provider"]):
+            excluded[seat_id] = "we have no way to run that reviewer yet"
+        else:
+            roster.append(seat_id)
+    return roster, excluded
+
+
+def _refuse_a_panel_that_cannot_hold(conn, roster: list[str], floor: int) -> None:
+    """Refuse to dispatch work the panel could never certify.
+
+    Fail CLOSED, but say so at DISPATCH — when it is one legible refusal — rather than
+    at review time, where it becomes a job that parks forever and looks like a bug.
+    """
+    if floor < 1:
+        raise DispatchRefused(
+            "the review panel isn't configured (it needs at least one model family) "
+            "— refusing to start work that nothing would check"
+        )
+    families = {seat(conn, s)["family"] for s in roster}
+    if len(families) < floor:
+        raise DispatchRefused(
+            f"only {len(families)} model family/families can review right now and "
+            f"{floor} are required — refusing to start work that could never be checked"
+        )
+
+
 def sync_seats(conn, cfg: dict[str, Any]) -> None:
-    """Push the config's seats into the store, so guards can reason about them."""
+    """Push the config's seats into the store, so guards can reason about them.
+
+    Refuses a config whose gauntlet names a seat that doesn't exist, or a seat missing a
+    family — both would blow up later, mid-panel, where it's far harder to see.
+    """
+    missing = unresolved_reviewers(cfg)
+    if missing:
+        raise DispatchRefused(f"gauntlet names seats that don't exist: {missing}")
+    for seat_id, s in cfg.get("seats", {}).items():
+        if "family" not in s:
+            raise DispatchRefused(f"seat '{seat_id}' has no family — the gauntlet can't count it")
     for seat_id, s in cfg.get("seats", {}).items():
         upsert_seat(conn, Seat(
             id=seat_id,
@@ -193,10 +316,32 @@ def dispatch(
         )
 
     gauntlet = cfg.get("gauntlet", {})
-    required = len(gauntlet.get("reviewers", []))
+    required = len(gauntlet.get("reviewers", []))          # full set, always (seats)
+    families = int(gauntlet.get("min_model_families", 0))  # the family floor (task #10)
 
-    job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
-    conn.execute("UPDATE jobs SET required_reviews = ? WHERE id = ?", (required, job_id))
+    # Fail CLOSED. A missing/empty gauntlet would set both requirements to 0 and silently
+    # disable the completion guards — a job would sail to done with no review at all. An
+    # unconfigured panel is a refusal to dispatch, never an open door. (Sol re-gate)
+    if required < 1 or families < 1:
+        raise DispatchRefused(
+            "gauntlet is not configured (needs reviewers and min_model_families >= 1) "
+            "— refusing to dispatch work nothing would review"
+        )
+
+    # One transaction: the job must never exist for even a moment without its review
+    # requirements stamped on (autocommit would otherwise leave a floor-0 gap).
+    # IMMEDIATE because this reads before it writes — see dispatch_local.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+        conn.execute(
+            "UPDATE jobs SET required_reviews = ?, required_review_families = ? WHERE id = ?",
+            (required, families, job_id),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
     run_id = _spawn(row, request, blocking=blocking)
     attach_run(conn, job_id, run_id=run_id or "", branch=f"job/{job_id}")
@@ -233,20 +378,22 @@ def _spawn(seat_row, request: str, blocking: bool) -> str | None:
 # ---------------------------------------------------------------------------
 # The gauntlet (spec §6)
 # ---------------------------------------------------------------------------
-def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> list[str]:
+def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> dict[str, Any]:
     """Fan the finished work out to the reviewer panel, in parallel, same bundle.
 
-    The model-diversity rule (§6) isn't asserted here — it's recorded. Every verdict
-    snapshots the reviewing seat's family, so "at least two families looked at this"
-    is a fact you can query rather than a promise someone made.
+    This used to return a list of reviewer NAMES and launch nobody — the gauntlet was a
+    plan, not a thing that ran (task #10). It now runs the panel and returns what
+    actually happened: who reviewed, which families, what they said, and — if the job
+    stayed parked — why, in plain words.
+
+    The model-diversity rule (§6) still isn't asserted here; it's RECORDED. Every
+    verdict snapshots the reviewing seat's family, and the schema refuses to complete a
+    job without enough distinct families passing THIS version. So "two different minds
+    looked at this" is a fact you can query, not a promise this function made.
     """
-    gauntlet = cfg.get("gauntlet", {})
-    verdicts = []
-    for reviewer in gauntlet.get("reviewers", []):
-        if over_budget(conn, reviewer):
-            continue  # a capped-out reviewer is skipped, not faked
-        verdicts.append(reviewer)
-    return verdicts
+    import gauntlet as gauntlet_mod
+
+    return gauntlet_mod.run_gauntlet_for_job(conn, job_id, cfg).as_dict()
 
 
 def ship(conn, job_id: int, owner_confirmed: bool = False) -> None:

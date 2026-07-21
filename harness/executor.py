@@ -32,9 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from db.jobs import (
-    GuardViolation,
     connect,
-    record_verdict,
     seat,
     set_head_version,
     set_status,
@@ -124,34 +122,15 @@ _BUILDERS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Optional single reviewer — enough to close the loop and honor the guards.
-# The FULL parallel gauntlet is task #10; this is the one real cross-tier pass
-# that lets a local job legitimately complete.
-# ---------------------------------------------------------------------------
-def _claude_review(request: str, code: str) -> tuple[str, str]:
-    """A higher-tier model reads the work and judges it. Returns (verdict, summary)."""
-    prompt = (
-        "You are reviewing another model's code. Reply with EXACTLY one line: "
-        "'PASS <one-line reason>' or 'FAIL <one-line reason>'.\n\n"
-        f"The task was: {request}\n\nThe code:\n{code}"
-    )
-    out = subprocess.run(
-        ["claude", "-p", prompt], capture_output=True, text=True, timeout=180
-    ).stdout.strip()
-    verdict = "pass" if out.upper().lstrip().startswith("PASS") else "fail"
-    return verdict, out[:280]
-
-
-_REVIEWERS = {
-    "claude-cli": _claude_review,
-}
+# Reviewing lives in gauntlet.py (task #10). This module builds; that one judges.
+# It used to hold a single hard-wired Claude reviewer, which was enough to close the
+# loop and was never the design — one reviewer cannot show that a DIFFERENT MIND looked.
 
 
 # ---------------------------------------------------------------------------
 # The run loop — everything above, in order, for one job.
 # ---------------------------------------------------------------------------
-def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
+def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Take one recorded job and actually do it. Safe to call in a thread.
 
     Opens its own database connection (sqlite + threads). WAL mode lets this write
@@ -207,9 +186,14 @@ def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
         #    THIS version — we never force it past them.
         set_status(conn, job_id, "review", result=result)
 
-        # 5. If a reviewer is wired and available, run the one real cross-tier pass.
-        if reviewer_seat:
-            _run_one_review(conn, job_id, job["request"], result, version, reviewer_seat)
+        # 5. Hand the frozen bundle to the review panel — several families at once,
+        #    all bound to THIS version. The panel decides nothing the database wouldn't;
+        #    it produces the verdicts the guards ask for. Without a config there is no
+        #    panel, and the job simply stays parked (the safe outcome, not a shortcut).
+        if cfg is not None:
+            import gauntlet
+            gauntlet.run_panel(conn, job_id, job["request"], result, version, cfg,
+                               db_path=DB_PATH)
 
         final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
         return {"job_id": job_id, "status": final, "version": version}
@@ -225,44 +209,12 @@ def _model_for(seat_row, tier: str) -> str:
         return seat_row["model"]
 
 
-def _run_one_review(conn, job_id, request, code, version, reviewer_seat) -> None:
-    rev = seat(conn, reviewer_seat)
-    if rev is None or not rev["enabled"]:
-        return
-    reviewer = _REVIEWERS.get(rev["provider"])
-    if reviewer is None:
-        return
-    _event(conn, job_id, rev, "thinking", "A stronger model is checking the work.")
-    try:
-        verdict, summary = reviewer(request, code)
-    except Exception as exc:
-        _event(conn, job_id, rev, "error", "The reviewer couldn't finish.")
-        return
-    # reviewed_version defaults to the job's head_version inside record_verdict, which
-    # is exactly `version` — so this verdict is bound to what was actually reviewed.
-    try:
-        record_verdict(conn, job_id, reviewer_seat, verdict=verdict,
-                       summary=summary, role="reviewer")
-    except GuardViolation:
-        return
-    _event(conn, job_id, rev, "verdict", "Passed the check." if verdict == "pass"
-           else "Sent it back with notes.")
-
-    if verdict == "pass":
-        try:
-            set_status(conn, job_id, "done",
-                       spoken_summary="Built and checked. Ready for you.")
-        except GuardViolation:
-            # Some other gate still holds (e.g. panel size). Leave it parked, honestly.
-            pass
-
-
 # ---------------------------------------------------------------------------
 # Fire-and-forget: start a worker in the background so the app stays responsive.
 # ---------------------------------------------------------------------------
-def start_in_background(job_id: int, *, reviewer_seat: str | None = None) -> threading.Thread:
+def start_in_background(job_id: int, *, cfg: dict[str, Any] | None = None) -> threading.Thread:
     t = threading.Thread(
-        target=run_job, args=(job_id,), kwargs={"reviewer_seat": reviewer_seat},
+        target=run_job, args=(job_id,), kwargs={"cfg": cfg},
         name=f"job-{job_id}", daemon=True,
     )
     t.start()

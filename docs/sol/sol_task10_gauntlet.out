@@ -1,0 +1,3138 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.3
+--------
+workdir: /Users/user/code-projects/chief-command
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019f8194-e040-7091-88d2-0e098654d6bd
+--------
+user
+You are GPT-5.6-sol, the cross-model architecture reviewer for the Chief Command harness
+(repo root is the cwd; you have read-only access — study the real code). I am Claude (Sol's
+sibling gate). We each pressure-test a pre-build plan independently, then reconcile. Be
+blunt and concrete. Cite file:line. Do NOT certify safety — name residual risks.
+
+# THE PLAN (task #10) — full text at docs/gauntlet-task10-spec.md
+Turn the review gauntlet from a one-reviewer stub into a REAL PARALLEL PANEL across model
+families, producing verdicts the existing SQLite guards consume. Key points:
+- run_gauntlet(conn, job_id, cfg) currently (harness/dispatch.py:236) returns reviewer NAMES,
+  skips over-budget ones, launches nobody, records no verdict. Replace it with a parallel
+  fan-out (threads) against ONE FROZEN bundle (same head_version + code snapshot to every
+  reviewer). Per reviewer: skip-if-over-budget (but LOG the skip), reserve budget before the
+  call, run via the shared reviewer path, record a verdict bound to the frozen reviewed_version.
+- Panel decision: count families that ACTUALLY produced a verdict; if < min_model_families the
+  job stays parked (fail closed); contested (some pass/some fail) -> escalate to escalate_to seat
+  for a tiebreak. Return a structured result.
+- Config harness/config/seats.toml [gauntlet]: reviewers = ["brain","grinder_paid","grinder_local"],
+  min_model_families = 2, escalate_to = "reviewer".
+- Spec claims: "the schema trigger already refuses to ship without a passing higher-tier
+  CROSS-FAMILY verdict on this version (guards 1-3); the panel FEEDS that guard, does not
+  re-implement it." Out of scope: metered grok/gpt reviewers (keys rotating) — build/test with
+  the Claude-CLI reviewers only.
+
+# MY GROUNDING FINDINGS (verify or refute each against the code)
+1. FAMILY FLOOR IS NOT DB-ENFORCED. schema.sql has NO guard counting DISTINCT model_family for
+   role='reviewer' at the done transition. guard_local_output_needs_review is cross-TIER
+   (subscription/metered pass), not cross-family. guard_full_panel counts DISTINCT reviewer_SEAT
+   >= required_reviews. The only cross-FAMILY guards are for role='tester' (guard 4/6) and
+   'verifier' (guard 8) — the SHIP-stage tester, not the reviewer panel. So the spec's "guards
+   1-3 enforce cross-family for the panel" looks FALSE; min_model_families lives only in config
+   + (proposed) Python. Given the project philosophy (guards are boundaries; conventions rot at
+   4am), shouldn't the family floor be a NEW DB guard, not Python?
+2. CONFIG REFERENCES A PHANTOM SEAT. reviewers lists "grinder_paid" but no [seats.grinder_paid]
+   exists in seats.toml (the paid grok seat is [seats.grok]). seat(conn,"grinder_paid") -> None.
+3. BUILDABLE REVIEWERS CAN'T REVIEW. executor._REVIEWERS = {"claude-cli": _claude_review} only.
+   Configured reviewers resolve to providers: brain=codex(gpt), grinder_paid=missing,
+   grinder_local=ollama(qwen). NONE is claude-cli. The only claude-cli seat is [seats.reviewer]
+   (escalate_to), which is NOT in the reviewers list. So "build/test with Claude-CLI reviewers"
+   has no claude-cli seat in the panel, and today zero configured reviewers have a runner fn.
+4. required_reviews COLLIDES WITH min_model_families. dispatch() sets required_reviews=len(reviewers)=3;
+   guard_full_panel then requires 3 DISTINCT passing reviewer seats. But the panel's own logic says
+   proceed at 2 families when reviewers drop out. guard_panel_size_is_fixed forbids shrinking
+   required_reviews. So a 2-family "pass" would hit GuardViolation and park forever. Which is the
+   real completion contract?
+5. CONTESTED -> TIEBREAK IS INCOMPATIBLE WITH THE GUARDS. guard_a_failing_review_stops_it blocks
+   done while ANY version-matched fail exists, and guard_verdicts_are_append_only forbids fail->pass
+   (only needs_human->pass). So an escalation reviewer CANNOT overturn a recorded fail; a contested
+   panel is dead for that version until a NEW head_version voids the old fail. "Escalate for a
+   tiebreak" only makes sense for needs_human. Agree?
+6. SQLITE CONCURRENCY GAP UNDERSTATED. connect() (jobs.py:47) uses isolation_level=None (autocommit),
+   WAL, but sets NO busy_timeout. Parallel threads each open their own conn and INSERT verdicts
+   concurrently -> SQLITE_BUSY / "database is locked" thrown immediately (no wait). A lost verdict
+   is silent panel-shrink; a lost FAIL is a safety hole (job can wrongly complete). "Each thread its
+   own connection" (the spec's mitigation) is necessary but INSUFFICIENT without busy_timeout or a
+   serialized writer. Correct?
+7. RESERVATION PATH IS NEVER EXERCISED IN SCOPE. record_usage is called nowhere in dispatch/executor
+   (only tests). The review path records no spend; over_budget() reads 0 for reviews. The atomic
+   reservation is the usage INSERT (guard 9), not the racy over_budget() read. But the in-scope
+   claude-cli reviewers are UNCAPPED, so the whole budget-reservation-race machinery gets built but
+   never actually tested against a cap. Over-engineering / untested-safety risk?
+8. run_gauntlet HAS NO CALLER. Nobody invokes it; executor.run_job uses _run_one_review directly and
+   sets done on a single pass. The spec never names the integration point or the fate of
+   _run_one_review. Where does the panel plug in, and what stops the old single-review path from
+   still completing jobs behind the panel's back?
+
+# QUESTIONS FOR YOU
+A. Which of findings 1-8 do you disagree with after reading the code? Where am I wrong about the schema?
+B. What is the MINIMAL correct completion contract? Should min_model_families become a DB guard
+   (count DISTINCT model_family, role='reviewer', verdict='pass', reviewed_version = head_version
+   >= floor)? Does required_reviews then become redundant or should it stay as the seat-count?
+C. Rank the risks most-dangerous-first. Is this plan a GO, ADJUST, or STOP as written?
+D. Anything the spec MISSED that neither finding 1-8 nor the spec's own risk list names?
+Answer in prose, concrete, with file:line. No preamble. 
+
+IMPORTANT: Keep code exploration brief — you have limited time. Prioritize delivering your full ranked answer to questions A-D in prose NOW.
+codex
+I’m checking the named schema, dispatch, executor, configuration, and tests, then I’ll reconcile each finding against exact lines.
+exec
+/bin/zsh -lc "sed -n '1,360p' harness/dispatch.py && sed -n '1,340p' harness/executor.py && sed -n '1,360p' harness/db/schema.sql" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+"""The bridge: OpenClaw dispatches the work, the job store decides whether it may run.
+
+This is the piece that turns three separate things (a pinned OpenClaw, a job store,
+a seat config) into a system.
+
+Design decision worth stating, because it drives everything else:
+
+    THE JOB STORE IS THE SOURCE OF TRUTH, NOT A LISTENER.
+
+We record the job BEFORE we spawn it, and we refuse to spawn if the store says no
+(over budget, seat disabled). If we merely *observed* OpenClaw's events, work could
+run that was never recorded — and OpenClaw's subagent sessions auto-archive after
+~60 minutes and get soft-deleted, so anything we didn't write down is simply gone.
+Spec §7 wants "what did the overnight run do?" to be answerable. That only works if
+nothing can run without a row.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from db.jobs import (  # noqa: E402
+    Seat,
+    attach_run,
+    connect,
+    create_job,
+    init_db,
+    over_budget,
+    record_artifact,
+    record_verdict,
+    seat,
+    set_status,
+    upsert_seat,
+)
+
+CONFIG = Path(__file__).resolve().parent / "config" / "seats.toml"
+
+
+class DispatchRefused(RuntimeError):
+    """The harness declined to dispatch. Budget, disabled seat, or a guard."""
+
+
+# ---------------------------------------------------------------------------
+# The REAL, in-process dispatch path (task #9).
+#
+# dispatch()/_spawn() below hand work to OpenClaw — the production path, for the
+# paid coding seats. This one runs the free LOCAL model directly, in a background
+# worker, so the whole spine can be exercised end-to-end today with no money and no
+# exposed keys. Same recording, same guards, same worktree isolation.
+# ---------------------------------------------------------------------------
+@dataclass
+class LocalDispatch:
+    job_id: int
+    seat_id: str
+    reused: bool          # True = a duplicate key matched an existing job
+    tier: str
+    tier_reason: str
+
+
+def dispatch_local(
+    conn,
+    request: str,
+    builder_seat: str,
+    *,
+    origin: str = "text",
+    dispatch_key: str | None = None,
+    reviewer_seat: str | None = None,
+    required_reviews: int = 1,
+    start: bool = True,
+) -> LocalDispatch:
+    """Record a job and start a real local worker on it. Non-blocking.
+
+    Order is load-bearing: we check the seat and the budget, dedupe, THEN write the
+    row, THEN start the worker — the store is the source of truth, nothing runs
+    without a row. Duplicate protection: a repeated dispatch_key returns the job that
+    already exists instead of starting the work twice.
+    """
+    from db.jobs import create_job, over_budget, seat
+    from tiering import tier_for_build
+    import executor
+
+    # Duplicate protection — a retry must not start the same work twice.
+    if dispatch_key:
+        existing = conn.execute(
+            "SELECT id, builder_seat, tier, tier_reason FROM jobs WHERE dispatch_key = ?",
+            (dispatch_key,),
+        ).fetchone()
+        if existing is not None:
+            return LocalDispatch(
+                job_id=existing["id"], seat_id=existing["builder_seat"],
+                reused=True, tier=existing["tier"] or "standard",
+                tier_reason=existing["tier_reason"] or "",
+            )
+
+    row = seat(conn, builder_seat)
+    if row is None:
+        raise DispatchRefused(f"unknown seat: {builder_seat}")
+    if not row["enabled"]:
+        raise DispatchRefused(f"seat '{builder_seat}' is turned off")
+    if over_budget(conn, builder_seat):
+        raise DispatchRefused(f"seat '{builder_seat}' is over its budget for today")
+
+    call = tier_for_build(request)
+
+    job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+    conn.execute(
+        "UPDATE jobs SET required_reviews = ?, tier = ?, tier_reason = ?, "
+        "dispatch_key = ?, branch = ? WHERE id = ?",
+        (required_reviews, call.tier, call.reason, dispatch_key, f"job/{job_id}", job_id),
+    )
+    set_status(conn, job_id, "in_progress")
+
+    if start:
+        executor.start_in_background(job_id, reviewer_seat=reviewer_seat)
+
+    return LocalDispatch(
+        job_id=job_id, seat_id=builder_seat, reused=False,
+        tier=call.tier, tier_reason=call.reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+def load_config(path: Path = CONFIG) -> dict[str, Any]:
+    # seats.toml uses // comments for readability; strip them before parsing.
+    raw = "\n".join(
+        line for line in path.read_text().splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    return tomllib.loads(raw)
+
+
+def sync_seats(conn, cfg: dict[str, Any]) -> None:
+    """Push the config's seats into the store, so guards can reason about them."""
+    for seat_id, s in cfg.get("seats", {}).items():
+        upsert_seat(conn, Seat(
+            id=seat_id,
+            provider=s["provider"],
+            model=s["model"],
+            family=s["family"],
+            tier=s["tier"],
+            daily_cap_cents=s.get("daily_cap_cents"),
+            enabled=not s.get("disabled", False),
+            notes=s.get("notes", ""),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+@dataclass
+class Dispatch:
+    job_id: int
+    run_id: str | None
+    seat_id: str
+
+
+def dispatch(
+    conn,
+    request: str,
+    builder_seat: str,
+    cfg: dict[str, Any],
+    origin: str = "text",
+    blocking: bool = False,
+) -> Dispatch:
+    """Record the job, then spawn it on OpenClaw. In that order, always.
+
+    Non-blocking by default — this is what lets the mouth stay responsive. OpenClaw's
+    sessions_spawn returns a run id immediately, so the voice head can say "on it" and
+    keep talking while the work grinds. A blocking dispatch here would reintroduce
+    exactly the latency wound that killed v1.
+    """
+    row = seat(conn, builder_seat)
+    if row is None:
+        raise DispatchRefused(f"unknown seat: {builder_seat}")
+    if not row["enabled"]:
+        raise DispatchRefused(f"seat '{builder_seat}' is disabled")
+
+    # OpenClaw core has NO per-agent budget of any kind. If we don't check here,
+    # nothing does.
+    if over_budget(conn, builder_seat):
+        raise DispatchRefused(
+            f"seat '{builder_seat}' is over its daily cap — refusing to dispatch"
+        )
+
+    gauntlet = cfg.get("gauntlet", {})
+    required = len(gauntlet.get("reviewers", []))
+
+    job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+    conn.execute("UPDATE jobs SET required_reviews = ? WHERE id = ?", (required, job_id))
+
+    run_id = _spawn(row, request, blocking=blocking)
+    attach_run(conn, job_id, run_id=run_id or "", branch=f"job/{job_id}")
+    set_status(conn, job_id, "in_progress")
+
+    return Dispatch(job_id=job_id, run_id=run_id, seat_id=builder_seat)
+
+
+def _spawn(seat_row, request: str, blocking: bool) -> str | None:
+    """Hand the work to OpenClaw.
+
+    `openclaw agent` runs one turn via the Gateway. The model is chosen per-spawn,
+    which is what lets a single orchestrator turn fan out across several families.
+    """
+    cmd = [
+        "openclaw", "agent",
+        "--model", f"{seat_row['provider']}/{seat_row['model']}",
+        "--message", request,
+    ]
+    if not blocking:
+        cmd.append("--detach")
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    if proc.returncode != 0:
+        raise DispatchRefused(f"openclaw refused the spawn: {proc.stderr.strip()[:300]}")
+
+    # The gateway echoes a run id; fall back to the raw stdout if the shape changes.
+    try:
+        return json.loads(proc.stdout).get("runId")
+    except (json.JSONDecodeError, AttributeError):
+        return proc.stdout.strip()[:80] or None
+
+
+# ---------------------------------------------------------------------------
+# The gauntlet (spec §6)
+# ---------------------------------------------------------------------------
+def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> list[str]:
+    """Fan the finished work out to the reviewer panel, in parallel, same bundle.
+
+    The model-diversity rule (§6) isn't asserted here — it's recorded. Every verdict
+    snapshots the reviewing seat's family, so "at least two families looked at this"
+    is a fact you can query rather than a promise someone made.
+    """
+    gauntlet = cfg.get("gauntlet", {})
+    verdicts = []
+    for reviewer in gauntlet.get("reviewers", []):
+        if over_budget(conn, reviewer):
+            continue  # a capped-out reviewer is skipped, not faked
+        verdicts.append(reviewer)
+    return verdicts
+
+
+def ship(conn, job_id: int, owner_confirmed: bool = False) -> None:
+    """Ship a job. The GATES decide, not a human and not an agent's confidence.
+
+    Owner override (2026-07-13): Neill is out of the critical path. A job that cleared
+    'done' AND carries a passing cross-family tester verdict backed by real Playwright
+    artifacts will ship on its own. The schema refuses anything less — so an agent
+    cannot ship on vibes, and Neill doesn't have to stay up to approve it.
+
+    owner_confirmed is optional and only stamps the record (useful when he DOES eyeball
+    something). It grants no extra power: the gates apply either way.
+    """
+    if owner_confirmed:
+        conn.execute(
+            "UPDATE jobs SET owner_confirmed_at = datetime('now') WHERE id = ?", (job_id,)
+        )
+    set_status(conn, job_id, "shipped")
+
+
+def morning_report(conn) -> list[dict[str, Any]]:
+    """What shipped while you slept, and what didn't.
+
+    Neill is out of the critical path, not out of the loop. This is the difference.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, request, status, builder_seat, spoken_summary, finished_at
+          FROM jobs
+         WHERE created_at >= datetime('now', '-1 day')
+         ORDER BY
+           CASE status WHEN 'shipped' THEN 0 WHEN 'review' THEN 1
+                       WHEN 'failed' THEN 2 ELSE 3 END,
+           id
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+"""The worker. This is the thing that was missing — the reason nothing ran.
+
+Dispatch (dispatch.py) decides a job MAY run and records it. This module is what
+actually DOES it: it takes a queued job, runs the work on the assigned seat's real
+model, writes down every step as it goes, and lands a real result. Before this file
+existed, Chief said "putting Riggs on it" and no worker ever started.
+
+Two hard rules, both structural rather than polite:
+
+  1. THE WORK HAPPENS IN AN ISOLATED WORKTREE, never the live project. A builder gets
+     its own private copy of the repo (a git worktree). It physically cannot scribble
+     on main while it works — main is untouched until something is reviewed and merged
+     by the one service allowed to merge. "One worktree per agent" (owner + Sol).
+
+  2. LOCAL OUTPUT CANNOT COMPLETE ON ITS OWN. When the free local model finishes, the
+     job parks at 'review'. The database guards (schema.sql) refuse to let it reach
+     'done' without a higher-tier reviewer passing THIS version. We do not route
+     around that here; we feed it.
+
+Runs in a background thread so the app never blocks — the whole point of the
+architecture. sessions come and go; the job row is the durable truth.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import threading
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from db.jobs import (
+    GuardViolation,
+    connect,
+    record_verdict,
+    seat,
+    set_head_version,
+    set_status,
+)
+
+HARNESS = Path(__file__).resolve().parent
+DB_PATH = HARNESS / "db" / "chief.db"
+WORKTREES = HARNESS / ".worktrees"       # gitignored; one subdir per job
+OUTPUT_DIRNAME = "chief_output"          # where a builder drops standalone work
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+
+
+# ---------------------------------------------------------------------------
+# Event trail — this is what the app's activity view reads. Every step, live.
+# ---------------------------------------------------------------------------
+def _event(conn, job_id: int, seat_row, kind: str, detail: str = "", target: str = "") -> None:
+    conn.execute(
+        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, target, detail) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (job_id, seat_row["id"], seat_row["id"], seat_row["model"],
+         seat_row["family"], kind, target or None, detail or None),
+    )
+
+
+def _version_of(text: str) -> str:
+    """The exact content being put forward, as a short hash. This is what the whole
+    review-to-version chain binds to: change the output, change the version, and every
+    earlier approval silently stops counting (schema.sql, gate 3)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Worktree isolation — a builder never touches the live project.
+# ---------------------------------------------------------------------------
+def _make_worktree(job_id: int, branch: str) -> tuple[Path | None, str]:
+    """Give this job its own private copy of the repo. Returns (path, note).
+
+    If git worktrees aren't usable for any reason, fall back to a plain isolated
+    directory and SAY SO — a silent fallback that quietly drops isolation would be
+    exactly the kind of unspoken gap this project keeps getting bitten by.
+    """
+    WORKTREES.mkdir(exist_ok=True)
+    dest = WORKTREES / f"job-{job_id}"
+    if dest.exists():
+        return dest, "reused"
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(dest)],
+            cwd=HARNESS.parent, capture_output=True, text=True, timeout=60, check=True,
+        )
+        return dest, "worktree"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        # Isolation still holds (separate dir, outside the repo tree) — it just isn't a
+        # git worktree, so we record that honestly.
+        dest.mkdir(parents=True, exist_ok=True)
+        detail = getattr(exc, "stderr", "") or str(exc)
+        return dest, f"plain-dir ({str(detail)[:60].strip()})"
+
+
+def cleanup_worktree(job_id: int) -> None:
+    """Remove a job's worktree once its work is merged or abandoned."""
+    dest = WORKTREES / f"job-{job_id}"
+    if not dest.exists():
+        return
+    subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
+                   cwd=HARNESS.parent, capture_output=True, text=True)
+    if dest.exists():
+        subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+
+
+# ---------------------------------------------------------------------------
+# The actual builders, one per provider. Add a provider = add a function.
+# ---------------------------------------------------------------------------
+def _ollama_build(seat_row, request: str, model: str) -> str:
+    """The free local coder actually writes the code."""
+    payload = json.dumps({"model": model, "prompt": request, "stream": False}).encode()
+    req = urllib.request.Request(
+        OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=300) as r:
+        return json.loads(r.read())["response"].strip()
+
+
+_BUILDERS = {
+    "ollama": _ollama_build,
+}
+
+
+# ---------------------------------------------------------------------------
+# Optional single reviewer — enough to close the loop and honor the guards.
+# The FULL parallel gauntlet is task #10; this is the one real cross-tier pass
+# that lets a local job legitimately complete.
+# ---------------------------------------------------------------------------
+def _claude_review(request: str, code: str) -> tuple[str, str]:
+    """A higher-tier model reads the work and judges it. Returns (verdict, summary)."""
+    prompt = (
+        "You are reviewing another model's code. Reply with EXACTLY one line: "
+        "'PASS <one-line reason>' or 'FAIL <one-line reason>'.\n\n"
+        f"The task was: {request}\n\nThe code:\n{code}"
+    )
+    out = subprocess.run(
+        ["claude", "-p", prompt], capture_output=True, text=True, timeout=180
+    ).stdout.strip()
+    verdict = "pass" if out.upper().lstrip().startswith("PASS") else "fail"
+    return verdict, out[:280]
+
+
+_REVIEWERS = {
+    "claude-cli": _claude_review,
+}
+
+
+# ---------------------------------------------------------------------------
+# The run loop — everything above, in order, for one job.
+# ---------------------------------------------------------------------------
+def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
+    """Take one recorded job and actually do it. Safe to call in a thread.
+
+    Opens its own database connection (sqlite + threads). WAL mode lets this write
+    while the web server reads. Never raises to the caller — a worker that dies must
+    leave a legible 'failed' row, not a stack trace nobody sees.
+    """
+    conn = connect(DB_PATH)
+    try:
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job is None:
+            return {"job_id": job_id, "status": "missing"}
+        seat_row = seat(conn, job["builder_seat"])
+        if seat_row is None:
+            set_status(conn, job_id, "failed", error=f"unknown seat {job['builder_seat']}")
+            return {"job_id": job_id, "status": "failed"}
+
+        builder = _BUILDERS.get(seat_row["provider"])
+        if builder is None:
+            # A provider we don't have a local runner for (codex/xai/claude-cli builds
+            # go through OpenClaw, not this in-process worker). Say so plainly.
+            set_status(conn, job_id, "failed",
+                       error=f"no in-process builder for provider '{seat_row['provider']}' "
+                             "— this seat dispatches through OpenClaw")
+            _event(conn, job_id, seat_row, "error",
+                   "This worker only runs the local model directly.")
+            return {"job_id": job_id, "status": "failed"}
+
+        # 1. Isolate.
+        wt, wt_note = _make_worktree(job_id, job["branch"] or f"job/{job_id}")
+        conn.execute("UPDATE jobs SET worktree = ? WHERE id = ?", (str(wt), job_id))
+        _event(conn, job_id, seat_row, "dispatched", f"Working in its own copy ({wt_note}).")
+
+        # 2. Build.
+        model = job["tier"] and _model_for(seat_row, job["tier"]) or seat_row["model"]
+        _event(conn, job_id, seat_row, "thinking", "Working out how to do it.")
+        try:
+            result = builder(seat_row, job["request"], model)
+        except Exception as exc:  # network, model, timeout — all land here
+            set_status(conn, job_id, "failed", error=f"builder error: {exc}")
+            _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
+            return {"job_id": job_id, "status": "failed"}
+
+        # 3. Land the output in the isolated copy, and version it.
+        out_dir = wt / OUTPUT_DIRNAME
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"job_{job_id}.txt").write_text(result)
+        version = _version_of(result)
+        set_head_version(conn, job_id, version)
+        _event(conn, job_id, seat_row, "write",
+               f"Wrote {len(result)} characters of work.", target=str(out_dir))
+
+        # 4. Park for review. The guards will hold it here until a real reviewer passes
+        #    THIS version — we never force it past them.
+        set_status(conn, job_id, "review", result=result)
+
+        # 5. If a reviewer is wired and available, run the one real cross-tier pass.
+        if reviewer_seat:
+            _run_one_review(conn, job_id, job["request"], result, version, reviewer_seat)
+
+        final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
+        return {"job_id": job_id, "status": final, "version": version}
+    finally:
+        conn.close()
+
+
+def _model_for(seat_row, tier: str) -> str:
+    try:
+        from tiering import resolve_model
+        return resolve_model(seat_row, tier)[0]
+    except Exception:
+        return seat_row["model"]
+
+
+def _run_one_review(conn, job_id, request, code, version, reviewer_seat) -> None:
+    rev = seat(conn, reviewer_seat)
+    if rev is None or not rev["enabled"]:
+        return
+    reviewer = _REVIEWERS.get(rev["provider"])
+    if reviewer is None:
+        return
+    _event(conn, job_id, rev, "thinking", "A stronger model is checking the work.")
+    try:
+        verdict, summary = reviewer(request, code)
+    except Exception as exc:
+        _event(conn, job_id, rev, "error", "The reviewer couldn't finish.")
+        return
+    # reviewed_version defaults to the job's head_version inside record_verdict, which
+    # is exactly `version` — so this verdict is bound to what was actually reviewed.
+    try:
+        record_verdict(conn, job_id, reviewer_seat, verdict=verdict,
+                       summary=summary, role="reviewer")
+    except GuardViolation:
+        return
+    _event(conn, job_id, rev, "verdict", "Passed the check." if verdict == "pass"
+           else "Sent it back with notes.")
+
+    if verdict == "pass":
+        try:
+            set_status(conn, job_id, "done",
+                       spoken_summary="Built and checked. Ready for you.")
+        except GuardViolation:
+            # Some other gate still holds (e.g. panel size). Leave it parked, honestly.
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget: start a worker in the background so the app stays responsive.
+# ---------------------------------------------------------------------------
+def start_in_background(job_id: int, *, reviewer_seat: str | None = None) -> threading.Thread:
+    t = threading.Thread(
+        target=run_job, args=(job_id,), kwargs={"reviewer_seat": reviewer_seat},
+        name=f"job-{job_id}", daemon=True,
+    )
+    t.start()
+    return t
+-- Chief Command v2 — harness job store
+--
+-- This is the layer OpenClaw does NOT give us. Its subagent sessions auto-archive
+-- after ~60 minutes and get soft-deleted; that is session archival, not durable job
+-- history. Spec §7 wants "what did the overnight run do?" to be answerable. This is that.
+--
+-- Two rules are enforced STRUCTURALLY here rather than in a prompt, because rules that
+-- live in prompts quietly stop holding at 4am:
+--   1. Local-model output can never reach `done` without a higher-tier passing review
+--      (spec §4.3 / §9 — "enforce in the pipeline itself, not by convention").
+--   2. Per-seat spend caps (OpenClaw core has no per-agent budget of any kind).
+
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+-- ---------------------------------------------------------------------------
+-- Seats: the named roles from spec §4. Providers are swappable behind these.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS seats (
+    id            TEXT PRIMARY KEY,          -- 'brain' | 'workhorse' | 'grinder_local' | 'reviewer' | 'tester' | 'mouth'
+    provider      TEXT NOT NULL,             -- 'codex' | 'xai' | 'ollama' | 'claude-cli' | ...
+    model         TEXT NOT NULL,
+    -- Model FAMILY, not provider. Two seats can share a family via different providers
+    -- (e.g. claude-cli and an Anthropic API key are both 'claude'). The gauntlet's
+    -- diversity rule and the no-self-testing guard both key off this, so it must be
+    -- the thing that actually determines shared blind spots.
+    family        TEXT NOT NULL,             -- 'gpt' | 'claude' | 'grok' | 'qwen'
+    -- tier drives the review guard below. 'local' output is never trusted on its own.
+    tier          TEXT NOT NULL CHECK (tier IN ('local', 'subscription', 'metered')),
+    -- ═══════════════════════════════════════════════════════════════════════
+    -- MODEL TIERS. Owner (2026-07-14):
+    --     "If we do highest model every time for every build, on autonomous work,
+    --      Claude and ChatGPT are gonna bottom out. I need us to build in model
+    --      tiering as well."
+    --
+    -- He's right, and it's the difference between a system that runs for a month and
+    -- one that dies on Thursday. Rate limits are the binding constraint on autonomous
+    -- work — NOT money (Claude and OpenAI are flat-rate). You cannot buy your way out
+    -- of a weekly cap. You can only spend it wisely.
+    --
+    -- So every seat carries THREE models, and the harness picks by what the work
+    -- actually deserves:
+    --
+    --   light     the cheap one. Boilerplate, scaffolding, small fixes, quick answers.
+    --   standard  the default. Most real work.
+    --   heavy     the top of the line. Reserved, and it has to be EARNED.
+    --
+    -- Nothing gets `heavy` by default. It's earned by: an explicit ask ("think hard"),
+    -- a risky area (auth, money, data), a repeat failure, or a major decision. See
+    -- tiering.py — the whole point is that the escalation is a rule, not a vibe.
+    -- ═══════════════════════════════════════════════════════════════════════
+    model_light    TEXT,     -- e.g. claude-haiku / gpt-5.6-luna
+    model_standard TEXT,     -- e.g. claude-sonnet / gpt-5.6-terra
+    model_heavy    TEXT,     -- e.g. claude-opus / gpt-5.6-sol  (EARNED, never default)
+    effort_light    TEXT DEFAULT 'low',
+    effort_standard TEXT DEFAULT 'medium',
+    effort_heavy    TEXT DEFAULT 'high',
+
+    -- CAPS ARE PER-ROLE, not just per-seat. Owner's call (2026-07-13):
+    --     "it can review as much as it wants more or less, but shouldn't build as
+    --      much as claude and chat"
+    --
+    -- The economics say the same thing. Claude and OpenAI are FLAT-RATE — a build on
+    -- those seats costs nothing marginal, it's already paid for. Grok is METERED, so
+    -- every build is real money. And builds are the expensive kind of work (token-heavy)
+    -- while reviews are cheap (read-heavy, ~1/10 the tokens).
+    --
+    -- So: BUILD on the seats you've already bought. REVIEW on the metered one, because
+    -- reviewing is cheap — and reviewing is what Grok is actually best at anyway. Its
+    -- value was never being the strongest coder. It's being a DIFFERENT MIND.
+    --
+    -- NULL = uncapped.
+    daily_cap_cents        INTEGER,   -- total across all roles (the hard ceiling)
+    build_cap_cents        INTEGER,   -- ration the expensive work
+    review_cap_cents       INTEGER,   -- reviewing is cheap; be generous
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    notes         TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- Projects: the top-level thing work belongs to. Each has its OWN memory.
+--
+-- Owner: "ability to see a projects tab and each project has its own memory,
+-- timeline/planning."
+--
+-- This matters more than it looks. Memory that isn't scoped to a project leaks:
+-- lessons from the EMR bleed into the harness, conventions from one codebase get
+-- applied to another. Chief already keeps per-AGENT memory; this is per-PROJECT,
+-- and the two are different axes. Riggs knows how HE works; the project knows how
+-- IT works.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS projects (
+    id            TEXT PRIMARY KEY,          -- 'chief', 'arch', 'jess'
+    name          TEXT NOT NULL,
+    repo_path     TEXT,
+    description   TEXT,
+    -- Where this project's own memory lives. Loaded into context for any job on it.
+    memory_dir    TEXT,
+    color         TEXT,                      -- the UI reads this
+    archived      INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- The REAL projects, seeded so Chief knows them on ANY machine (a fresh DB or the Mac
+-- Studio), not just wherever a row happened to be typed. Without this, `projects` is
+-- empty on a new box and Chief goes back to improvising what Neill is working on — the
+-- exact bug this seed exists to kill. OR IGNORE so it never clobbers live edits.
+--
+-- repo_path: Arch is deliberately NULL. Chief may read Arch's NOTES (memory), but the
+-- fleet must never be pointed at its code or its patient data (Decision C, PHI). Dispatch
+-- does not route by repo_path today; if it ever learns to, THAT is where the guard goes.
+--
+-- memory_dir is NOT seeded here on purpose: it's the one genuinely machine-specific value
+-- (where this box keeps the project's notes), so it's set as local config per machine —
+-- keeping this file hardware-agnostic (rule 4).
+INSERT OR IGNORE INTO projects (id, name, repo_path, description, color) VALUES
+  ('chief', 'Chief Command', '~/code-projects/chief-command',
+   'The thing you talk to. This.', '#2E9BFF'),
+  ('jess', 'Jess', '~/code-projects/personal-assist',
+   'Personal assistant. Connects to Chief over the tailnet later.', '#A78BFA'),
+  ('arch', 'Arch (Arch to Freedom EMR)', NULL,
+   'The records system for the addiction-recovery facility — staff, beds, roles, approvals, the voice assistant Archie. Voice-first. Held at arm''s length here on purpose: Chief can read its notes but the fleet does not touch its code or its patient data.',
+   '#22c55e');
+
+-- Project memory: facts that belong to the PROJECT, not to an agent and not to a job.
+-- "The API returns snake_case." "Never touch the billing table directly."
+CREATE TABLE IF NOT EXISTS project_memory (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL DEFAULT 'lesson'
+                  CHECK (kind IN ('lesson', 'convention', 'constraint', 'decision', 'gotcha')),
+    fact          TEXT NOT NULL,
+    -- Where it came from, so a wrong lesson can be traced and killed.
+    learned_from  INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pmem_project ON project_memory(project_id);
+
+-- The plan. What's coming, in order. This is the timeline the UI draws.
+CREATE TABLE IF NOT EXISTS plan_items (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,
+    detail        TEXT,
+    phase         TEXT,                      -- 'phase 1', 'phase 2'…
+    status        TEXT NOT NULL DEFAULT 'planned'
+                  CHECK (status IN ('planned', 'active', 'blocked', 'done', 'dropped')),
+    blocked_on    TEXT,                      -- plain English. "waiting on Neill to log in"
+    job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_items(project_id, position);
+
+-- ---------------------------------------------------------------------------
+-- Todos: the checklist that belongs to a PROJECT, so it stops living in a
+-- terminal window and following nobody. Owner's annoyance, verbatim: "right now I
+-- have persistent todos that has to jump from window to window, which is annoying."
+--
+-- `owner_only` marks the items only Neill can do (rotate a key, flip a setting) —
+-- the ones the fleet must never quietly tick off on his behalf.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS todos (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    -- Sub-category WITHIN a project, so a project can hold several running lists
+    -- ("Security", "Build", "My tasks"). Owner: "ideally we can create a sub
+    -- category under each project as well." NULL / '' folds into a "General" list.
+    section       TEXT,
+    text          TEXT NOT NULL,
+    done          INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),
+    owner_only    INTEGER NOT NULL DEFAULT 0 CHECK (owner_only IN (0, 1)),
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    done_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project_id, section, position, id);
+
+-- ---------------------------------------------------------------------------
+-- Attachments: images and files Neill drops in — a screenshot of a bug, a mockup,
+-- a document — pinned to a project or a specific job. The bytes live on disk
+-- (gitignored); this row is how the UI finds them. captured_by is always the owner
+-- here; agent-produced evidence is the `artifacts` table, which has its own guards.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS attachments (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    filename      TEXT NOT NULL,             -- the original name, for display
+    stored_path   TEXT NOT NULL,             -- where the bytes actually live
+    kind          TEXT NOT NULL CHECK (kind IN ('image', 'file')),
+    size_bytes    INTEGER,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments(project_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_job ON attachments(job_id);
+
+-- ---------------------------------------------------------------------------
+-- Jobs: one row per dispatched unit of work. This is the audit trail.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at    TEXT,
+    finished_at   TEXT,
+
+    request       TEXT NOT NULL,             -- what was asked, verbatim (§7)
+    -- A 2-4 word handle the mouth coins at dispatch: "the rate limiter".
+    -- The VOICE says this. The TEXT shows `request` in full. Echoing a man's own
+    -- paragraph back at him is not how a colleague talks.
+    task_name     TEXT,
+    origin        TEXT NOT NULL DEFAULT 'text'
+                  CHECK (origin IN ('text', 'voice', 'cron', 'relay')),  -- 'relay' = Jess (§10)
+
+    -- 'build'    → produces code. Ground truth = a screenshot (Playwright drove it).
+    -- 'research' → produces an ANSWER. Ground truth = a source (someone can go read it).
+    -- Same principle, different evidence. A researcher that can't cite is a researcher
+    -- that might be confabulating — and a confident wrong answer is worse than no answer,
+    -- because you act on it.
+    kind          TEXT NOT NULL DEFAULT 'build' CHECK (kind IN ('build', 'research')),
+
+    project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+
+    -- Which tier this job actually ran at, and WHY. The 'why' matters: if we're
+    -- burning heavy tier on boilerplate, this column is how we find out.
+    tier          TEXT NOT NULL DEFAULT 'standard'
+                  CHECK (tier IN ('light', 'standard', 'heavy')),
+    tier_reason   TEXT,
+
+    builder_seat  TEXT NOT NULL REFERENCES seats(id),
+    -- SNAPSHOTTED AT CREATION. Sol (cross-family review, 2026-07-13) found that
+    -- guards read the builder's tier/family LIVE from `seats`, so re-tiering a local
+    -- seat to 'subscription' retroactively legitimized its old unreviewed work.
+    -- Freeze it here. What a seat is TODAY cannot change what it WAS.
+    builder_tier   TEXT NOT NULL DEFAULT 'local'
+                   CHECK (builder_tier IN ('local','subscription','metered')),
+    builder_family TEXT NOT NULL DEFAULT 'unknown',
+    run_id        TEXT,                      -- OpenClaw sessions_spawn run id
+    session_key   TEXT,                      -- agent:<id>:subagent:<uuid>
+
+    -- Git as audit trail (§7). Worktree-per-job, main untouched until merged.
+    branch        TEXT,
+    worktree      TEXT,
+
+    -- THE VERSION UNDER REVIEW (Sol build gate 3, 2026-07-20). The exact content
+    -- hash the builder is putting forward — a git commit id. Reviews bind to this:
+    -- a verdict only counts toward completion while its reviewed_version matches.
+    -- The moment the builder changes the code, this changes, and every earlier
+    -- approval silently stops counting. Sol called the alternative the most
+    -- dangerous flaw in the system: "believable green checks on code nobody
+    -- reviewed." The gatekeeper's job at push time is to verify the code leaving
+    -- the building IS this hash — the DB proves the chain, git proves the content.
+    head_version  TEXT,
+
+    -- 'done'    = the gauntlet passed. The machine is satisfied.
+    -- 'shipped' = NEILL said it works on his device. Only he can move this.
+    -- These are NOT the same thing, and conflating them is how agents launder
+    -- confidence. From Chief's memory, learned the hard way:
+    --     "Chief must NEVER say 'shipped' unless Neill has confirmed it works on
+    --      his device. 'Shipped' is reserved for Neill-confirmed-working."
+    -- That rule now lives here instead of in a prompt.
+    status        TEXT NOT NULL DEFAULT 'todo'
+                  CHECK (status IN ('todo', 'in_progress', 'review', 'done',
+                                    'shipped', 'failed', 'cancelled')),
+    -- Set ONLY by the owner, through mark_shipped(). No agent has a path to this.
+    owner_confirmed_at TEXT,
+
+    -- How many passing reviews this job needs before it may complete. Set at
+    -- dispatch from the gauntlet config. Also from Chief's memory:
+    --     "Full set, always. No 'minimum,' no 'pick two,' no 'optional depending
+    --      on scope.'"
+    required_reviews INTEGER NOT NULL DEFAULT 0,
+
+    result        TEXT,                      -- final summary / diff ref
+    error         TEXT,
+
+    -- Voice wants a spoken-length answer; the text log keeps the detail (§5.3).
+    spoken_summary TEXT,
+
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    parent_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+
+    -- DUPLICATE PROTECTION. A retry — a double-tap, a dropped connection, the voice
+    -- re-sending — must not start the same work twice. The caller stamps a key; a
+    -- second dispatch with the same key returns the existing job instead of spawning
+    -- a new one. NULL = no key given (nothing to dedupe against). The unique index
+    -- below lets many NULLs coexist but forbids two rows sharing a real key.
+    dispatch_key  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status  ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_run     ON jobs(run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dispatch_key ON jobs(dispatch_key)
+    WHERE dispatch_key IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Verdicts: the gauntlet's output (§6). One row per reviewer per job.
+-- reviewer_tier is denormalized at write time so a later seat re-tiering cannot
+-- retroactively validate a job that was never properly reviewed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS verdicts (
+    id            INTEGER PRIMARY KEY,
+    job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    reviewer_seat TEXT NOT NULL REFERENCES seats(id),
+    reviewer_tier TEXT NOT NULL CHECK (reviewer_tier IN ('local', 'subscription', 'metered')),
+    -- 'reviewer' reads the diff and judges. 'tester' DRIVES THE APP (Playwright) and
+    -- judges what it observed. The tester guards below apply only to the latter.
+    -- 'reviewer' reads the diff and judges it.
+    -- 'tester'   DROVE the running app (Playwright) and judges what it observed.
+    -- 'verifier' FACT-CHECKS a research answer against its sources.
+    role          TEXT NOT NULL DEFAULT 'reviewer'
+                  CHECK (role IN ('reviewer', 'tester', 'verifier')),
+    -- model family is snapshotted here so §6's "at least two families" rule is
+    -- auditable, and so the no-self-family-testing guard has something to check.
+    model_family  TEXT NOT NULL,
+    -- WHAT, exactly, did this reviewer look at? Snapshotted at write time. A verdict
+    -- whose version no longer matches the job's head_version is history, not
+    -- approval — it stops counting the moment the code moves on. This is the other
+    -- half of the review-to-version chain.
+    reviewed_version TEXT,
+    verdict       TEXT NOT NULL CHECK (verdict IN ('pass', 'fail', 'needs_human')),
+    severity      TEXT CHECK (severity IN ('p0', 'p1', 'p2', 'p3')),
+    summary       TEXT,
+    detail        TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_verdicts_job ON verdicts(job_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- CAPABILITIES — what an agent is PHYSICALLY ALLOWED to do.
+--
+-- This exists because Sol reviewed the architecture and demolished the previous
+-- safety story. The plan had been: the voice can act fast, and Chief watches and
+-- kills anything dumb. Sol's verdict:
+--
+--     "'Builders take minutes' measures how long they take to FINISH. What matters
+--      is how long they take to do their FIRST DAMAGING THING. That can be seconds.
+--      Chief and the builder would be RACING. There is no guarantee Chief wins."
+--
+--     "A fast supervisor is still only a fast witness if the builder can act first."
+--
+--     "A smarter model is not a security boundary."
+--
+-- He's right, and it's the difference between a bank with a vault and a bank with an
+-- attentive guard. You do not stop a robbery by watching carefully.
+--
+-- SO: agents get NO dangerous powers. Not "Chief will stop them" — THEY CANNOT.
+-- Reading code, writing code in their own worktree, running tests: always fine, and
+-- that's 95% of the work. Everything that touches the real world is denied by
+-- default and needs a signed, single-use permission slip for that exact act.
+-- ═══════════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS capabilities (
+    seat_id       TEXT NOT NULL REFERENCES seats(id) ON DELETE CASCADE,
+
+exec
+/bin/zsh -lc "rg -n \"guard_|CREATE TRIGGER|required_reviews|model_family|reviewer_seat|reviewed_version|verdicts_are|usage|busy|def connect|def record_usage|def record_verdict|def over_budget|run_gauntlet|_run_one_review|set_status\\(conn, job_id, \\\"done|\\[gauntlet\\]|\\[seats\\.|provider|family|daily_cap|review_cap\" harness/db/schema.sql harness/db/jobs.py harness/dispatch.py harness/executor.py harness/config/seats.toml docs/gauntlet-task10-spec.md" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+harness/executor.py:56:        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, target, detail) "
+harness/executor.py:59:         seat_row["family"], kind, target or None, detail or None),
+harness/executor.py:110:# The actual builders, one per provider. Add a provider = add a function.
+harness/executor.py:154:def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
+harness/executor.py:171:        builder = _BUILDERS.get(seat_row["provider"])
+harness/executor.py:173:            # A provider we don't have a local runner for (codex/xai/claude-cli builds
+harness/executor.py:176:                       error=f"no in-process builder for provider '{seat_row['provider']}' "
+harness/executor.py:211:        if reviewer_seat:
+harness/executor.py:212:            _run_one_review(conn, job_id, job["request"], result, version, reviewer_seat)
+harness/executor.py:228:def _run_one_review(conn, job_id, request, code, version, reviewer_seat) -> None:
+harness/executor.py:229:    rev = seat(conn, reviewer_seat)
+harness/executor.py:232:    reviewer = _REVIEWERS.get(rev["provider"])
+harness/executor.py:241:    # reviewed_version defaults to the job's head_version inside record_verdict, which
+harness/executor.py:244:        record_verdict(conn, job_id, reviewer_seat, verdict=verdict,
+harness/executor.py:253:            set_status(conn, job_id, "done",
+harness/executor.py:263:def start_in_background(job_id: int, *, reviewer_seat: str | None = None) -> threading.Thread:
+harness/executor.py:265:        target=run_job, args=(job_id,), kwargs={"reviewer_seat": reviewer_seat},
+harness/config/seats.toml:4:// orchestration logic. Nothing else in the harness may reference a provider by name —
+harness/config/seats.toml:46:[seats.mouth]
+harness/config/seats.toml:47:provider = "xai-realtime"
+harness/config/seats.toml:50:family = "grok"
+harness/config/seats.toml:59:// Start here and tune once we see real usage — the meter only runs while you talk.
+harness/config/seats.toml:60:daily_cap_cents = 300
+harness/config/seats.toml:61:notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok]."
+harness/config/seats.toml:89:[seats.brain]
+harness/config/seats.toml:90:provider = "codex"
+harness/config/seats.toml:127:// usage caps — and it's the SAME bucket as interactive use. The failure mode is nasty:
+harness/config/seats.toml:130:// escalation (see [seats.reviewer]).
+harness/config/seats.toml:140:[seats.workhorse]
+harness/config/seats.toml:141:provider = "codex"
+harness/config/seats.toml:149:notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK below."
+harness/config/seats.toml:154:[seats.riggs]
+harness/config/seats.toml:155:provider = "claude-cli"
+harness/config/seats.toml:157:family = "claude"
+harness/config/seats.toml:165:// GROK — builder + cross-family reviewer.
+harness/config/seats.toml:189:// (daily_cap_cents 100 x ~30 days = ~$30/mo of fallback.)
+harness/config/seats.toml:206:[seats.grok]
+harness/config/seats.toml:207:provider = "xai"
+harness/config/seats.toml:210:family = "grok"
+harness/config/seats.toml:212:daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
+harness/config/seats.toml:214:review_cap_cents = 75                       // reviewing is cheap; let it look at everything
+harness/config/seats.toml:219:  [seats.grok.fallback]
+harness/config/seats.toml:220:  provider = "xai-api"
+harness/config/seats.toml:223:  notes = "Engages when the sub 403s. Capped by daily_cap_cents above."
+harness/config/seats.toml:230:[seats.grinder_local]
+harness/config/seats.toml:231:provider = "ollama"
+harness/config/seats.toml:246:// SWE-bench Verified), AND it is a FOURTH model family in the gauntlet. §6 exists
+harness/config/seats.toml:253:[seats.reviewer]
+harness/config/seats.toml:254:provider = "claude-cli"                     // sanctioned path; subscription OAuth is NOT
+harness/config/seats.toml:269:notes = "Low-volume escalation. Strongest model + 4th model family. Droppable by design."
+harness/config/seats.toml:274:// [seats.brain] and [seats.workhorse] BOTH run on the Codex OAuth path. That path is
+harness/config/seats.toml:283:// both seats must swap to a paid API key by changing `provider`/`tier` here and
+harness/config/seats.toml:328:interrupt_me_on = ["failed", "needs_human", "over_budget", "guard_blocked"]
+harness/config/seats.toml:336:// The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE
+harness/config/seats.toml:342:[gauntlet]
+harness/dispatch.py:75:    reviewer_seat: str | None = None,
+harness/dispatch.py:76:    required_reviews: int = 1,
+harness/dispatch.py:115:        "UPDATE jobs SET required_reviews = ?, tier = ?, tier_reason = ?, "
+harness/dispatch.py:117:        (required_reviews, call.tier, call.reason, dispatch_key, f"job/{job_id}", job_id),
+harness/dispatch.py:122:        executor.start_in_background(job_id, reviewer_seat=reviewer_seat)
+harness/dispatch.py:147:            provider=s["provider"],
+harness/dispatch.py:149:            family=s["family"],
+harness/dispatch.py:151:            daily_cap_cents=s.get("daily_cap_cents"),
+harness/dispatch.py:199:    conn.execute("UPDATE jobs SET required_reviews = ? WHERE id = ?", (required, job_id))
+harness/dispatch.py:216:        "--model", f"{seat_row['provider']}/{seat_row['model']}",
+harness/dispatch.py:236:def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> list[str]:
+harness/dispatch.py:240:    snapshots the reviewing seat's family, so "at least two families looked at this"
+harness/dispatch.py:256:    'done' AND carries a passing cross-family tester verdict backed by real Playwright
+harness/db/jobs.py:8:triggers, not here — see guard_local_output_needs_review and
+harness/db/jobs.py:9:guard_unresolved_escalation. This module will simply raise if you try to violate them.
+harness/db/jobs.py:30:    provider: str
+harness/db/jobs.py:32:    family: str  # gpt | claude | grok | qwen — what determines shared blind spots
+harness/db/jobs.py:34:    daily_cap_cents: Optional[int] = None   # hard ceiling across everything
+harness/db/jobs.py:36:    review_cap_cents: Optional[int] = None  # reviewing is cheap — be generous
+harness/db/jobs.py:47:def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
+harness/db/jobs.py:78:        INSERT INTO seats (id, provider, model, family, tier, daily_cap_cents,
+harness/db/jobs.py:79:                           build_cap_cents, review_cap_cents,
+harness/db/jobs.py:83:            provider = excluded.provider,
+harness/db/jobs.py:85:            family = excluded.family,
+harness/db/jobs.py:87:            daily_cap_cents = excluded.daily_cap_cents,
+harness/db/jobs.py:89:            review_cap_cents = excluded.review_cap_cents,
+harness/db/jobs.py:96:        (seat.id, seat.provider, seat.model, seat.family, seat.tier,
+harness/db/jobs.py:97:         seat.daily_cap_cents, seat.build_cap_cents, seat.review_cap_cents,
+harness/db/jobs.py:128:    # Snapshot who built this, AT BUILD TIME. Sol's cross-family review found that
+harness/db/jobs.py:134:        INSERT INTO jobs (request, builder_seat, builder_tier, builder_family,
+harness/db/jobs.py:138:        (request, builder_seat, row["tier"], row["family"],
+harness/db/jobs.py:193:    counts verdicts whose reviewed_version matches this. Calling it again after the
+harness/db/jobs.py:253:    why a different family has to read the sources cold (guard 8).
+harness/db/jobs.py:274:def record_verdict(
+harness/db/jobs.py:277:    reviewer_seat: str,
+harness/db/jobs.py:283:    reviewed_version: str | None = None,
+harness/db/jobs.py:289:                    apply: it must cite captured artifacts, and its family must differ
+harness/db/jobs.py:293:    reviewed_version is WHAT the reviewer looked at. The gauntlet runner pins the
+harness/db/jobs.py:299:    tier and family are snapshotted from the seat at write time, so re-tiering or
+harness/db/jobs.py:302:    row = seat(conn, reviewer_seat)
+harness/db/jobs.py:304:        raise ValueError(f"unknown seat: {reviewer_seat}")
+harness/db/jobs.py:306:    if reviewed_version is None:
+harness/db/jobs.py:311:            reviewed_version = job_row["head_version"]
+harness/db/jobs.py:316:            (job_id, reviewer_seat, reviewer_tier, role, model_family,
+harness/db/jobs.py:317:             verdict, severity, summary, detail, reviewed_version)
+harness/db/jobs.py:320:        (job_id, reviewer_seat, row["tier"], role, row["family"],
+harness/db/jobs.py:321:         verdict, severity, summary, detail, reviewed_version),
+harness/db/jobs.py:350:        "SELECT COALESCE(SUM(cost_cents), 0) AS c FROM usage WHERE seat_id = ? AND day = date('now')",
+harness/db/jobs.py:356:def over_budget(conn: sqlite3.Connection, seat_id: str) -> bool:
+harness/db/jobs.py:360:    before dispatching. Uncapped seats (daily_cap_cents IS NULL) never block.
+harness/db/jobs.py:363:    if row is None or row["daily_cap_cents"] is None:
+harness/db/jobs.py:365:    return spend_today(conn, seat_id) >= int(row["daily_cap_cents"])
+harness/db/jobs.py:369:def record_usage(
+harness/db/jobs.py:386:        INSERT INTO usage (seat_id, job_id, role, input_tokens, output_tokens, cost_cents)
+harness/db/jobs.py:399:        "SELECT COALESCE(SUM(cost_cents),0) c FROM usage "
+harness/db/schema.sql:21:    provider      TEXT NOT NULL,             -- 'codex' | 'xai' | 'ollama' | 'claude-cli' | ...
+harness/db/schema.sql:23:    -- Model FAMILY, not provider. Two seats can share a family via different providers
+harness/db/schema.sql:27:    family        TEXT NOT NULL,             -- 'gpt' | 'claude' | 'grok' | 'qwen'
+harness/db/schema.sql:73:    daily_cap_cents        INTEGER,   -- total across all roles (the hard ceiling)
+harness/db/schema.sql:75:    review_cap_cents       INTEGER,   -- reviewing is cheap; be generous
+harness/db/schema.sql:236:    -- SNAPSHOTTED AT CREATION. Sol (cross-family review, 2026-07-13) found that
+harness/db/schema.sql:237:    -- guards read the builder's tier/family LIVE from `seats`, so re-tiering a local
+harness/db/schema.sql:242:    builder_family TEXT NOT NULL DEFAULT 'unknown',
+harness/db/schema.sql:252:    -- a verdict only counts toward completion while its reviewed_version matches.
+harness/db/schema.sql:277:    required_reviews INTEGER NOT NULL DEFAULT 0,
+harness/db/schema.sql:310:    reviewer_seat TEXT NOT NULL REFERENCES seats(id),
+harness/db/schema.sql:319:    -- model family is snapshotted here so §6's "at least two families" rule is
+harness/db/schema.sql:320:    -- auditable, and so the no-self-family-testing guard has something to check.
+harness/db/schema.sql:321:    model_family  TEXT NOT NULL,
+harness/db/schema.sql:326:    reviewed_version TEXT,
+harness/db/schema.sql:441:CREATE TRIGGER IF NOT EXISTS guard_no_approval_is_born_granted
+harness/db/schema.sql:449:CREATE TRIGGER IF NOT EXISTS guard_no_approval_without_readback
+harness/db/schema.sql:458:CREATE TRIGGER IF NOT EXISTS guard_irreversible_needs_a_way_back
+harness/db/schema.sql:467:CREATE TRIGGER IF NOT EXISTS guard_an_approval_is_used_once
+harness/db/schema.sql:499:    family        TEXT NOT NULL,
+harness/db/schema.sql:556:CREATE TABLE IF NOT EXISTS usage (
+harness/db/schema.sql:571:CREATE INDEX IF NOT EXISTS idx_usage_seat_day ON usage(seat_id, day);
+harness/db/schema.sql:572:CREATE INDEX IF NOT EXISTS idx_usage_month ON usage(day);
+harness/db/schema.sql:606:FROM usage
+harness/db/schema.sql:615:CREATE TRIGGER IF NOT EXISTS guard_monthly_budget_is_hard
+harness/db/schema.sql:616:BEFORE INSERT ON usage
+harness/db/schema.sql:626:-- ⚠️ REWRITTEN 2026-07-13 after a cross-family review. Sol (GPT) reviewed Claude's
+harness/db/schema.sql:641:CREATE TRIGGER IF NOT EXISTS guard_no_job_is_born_done
+harness/db/schema.sql:656:CREATE TRIGGER IF NOT EXISTS guard_builder_identity_must_be_real
+harness/db/schema.sql:659:  OR NEW.builder_family <> (SELECT family FROM seats WHERE id = NEW.builder_seat)
+harness/db/schema.sql:664:-- The builder's tier/family are snapshotted at creation and are then HISTORY.
+harness/db/schema.sql:666:CREATE TRIGGER IF NOT EXISTS guard_builder_identity_is_frozen
+harness/db/schema.sql:670:  OR OLD.builder_family <> NEW.builder_family
+harness/db/schema.sql:676:CREATE TRIGGER IF NOT EXISTS guard_panel_size_is_fixed
+harness/db/schema.sql:677:BEFORE UPDATE OF required_reviews ON jobs
+harness/db/schema.sql:678:WHEN OLD.required_reviews > 0 AND NEW.required_reviews < OLD.required_reviews
+harness/db/schema.sql:685:CREATE TRIGGER IF NOT EXISTS guard_verdicts_are_append_only
+harness/db/schema.sql:693:CREATE TRIGGER IF NOT EXISTS guard_verdict_identity_is_frozen
+harness/db/schema.sql:695:WHEN OLD.role <> NEW.role OR OLD.model_family <> NEW.model_family
+harness/db/schema.sql:696:  OR OLD.reviewer_seat <> NEW.reviewer_seat OR OLD.reviewer_tier <> NEW.reviewer_tier
+harness/db/schema.sql:718:CREATE TRIGGER IF NOT EXISTS guard_verdict_must_cite_what_it_reviewed
+harness/db/schema.sql:721:     AND TRIM(COALESCE(NEW.reviewed_version, '')) = ''
+harness/db/schema.sql:727:CREATE TRIGGER IF NOT EXISTS guard_a_build_finishes_a_version
+harness/db/schema.sql:738:CREATE TRIGGER IF NOT EXISTS guard_finished_version_is_frozen
+harness/db/schema.sql:748:-- EDITED into a pass could simply be DELETED — after which guard_a_failing_review_stops_it
+harness/db/schema.sql:751:CREATE TRIGGER IF NOT EXISTS guard_verdicts_cannot_be_deleted
+harness/db/schema.sql:758:CREATE TRIGGER IF NOT EXISTS guard_reviewer_identity_must_be_real
+harness/db/schema.sql:760:WHEN NEW.reviewer_tier <> (SELECT tier FROM seats WHERE id = NEW.reviewer_seat)
+harness/db/schema.sql:761:  OR NEW.model_family  <> (SELECT family FROM seats WHERE id = NEW.reviewer_seat)
+harness/db/schema.sql:763:    SELECT RAISE(ABORT, 'guard: a reviewer cannot misrepresent its own tier or family');
+harness/db/schema.sql:768:CREATE TRIGGER IF NOT EXISTS guard_models_cannot_forge_evidence
+harness/db/schema.sql:779:CREATE TRIGGER IF NOT EXISTS guard_local_output_needs_review
+harness/db/schema.sql:791:          AND v.reviewed_version IS NEW.head_version
+harness/db/schema.sql:798:CREATE TRIGGER IF NOT EXISTS guard_unresolved_escalation
+harness/db/schema.sql:816:CREATE TRIGGER IF NOT EXISTS guard_tester_must_cite_artifacts
+harness/db/schema.sql:831:-- GUARD 4 — a model family may not test its own work.
+harness/db/schema.sql:834:CREATE TRIGGER IF NOT EXISTS guard_no_self_family_testing
+harness/db/schema.sql:837:     AND NEW.model_family = (SELECT builder_family FROM jobs WHERE id = NEW.job_id)
+harness/db/schema.sql:839:    SELECT RAISE(ABORT, 'guard: a model family may not test its own build');
+harness/db/schema.sql:848:CREATE TRIGGER IF NOT EXISTS guard_full_panel
+harness/db/schema.sql:850:WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+harness/db/schema.sql:856:        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+harness/db/schema.sql:859:          AND v.reviewed_version IS NEW.head_version
+harness/db/schema.sql:860:    ) < NEW.required_reviews;
+harness/db/schema.sql:874:CREATE TRIGGER IF NOT EXISTS guard_a_failing_review_stops_it
+harness/db/schema.sql:886:               OR v.reviewed_version IS NULL
+harness/db/schema.sql:887:               OR v.reviewed_version = NEW.head_version)
+harness/db/schema.sql:893:CREATE TRIGGER IF NOT EXISTS guard_late_escalation_still_blocks_shipping
+harness/db/schema.sql:906:                        OR v.reviewed_version IS NULL
+harness/db/schema.sql:907:                        OR v.reviewed_version = NEW.head_version)))
+harness/db/schema.sql:913:CREATE TRIGGER IF NOT EXISTS guard_evidence_cannot_be_empty
+harness/db/schema.sql:921:-- GUARD 6 — nothing ships without a passing cross-family tester.
+harness/db/schema.sql:923:CREATE TRIGGER IF NOT EXISTS guard_ship_requires_a_passing_tester
+harness/db/schema.sql:927:    SELECT RAISE(ABORT, 'guard: nothing ships without a passing cross-family tester on the record')
+harness/db/schema.sql:933:             AND v.reviewed_version IS NEW.head_version
+harness/db/schema.sql:940:CREATE TRIGGER IF NOT EXISTS guard_research_must_cite_sources
+harness/db/schema.sql:954:-- GUARD 8 — a model family may not fact-check its own research.
+harness/db/schema.sql:956:CREATE TRIGGER IF NOT EXISTS guard_no_self_family_verifying
+harness/db/schema.sql:959:     AND NEW.model_family = (SELECT builder_family FROM jobs WHERE id = NEW.job_id)
+harness/db/schema.sql:961:    SELECT RAISE(ABORT, 'guard: a model family may not fact-check its own research');
+harness/db/schema.sql:972:CREATE TRIGGER IF NOT EXISTS guard_no_negative_spend
+harness/db/schema.sql:973:BEFORE INSERT ON usage
+harness/db/schema.sql:979:CREATE TRIGGER IF NOT EXISTS guard_daily_cap_is_hard
+harness/db/schema.sql:980:BEFORE INSERT ON usage
+harness/db/schema.sql:983:    WHERE (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+harness/db/schema.sql:985:        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+harness/db/schema.sql:988:      > (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id);
+harness/db/schema.sql:994:CREATE TRIGGER IF NOT EXISTS guard_build_cap_is_hard
+harness/db/schema.sql:995:BEFORE INSERT ON usage
+harness/db/schema.sql:1001:        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+harness/db/schema.sql:1007:CREATE TRIGGER IF NOT EXISTS guard_review_cap_is_hard
+harness/db/schema.sql:1008:BEFORE INSERT ON usage
+harness/db/schema.sql:1012:    WHERE (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+harness/db/schema.sql:1014:        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+harness/db/schema.sql:1017:      > (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id);
+harness/db/schema.sql:1021:CREATE TRIGGER IF NOT EXISTS jobs_touch_updated_at
+harness/db/schema.sql:1039:    s.provider   AS builder_provider,
+harness/db/schema.sql:1045:    (SELECT COUNT(DISTINCT v.model_family) FROM verdicts v WHERE v.job_id = j.id)  AS families_reviewed,
+docs/gauntlet-task10-spec.md:8:- `harness/dispatch.py::run_gauntlet(conn, job_id, cfg)` returns a list of reviewer
+docs/gauntlet-task10-spec.md:11:  `harness/executor.py::_run_one_review(...)` → resolves the seat, picks a reviewer fn
+docs/gauntlet-task10-spec.md:12:  from `_REVIEWERS` (keyed by provider), runs it, and calls
+docs/gauntlet-task10-spec.md:14:- Config — `harness/config/seats.toml [gauntlet]`:
+docs/gauntlet-task10-spec.md:17:- `record_verdict` snapshots the reviewing seat's **family** and pins `reviewed_version`.
+docs/gauntlet-task10-spec.md:19:  **cross-family** verdict on **this** version. The panel's job is to *produce* those
+docs/gauntlet-task10-spec.md:24:1. **Parallel fan-out.** `run_gauntlet` runs every configured reviewer seat concurrently
+docs/gauntlet-task10-spec.md:29:   reserve budget **before** the provider call; run via the shared reviewer path; record a
+docs/gauntlet-task10-spec.md:30:   verdict bound to the frozen `reviewed_version`.
+docs/gauntlet-task10-spec.md:33:     job **cannot be certified** — it stays parked. Never count a family that didn't run.
+docs/gauntlet-task10-spec.md:44:- **Family-floor honesty:** over-budget/errored reviewers shrink family coverage; a panel
+docs/gauntlet-task10-spec.md:45:  that can't reach 2 families must **fail closed** (parked), not ship. Don't fake a family.
+
+exec
+/bin/zsh -lc "nl -ba harness/executor.py | sed -n '200,275p'; nl -ba harness/db/jobs.py | sed -n '40,65p;274,410p'; nl -ba harness/db/schema.sql | sed -n '676,810p;840,915p;970,1022p'; nl -ba harness/config/seats.toml | sed -n '85,175p;200,275p;330,355p'; nl -ba docs/gauntlet-task10-spec.md | sed -n '1,130p'" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+   200	        (out_dir / f"job_{job_id}.txt").write_text(result)
+   201	        version = _version_of(result)
+   202	        set_head_version(conn, job_id, version)
+   203	        _event(conn, job_id, seat_row, "write",
+   204	               f"Wrote {len(result)} characters of work.", target=str(out_dir))
+   205	
+   206	        # 4. Park for review. The guards will hold it here until a real reviewer passes
+   207	        #    THIS version — we never force it past them.
+   208	        set_status(conn, job_id, "review", result=result)
+   209	
+   210	        # 5. If a reviewer is wired and available, run the one real cross-tier pass.
+   211	        if reviewer_seat:
+   212	            _run_one_review(conn, job_id, job["request"], result, version, reviewer_seat)
+   213	
+   214	        final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
+   215	        return {"job_id": job_id, "status": final, "version": version}
+   216	    finally:
+   217	        conn.close()
+   218	
+   219	
+   220	def _model_for(seat_row, tier: str) -> str:
+   221	    try:
+   222	        from tiering import resolve_model
+   223	        return resolve_model(seat_row, tier)[0]
+   224	    except Exception:
+   225	        return seat_row["model"]
+   226	
+   227	
+   228	def _run_one_review(conn, job_id, request, code, version, reviewer_seat) -> None:
+   229	    rev = seat(conn, reviewer_seat)
+   230	    if rev is None or not rev["enabled"]:
+   231	        return
+   232	    reviewer = _REVIEWERS.get(rev["provider"])
+   233	    if reviewer is None:
+   234	        return
+   235	    _event(conn, job_id, rev, "thinking", "A stronger model is checking the work.")
+   236	    try:
+   237	        verdict, summary = reviewer(request, code)
+   238	    except Exception as exc:
+   239	        _event(conn, job_id, rev, "error", "The reviewer couldn't finish.")
+   240	        return
+   241	    # reviewed_version defaults to the job's head_version inside record_verdict, which
+   242	    # is exactly `version` — so this verdict is bound to what was actually reviewed.
+   243	    try:
+   244	        record_verdict(conn, job_id, reviewer_seat, verdict=verdict,
+   245	                       summary=summary, role="reviewer")
+   246	    except GuardViolation:
+   247	        return
+   248	    _event(conn, job_id, rev, "verdict", "Passed the check." if verdict == "pass"
+   249	           else "Sent it back with notes.")
+   250	
+   251	    if verdict == "pass":
+   252	        try:
+   253	            set_status(conn, job_id, "done",
+   254	                       spoken_summary="Built and checked. Ready for you.")
+   255	        except GuardViolation:
+   256	            # Some other gate still holds (e.g. panel size). Leave it parked, honestly.
+   257	            pass
+   258	
+   259	
+   260	# ---------------------------------------------------------------------------
+   261	# Fire-and-forget: start a worker in the background so the app stays responsive.
+   262	# ---------------------------------------------------------------------------
+   263	def start_in_background(job_id: int, *, reviewer_seat: str | None = None) -> threading.Thread:
+   264	    t = threading.Thread(
+   265	        target=run_job, args=(job_id,), kwargs={"reviewer_seat": reviewer_seat},
+   266	        name=f"job-{job_id}", daemon=True,
+   267	    )
+   268	    t.start()
+   269	    return t
+    40	    model_light: Optional[str] = None
+    41	    model_standard: Optional[str] = None
+    42	    model_heavy: Optional[str] = None
+    43	    enabled: bool = True
+    44	    notes: str = ""
+    45	
+    46	
+    47	def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
+    48	    conn = sqlite3.connect(db_path, isolation_level=None)  # autocommit; we manage txns
+    49	    conn.row_factory = sqlite3.Row
+    50	    conn.execute("PRAGMA foreign_keys = ON")
+    51	    return conn
+    52	
+    53	
+    54	def init_db(conn: sqlite3.Connection) -> None:
+    55	    conn.executescript(SCHEMA_PATH.read_text())
+    56	
+    57	
+    58	def _guarded(fn):
+    59	    """Translate the schema's RAISE(ABORT, 'guard: ...') into GuardViolation."""
+    60	
+    61	    def wrapper(*args, **kwargs):
+    62	        try:
+    63	            return fn(*args, **kwargs)
+    64	        except sqlite3.IntegrityError as exc:
+    65	            if "guard:" in str(exc):
+   274	def record_verdict(
+   275	    conn: sqlite3.Connection,
+   276	    job_id: int,
+   277	    reviewer_seat: str,
+   278	    verdict: str,
+   279	    severity: str | None = None,
+   280	    summary: str | None = None,
+   281	    detail: str | None = None,
+   282	    role: str = "reviewer",
+   283	    reviewed_version: str | None = None,
+   284	) -> int:
+   285	    """Record one seat's verdict.
+   286	
+   287	    role='reviewer' reads the diff and judges it.
+   288	    role='tester'   drove the app (Playwright) and judges what it observed. Two guards
+   289	                    apply: it must cite captured artifacts, and its family must differ
+   290	                    from the builder's — Playwright stops a tester fabricating what
+   291	                    happened; only a different mind stops it rationalizing it.
+   292	
+   293	    reviewed_version is WHAT the reviewer looked at. The gauntlet runner pins the
+   294	    version before handing work to a reviewer and must pass it explicitly. When
+   295	    omitted, it defaults to the job's current head_version — correct only when
+   296	    nothing moved between review and recording, which the runner must guarantee.
+   297	    A verdict whose version stops matching the job simply stops counting.
+   298	
+   299	    tier and family are snapshotted from the seat at write time, so re-tiering or
+   300	    re-pointing a seat later cannot retroactively legitimize a job.
+   301	    """
+   302	    row = seat(conn, reviewer_seat)
+   303	    if row is None:
+   304	        raise ValueError(f"unknown seat: {reviewer_seat}")
+   305	
+   306	    if reviewed_version is None:
+   307	        job_row = conn.execute(
+   308	            "SELECT head_version FROM jobs WHERE id = ?", (job_id,)
+   309	        ).fetchone()
+   310	        if job_row is not None:
+   311	            reviewed_version = job_row["head_version"]
+   312	
+   313	    cur = conn.execute(
+   314	        """
+   315	        INSERT INTO verdicts
+   316	            (job_id, reviewer_seat, reviewer_tier, role, model_family,
+   317	             verdict, severity, summary, detail, reviewed_version)
+   318	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   319	        """,
+   320	        (job_id, reviewer_seat, row["tier"], role, row["family"],
+   321	         verdict, severity, summary, detail, reviewed_version),
+   322	    )
+   323	    return int(cur.lastrowid)
+   324	
+   325	
+   326	def resolve_escalation(conn: sqlite3.Connection, verdict_id: int, verdict: str) -> None:
+   327	    """Answer a needs_human verdict so the job can proceed (§6 human review queue)."""
+   328	    if verdict not in ("pass", "fail"):
+   329	        raise ValueError("an escalation resolves to 'pass' or 'fail'")
+   330	    conn.execute("UPDATE verdicts SET verdict = ? WHERE id = ?", (verdict, verdict_id))
+   331	
+   332	
+   333	# --------------------------------------------------------------------------
+   334	# Reporting — this is what the voice layer reads back
+   335	# --------------------------------------------------------------------------
+   336	def overnight_report(conn: sqlite3.Connection, since: str = "-1 day") -> list[sqlite3.Row]:
+   337	    """Answers spec §7's 'what did the overnight run do?'"""
+   338	    return conn.execute(
+   339	        """
+   340	        SELECT * FROM job_report
+   341	         WHERE created_at >= datetime('now', ?)
+   342	         ORDER BY id
+   343	        """,
+   344	        (since,),
+   345	    ).fetchall()
+   346	
+   347	
+   348	def spend_today(conn: sqlite3.Connection, seat_id: str) -> int:
+   349	    row = conn.execute(
+   350	        "SELECT COALESCE(SUM(cost_cents), 0) AS c FROM usage WHERE seat_id = ? AND day = date('now')",
+   351	        (seat_id,),
+   352	    ).fetchone()
+   353	    return int(row["c"])
+   354	
+   355	
+   356	def over_budget(conn: sqlite3.Connection, seat_id: str) -> bool:
+   357	    """True if this seat has hit its daily cap.
+   358	
+   359	    OpenClaw has no per-agent budget of any kind, so the harness must check this
+   360	    before dispatching. Uncapped seats (daily_cap_cents IS NULL) never block.
+   361	    """
+   362	    row = seat(conn, seat_id)
+   363	    if row is None or row["daily_cap_cents"] is None:
+   364	        return False
+   365	    return spend_today(conn, seat_id) >= int(row["daily_cap_cents"])
+   366	
+   367	
+   368	@_guarded
+   369	def record_usage(
+   370	    conn: sqlite3.Connection,
+   371	    seat_id: str,
+   372	    cost_cents: int,
+   373	    job_id: int | None = None,
+   374	    input_tokens: int = 0,
+   375	    output_tokens: int = 0,
+   376	    role: str = "build",
+   377	) -> None:
+   378	    """Record spend. The DATABASE refuses an entry that would breach the daily cap.
+   379	
+   380	    This used to be a Python check before dispatch — which Sol correctly called a
+   381	    race (two dispatches both pass the check before either records spend) and easily
+   382	    bypassed by any direct write. The ledger itself now says no.
+   383	    """
+   384	    conn.execute(
+   385	        """
+   386	        INSERT INTO usage (seat_id, job_id, role, input_tokens, output_tokens, cost_cents)
+   387	        VALUES (?, ?, ?, ?, ?, ?)
+   388	        """,
+   389	        (seat_id, job_id, role, input_tokens, output_tokens, cost_cents),
+   390	    )
+   391	
+   392	
+   393	def can_build(conn: sqlite3.Connection, seat_id: str) -> bool:
+   394	    """Has this seat used up its BUILDING budget? (It may still be able to review.)"""
+   395	    row = seat(conn, seat_id)
+   396	    if row is None or row["build_cap_cents"] is None:
+   397	        return True
+   398	    spent = conn.execute(
+   399	        "SELECT COALESCE(SUM(cost_cents),0) c FROM usage "
+   400	        "WHERE seat_id=? AND day=date('now') AND role='build'", (seat_id,)
+   401	    ).fetchone()["c"]
+   402	    return int(spent) < int(row["build_cap_cents"])
+   403	
+   404	
+   405	# ---------------------------------------------------------------------------
+   406	# The money
+   407	# ---------------------------------------------------------------------------
+   408	def month_spend(conn: sqlite3.Connection) -> dict[str, int]:
+   409	    """What have we spent this month, and how close are we?"""
+   410	    r = conn.execute("SELECT * FROM month_spend").fetchone()
+   676	CREATE TRIGGER IF NOT EXISTS guard_panel_size_is_fixed
+   677	BEFORE UPDATE OF required_reviews ON jobs
+   678	WHEN OLD.required_reviews > 0 AND NEW.required_reviews < OLD.required_reviews
+   679	BEGIN
+   680	    SELECT RAISE(ABORT, 'guard: the panel cannot be shrunk after dispatch');
+   681	END;
+   682	
+   683	-- A verdict, once written, is a fact. It cannot be edited into a pass.
+   684	-- (Sol #2 — every verdict guard checked INSERT only, so you could rewrite the row.)
+   685	CREATE TRIGGER IF NOT EXISTS guard_verdicts_are_append_only
+   686	BEFORE UPDATE ON verdicts
+   687	WHEN OLD.verdict <> NEW.verdict
+   688	     AND NOT (OLD.verdict = 'needs_human' AND NEW.verdict IN ('pass','fail'))
+   689	BEGIN
+   690	    SELECT RAISE(ABORT, 'guard: a verdict cannot be rewritten — only an escalation may be answered');
+   691	END;
+   692	
+   693	CREATE TRIGGER IF NOT EXISTS guard_verdict_identity_is_frozen
+   694	BEFORE UPDATE ON verdicts
+   695	WHEN OLD.role <> NEW.role OR OLD.model_family <> NEW.model_family
+   696	  OR OLD.reviewer_seat <> NEW.reviewer_seat OR OLD.reviewer_tier <> NEW.reviewer_tier
+   697	BEGIN
+   698	    SELECT RAISE(ABORT, 'guard: who reviewed this cannot be rewritten after the fact');
+   699	END;
+   700	
+   701	-- ═══════════════════════════════════════════════════════════════════════════
+   702	-- THE REVIEW-TO-VERSION CHAIN (Sol build gate 3, 2026-07-20).
+   703	--
+   704	-- Sol's most dangerous flaw: "approve version A, builder changes it to B, the old
+   705	-- approval still counts — believable green checks on code nobody reviewed."
+   706	--
+   707	-- The fix is not another approval ceremony; it is arithmetic. A verdict carries the
+   708	-- version it reviewed. A job carries the version it is putting forward. Completion
+   709	-- guards only count verdicts whose versions MATCH — so moving the code voids the
+   710	-- approvals by construction, nothing needs to remember to revoke anything. And a
+   711	-- FAIL condemns the version it saw, not the job forever: fix the code, the version
+   712	-- changes, the old fail becomes history. (A fail with no recorded version blocks
+   713	-- everything — fail-closed, because it condemned we-don't-know-what.)
+   714	-- ═══════════════════════════════════════════════════════════════════════════
+   715	
+   716	-- A versioned job accepts no unversioned verdicts. (Unversioned legacy jobs keep
+   717	-- their old semantics; the gatekeeper will not push anything unversioned anyway.)
+   718	CREATE TRIGGER IF NOT EXISTS guard_verdict_must_cite_what_it_reviewed
+   719	BEFORE INSERT ON verdicts
+   720	WHEN (SELECT head_version FROM jobs WHERE id = NEW.job_id) IS NOT NULL
+   721	     AND TRIM(COALESCE(NEW.reviewed_version, '')) = ''
+   722	BEGIN
+   723	    SELECT RAISE(ABORT, 'guard: this job is versioned — a verdict must say which version it reviewed');
+   724	END;
+   725	
+   726	-- A build cannot finish without declaring WHICH code is finished.
+   727	CREATE TRIGGER IF NOT EXISTS guard_a_build_finishes_a_version
+   728	BEFORE UPDATE OF status ON jobs
+   729	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+   730	     AND NEW.kind = 'build'
+   731	     AND TRIM(COALESCE(NEW.head_version, '')) = ''
+   732	BEGIN
+   733	    SELECT RAISE(ABORT, 'guard: a build cannot finish without naming the exact version that is finished');
+   734	END;
+   735	
+   736	-- Once finished, WHAT finished is history. Rewriting head_version after done would
+   737	-- let approved-hash-A ship as hash-B while every record still looks green.
+   738	CREATE TRIGGER IF NOT EXISTS guard_finished_version_is_frozen
+   739	BEFORE UPDATE OF head_version ON jobs
+   740	WHEN OLD.status IN ('done', 'shipped') AND OLD.head_version IS NOT NEW.head_version
+   741	BEGIN
+   742	    SELECT RAISE(ABORT, 'guard: what version finished cannot be rewritten after the fact');
+   743	END;
+   744	
+   745	-- A verdict cannot be DELETED. (Sol, round 3 — verified 2026-07-14.)
+   746	--
+   747	-- "Append-only" was enforced only against UPDATE, so a failing review that couldn't be
+   748	-- EDITED into a pass could simply be DELETED — after which guard_a_failing_review_stops_it
+   749	-- (which asks "does a fail EXIST?") saw nothing and let the job complete. Confirmed with a
+   750	-- live exploit: fail deleted, then done. A verdict is a fact; facts are not retractable.
+   751	CREATE TRIGGER IF NOT EXISTS guard_verdicts_cannot_be_deleted
+   752	BEFORE DELETE ON verdicts
+   753	BEGIN
+   754	    SELECT RAISE(ABORT, 'guard: a verdict is a fact on the record — it cannot be deleted');
+   755	END;
+   756	
+   757	-- A reviewer cannot LIE about who it is. (Sol #4 — the DB took the row's word for it.)
+   758	CREATE TRIGGER IF NOT EXISTS guard_reviewer_identity_must_be_real
+   759	BEFORE INSERT ON verdicts
+   760	WHEN NEW.reviewer_tier <> (SELECT tier FROM seats WHERE id = NEW.reviewer_seat)
+   761	  OR NEW.model_family  <> (SELECT family FROM seats WHERE id = NEW.reviewer_seat)
+   762	BEGIN
+   763	    SELECT RAISE(ABORT, 'guard: a reviewer cannot misrepresent its own tier or family');
+   764	END;
+   765	
+   766	-- Build evidence can only come from the harness. (Sol #9 — the DB accepted a
+   767	-- model-captured screenshot; only the Python helper refused.)
+   768	CREATE TRIGGER IF NOT EXISTS guard_models_cannot_forge_evidence
+   769	BEFORE INSERT ON artifacts
+   770	WHEN NEW.captured_by = 'model' AND NEW.kind NOT IN ('source', 'quote')
+   771	BEGIN
+   772	    SELECT RAISE(ABORT, 'guard: a model may cite a source but may not produce build evidence');
+   773	END;
+   774	
+   775	-- ===========================================================================
+   776	-- GUARD 1 — local output never ships unreviewed (§4.3, §9)
+   777	-- Now reads the SNAPSHOT (builder_tier), not the live seat.
+   778	-- ===========================================================================
+   779	CREATE TRIGGER IF NOT EXISTS guard_local_output_needs_review
+   780	BEFORE UPDATE OF status ON jobs
+   781	WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+   782	     AND NEW.builder_tier = 'local'
+   783	BEGIN
+   784	    SELECT RAISE(ABORT, 'guard: local-built job requires a passing subscription-tier review before done')
+   785	    WHERE NOT EXISTS (
+   786	        SELECT 1 FROM verdicts v
+   787	        WHERE v.job_id = NEW.id
+   788	          AND v.reviewer_tier IN ('subscription', 'metered')
+   789	          AND v.verdict = 'pass'
+   790	          -- gate 3: a pass only counts for the version it actually reviewed
+   791	          AND v.reviewed_version IS NEW.head_version
+   792	    );
+   793	END;
+   794	
+   795	-- ===========================================================================
+   796	-- GUARD 2 — escalations must be answered, not outrun (§6)
+   797	-- ===========================================================================
+   798	CREATE TRIGGER IF NOT EXISTS guard_unresolved_escalation
+   799	BEFORE UPDATE OF status ON jobs
+   800	WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+   801	BEGIN
+   802	    SELECT RAISE(ABORT, 'guard: job has an unresolved needs_human verdict')
+   803	    WHERE EXISTS (
+   804	        SELECT 1 FROM verdicts v WHERE v.job_id = NEW.id AND v.verdict = 'needs_human'
+   805	    );
+   806	END;
+   807	
+   808	-- ===========================================================================
+   809	-- GUARD 3 — a tester's verdict must cite REAL BUILD EVIDENCE.
+   810	--
+   840	END;
+   841	
+   842	-- ===========================================================================
+   843	-- GUARD 5 — the full panel, always. DISTINCT reviewers.
+   844	--
+   845	-- ⚠️ Sol #7: "The full panel can be faked with duplicate passes." It counted ROWS.
+   846	-- One reviewer could pass the same job six times. Now it counts distinct seats.
+   847	-- ===========================================================================
+   848	CREATE TRIGGER IF NOT EXISTS guard_full_panel
+   849	BEFORE UPDATE OF status ON jobs
+   850	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+   851	BEGIN
+   852	    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+   853	    WHERE (
+   854	        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+   855	        -- the panel could be "filled" by the wrong kinds of check entirely.
+   856	        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+   857	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+   858	          -- gate 3: the panel must have reviewed THIS version, not an earlier one
+   859	          AND v.reviewed_version IS NEW.head_version
+   860	    ) < NEW.required_reviews;
+   861	END;
+   862	
+   863	-- ═══════════════════════════════════════════════════════════════════════════
+   864	-- GUARD 10 — A FAILING REVIEW STOPS THE JOB. (Sol, round 2, #5 — and this one is bad.)
+   865	--
+   866	-- My panel guard counted PASSES and never looked at FAILS. So three passes and one
+   867	-- serious failure satisfied it. A reviewer could scream that the thing was broken and
+   868	-- be outvoted by colleagues who hadn't noticed.
+   869	--
+   870	-- That is the opposite of what a gauntlet is FOR. One reviewer finding a real bug is
+   871	-- the whole point — it isn't a democracy, it's a set of independent smoke detectors.
+   872	-- Any one of them going off stops the job.
+   873	-- ═══════════════════════════════════════════════════════════════════════════
+   874	CREATE TRIGGER IF NOT EXISTS guard_a_failing_review_stops_it
+   875	BEFORE UPDATE OF status ON jobs
+   876	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+   877	BEGIN
+   878	    SELECT RAISE(ABORT, 'guard: a reviewer failed this — it does not get outvoted')
+   879	    WHERE EXISTS (
+   880	        SELECT 1 FROM verdicts v
+   881	        WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+   882	          -- gate 3: a fail condemns the VERSION it reviewed, not the job forever.
+   883	          -- A fail with no version condemned we-don't-know-what: it blocks
+   884	          -- everything. Same if the job itself is unversioned. Fail-closed.
+   885	          AND (NEW.head_version IS NULL
+   886	               OR v.reviewed_version IS NULL
+   887	               OR v.reviewed_version = NEW.head_version)
+   888	    );
+   889	END;
+   890	
+   891	-- Sol, round 2, #6: an objection raised AFTER 'done' could still be outrun, because
+   892	-- the escalation guard only fired on the transition INTO done — not on done -> shipped.
+   893	CREATE TRIGGER IF NOT EXISTS guard_late_escalation_still_blocks_shipping
+   894	BEFORE UPDATE OF status ON jobs
+   895	WHEN NEW.status = 'shipped' AND OLD.status <> 'shipped'
+   896	BEGIN
+   897	    SELECT RAISE(ABORT, 'guard: someone raised an objection — it has to be answered first')
+   898	    WHERE EXISTS (
+   899	        SELECT 1 FROM verdicts v
+   900	        WHERE v.job_id = NEW.id
+   901	          AND (v.verdict = 'needs_human'  -- an unanswered question blocks, always
+   902	               -- gate 3: a fail blocks the version it condemned (fail-closed when
+   903	               -- either side is unversioned)
+   904	               OR (v.verdict = 'fail'
+   905	                   AND (NEW.head_version IS NULL
+   906	                        OR v.reviewed_version IS NULL
+   907	                        OR v.reviewed_version = NEW.head_version)))
+   908	    );
+   909	END;
+   910	
+   911	-- Sol, round 2, #4: evidence could be an EMPTY STRING. A path of '' satisfied
+   912	-- "COALESCE(path, value) IS NOT NULL" perfectly well.
+   913	CREATE TRIGGER IF NOT EXISTS guard_evidence_cannot_be_empty
+   914	BEFORE INSERT ON artifacts
+   915	WHEN TRIM(COALESCE(NEW.path, NEW.value, '')) = ''
+   970	-- ledger itself refuses the entry that would breach the cap.
+   971	-- ===========================================================================
+   972	CREATE TRIGGER IF NOT EXISTS guard_no_negative_spend
+   973	BEFORE INSERT ON usage
+   974	WHEN NEW.cost_cents < 0
+   975	BEGIN
+   976	    SELECT RAISE(ABORT, 'guard: spend cannot be negative — no unwinding the meter');
+   977	END;
+   978	
+   979	CREATE TRIGGER IF NOT EXISTS guard_daily_cap_is_hard
+   980	BEFORE INSERT ON usage
+   981	BEGIN
+   982	    SELECT RAISE(ABORT, 'guard: this seat is over its daily cap')
+   983	    WHERE (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+   984	      AND (
+   985	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+   986	         WHERE seat_id = NEW.seat_id AND day = date('now')
+   987	      ) + NEW.cost_cents
+   988	      > (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id);
+   989	END;
+   990	
+   991	-- Ration the EXPENSIVE work separately. A seat can be generous on reviewing and
+   992	-- stingy on building — which is exactly how you want a metered seat to behave when
+   993	-- you already pay flat-rate for two better builders.
+   994	CREATE TRIGGER IF NOT EXISTS guard_build_cap_is_hard
+   995	BEFORE INSERT ON usage
+   996	WHEN NEW.role = 'build'
+   997	BEGIN
+   998	    SELECT RAISE(ABORT, 'guard: this seat has used up its building budget for today — it can still review')
+   999	    WHERE (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+  1000	      AND (
+  1001	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+  1002	         WHERE seat_id = NEW.seat_id AND day = date('now') AND role = 'build'
+  1003	      ) + NEW.cost_cents
+  1004	      > (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id);
+  1005	END;
+  1006	
+  1007	CREATE TRIGGER IF NOT EXISTS guard_review_cap_is_hard
+  1008	BEFORE INSERT ON usage
+  1009	WHEN NEW.role IN ('review', 'test')
+  1010	BEGIN
+  1011	    SELECT RAISE(ABORT, 'guard: this seat is over its reviewing budget for today')
+  1012	    WHERE (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+  1013	      AND (
+  1014	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+  1015	         WHERE seat_id = NEW.seat_id AND day = date('now') AND role IN ('review','test')
+  1016	      ) + NEW.cost_cents
+  1017	      > (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id);
+  1018	END;
+  1019	
+  1020	-- Keep updated_at honest.
+  1021	CREATE TRIGGER IF NOT EXISTS jobs_touch_updated_at
+  1022	AFTER UPDATE ON jobs
+    85	// expensive to reverse. Everything else runs light or standard. See tiering.py — the
+    86	// escalation is a RULE, not a vibe, and every job records which tier it got AND WHY.
+    87	// ═══════════════════════════════════════════════════════════════════════════
+    88	
+    89	[seats.brain]
+    90	provider = "codex"
+    91	model = "gpt-5.6-sol"
+    92	tier = "subscription"
+    93	
+    94	// Owner: "Sol needs to be the brain, but prolly doesn't need to be ultra for most
+    95	// convos. Maybe if it's managing a major spec and deciding builds and such, but
+    96	// generally lower effort in convo."
+    97	//
+    98	// Measured, and he's right: Sol at FULL effort took over FIVE MINUTES on a real
+    99	// question. In a conversation that isn't thorough — it's a hang. Claude at ~8s gave a
+   100	// genuinely better answer. So Sol's heavy tier is reserved for what it's actually for:
+   101	// specs, architecture, and pushback.
+   102	model_light    = "gpt-5.6-luna"             // quick takes
+   103	model_standard = "gpt-5.6-terra"            // most work
+   104	model_heavy    = "gpt-5.6-sol"              // specs, decisions, pushback. EARNED.
+   105	effort_light    = "low"
+   106	effort_standard = "medium"
+   107	effort_heavy    = "high"
+   108	
+   109	mode = "ultra"                              // ONLY at heavy. Coordinated subagents.
+   110	max_threads = 6                             // spec said 8; the real default is 6
+   111	max_depth = 1
+   112	notes = "OAuth is TOLERATED, not sanctioned. Most likely seat to break. Keep API-key swap ready."
+   113	
+   114	// ---------------------------------------------------------------------------
+   115	// WORKHORSE — volume autonomous coding. Migrations, refactors, test backfills.
+   116	//
+   117	// OWNER DECISION (2026-07-13): OpenAI, not Claude. Rationale below — and note the
+   118	// reason is NOT the one in the spec.
+   119	//
+   120	// ⚠️ THE SPEC'S REASON IS WRONG. It says Claude headless draws from a metered credit
+   121	// pool. It does NOT — Anthropic announced that, then PAUSED it before it took effect.
+   122	// `claude -p` runs on normal subscription limits TODAY. Claude-as-workhorse would not
+   123	// cost extra dollars.
+   124	//
+   125	// ✅ THE REAL REASON, which nobody had written down: RATE LIMITS, not cost. Running a
+   126	// workhorse hard (unattended overnight builds, migrations, backfills) burns Max plan
+   127	// usage caps — and it's the SAME bucket as interactive use. The failure mode is nasty:
+   128	// your autonomous builder silently eats the model you were going to review its work
+   129	// with. So Claude stays OUT of the high-volume seat, and stays IN as low-volume
+   130	// escalation (see [seats.reviewer]).
+   131	//
+   132	// GPT-5.6-sol is not a consolation prize here: 88.8% Terminal-Bench 2.1 (91.9% Ultra),
+   133	// SOTA for agentic coding. Flat subscription, predictable, bounded.
+   134	//
+   135	// For the record, since it may matter on the Studio later:
+   136	//     Claude Opus  87.6% SWE-bench Verified   (best autonomous coder available)
+   137	//     GPT-5.6-sol  64.6% SWE-bench Pro / 88.8% Terminal-Bench  (top-tier agentic)
+   138	//     Grok Build   70.8% SWE-bench Verified   (weak model, great harness)
+   139	// ---------------------------------------------------------------------------
+   140	[seats.workhorse]
+   141	provider = "codex"
+   142	model = "gpt-5.6-sol"
+   143	tier = "subscription"
+   144	worktree_isolated = true
+   145	
+   146	model_light    = "gpt-5.6-luna"             // scaffolding, boilerplate, first drafts
+   147	model_standard = "gpt-5.6-terra"            // the bulk of real building
+   148	model_heavy    = "gpt-5.6-sol"              // auth, money, data, or it failed twice
+   149	notes = "OpenAI sub. Shares auth with [seats.brain] — see CONCENTRATION RISK below."
+   150	
+   151	// The Claude builders — Riggs (backend), Finn (frontend), Nova (glue). Same lanes,
+   152	// same memory, tiered the same way. Opus is the best coder we own (87.6% SWE-bench);
+   153	// it is also the one most likely to burn a weekly cap, so it is EARNED like the rest.
+   154	[seats.riggs]
+   155	provider = "claude-cli"
+   156	model = "claude-opus-4-8"
+   157	family = "claude"
+   158	tier = "subscription"
+   159	model_light    = "claude-haiku-4-5"
+   160	model_standard = "claude-sonnet-5"
+   161	model_heavy    = "claude-opus-4-8"          // the best coder we have. EARNED.
+   162	notes = "Backend lane. Memory belongs to the LANE, not the model — swap the model, keep the scars."
+   163	
+   164	// ---------------------------------------------------------------------------
+   165	// GROK — builder + cross-family reviewer.
+   166	//
+   167	// ⚠️ TWO EARLIER CLAIMS OF MINE WERE WRONG. Correcting both, on the record:
+   168	//
+   169	//   1. "Grok Build is weak (70.8% SWE-bench)." FALSE. That was grok-build-0.1, a
+   170	//      legacy option nobody runs. Grok Build now DEFAULTS to grok-4.5. On a single
+   171	//      consistent agentic-coding index: Grok 4.5 = 76, Codex = 76, Claude Code = 78.
+   172	//      It is not the weak sibling. It matches Codex at ~half the cost/task ($2.49).
+   173	//
+   174	//   2. "The 403 is a Heavy-only tier gate." FALSE. It's an UNDISCLOSED MONTHLY QUOTA
+   175	//      on standard SuperGrok. The 403 body lies — it says "you do not have an active
+   200	//     BUILD on the seats you already pay for.
+   201	//     REVIEW on the metered one, because reviewing is cheap.
+   202	//
+   203	// Which lands Grok exactly where it's most valuable anyway. Its worth was never being
+   204	// the strongest coder — it isn't. It's being a DIFFERENT MIND that catches what Claude
+   205	// and GPT both miss. And that job costs pennies.
+   206	[seats.grok]
+   207	provider = "xai"
+   208	model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
+   209	tier = "subscription"                       // $30 SuperGrok, primary
+   210	family = "grok"
+   211	worktree_isolated = true
+   212	daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
+   213	build_cap_cents  = 25                       // ~25c/day of building — a RATION
+   214	review_cap_cents = 75                       // reviewing is cheap; let it look at everything
+   215	notes = "Reviews freely. Builds sparingly. Sub primary, API fallback."
+   216	
+   217	  // Failover target. Same model, metered. This is what makes the hidden quota a
+   218	  // speed bump instead of a dead stop.
+   219	  [seats.grok.fallback]
+   220	  provider = "xai-api"
+   221	  auth = "XAI_API_KEY"
+   222	  tier = "metered"
+   223	  notes = "Engages when the sub 403s. Capped by daily_cap_cents above."
+   224	
+   225	// ---------------------------------------------------------------------------
+   226	// FREE GRINDER — the local junior. Overnight scaffolding, boilerplate, first drafts.
+   227	// Sized for 16 GB. A junior dev, and treated as one: guard 1 in schema.sql makes it
+   228	// STRUCTURALLY IMPOSSIBLE for its output to reach `done` unreviewed.
+   229	// ---------------------------------------------------------------------------
+   230	[seats.grinder_local]
+   231	provider = "ollama"
+   232	model = "qwen2.5-coder:7b"
+   233	tier = "local"
+   234	endpoint = "http://127.0.0.1:11434"
+   235	notes = "Bump to qwen3-coder:30b on the Studio (§8 phase 5). One line."
+   236	
+   237	// ---------------------------------------------------------------------------
+   238	// REVIEWER — escalation only. Highest judgment: architecture calls, contested
+   239	// verdicts, the bug the local model looped on three times.
+   240	//
+   241	// Claude stays in the hierarchy HERE, deliberately. At escalation volume (a handful
+   242	// of calls a day) it will not dent the Max rate limits that disqualify it from the
+   243	// workhorse seat — and it is already paid for.
+   244	//
+   245	// It earns its seat twice over: it is the strongest model on the board (87.6%
+   246	// SWE-bench Verified), AND it is a FOURTH model family in the gauntlet. §6 exists
+   247	// because different models miss different bugs. Claude catching what GPT and Grok
+   248	// both missed is the entire point of keeping it.
+   249	//
+   250	// Per spec §4.4 this seat is optional and droppable — the system must run without it.
+   251	// Never at the mouth: claude-cli spawns a subprocess per call (3-5s).
+   252	// ---------------------------------------------------------------------------
+   253	[seats.reviewer]
+   254	provider = "claude-cli"                     // sanctioned path; subscription OAuth is NOT
+   255	model = "claude-opus-4-8"
+   256	tier = "subscription"                       // NOT credits — the pool was paused, never shipped
+   257	optional = true
+   258	max_calls_per_day = 25                      // keeps escalation from eating interactive headroom
+   259	
+   260	// Owner: "Reviewers prolly need to be opus and one model down for ChatGPT, unless we
+   261	// say to go high review or we have a good trigger to do higher reviews."
+   262	//
+   263	// THE RULE: A REVIEWER IS NEVER WEAKER THAN THE BUILDER. A junior checking a senior's
+   264	// work is theatre — it produces a green tick and no safety. So review tier FLOORS at
+   265	// whatever tier built the thing. And reviews are cheap anyway (read-heavy, ~1/10th the
+   266	// tokens of a build), so generosity here costs far less than generosity on the build.
+   267	model_standard = "claude-sonnet-5"          // ordinary reviews
+   268	model_heavy    = "claude-opus-4-8"          // dangerous areas, heavy builds, or you asked
+   269	notes = "Low-volume escalation. Strongest model + 4th model family. Droppable by design."
+   270	
+   271	// ===========================================================================
+   272	// ⚠️ CONCENTRATION RISK — read before changing anything above
+   273	//
+   274	// [seats.brain] and [seats.workhorse] BOTH run on the Codex OAuth path. That path is
+   275	// TOLERATED, NOT SANCTIONED: no OpenAI doc blesses third-party OAuth, and their ToS
+   330	
+   331	// Spoken replies get truncated to this. The full text is always in the log.
+   332	max_spoken_seconds = 12
+   333	
+   334	// ---------------------------------------------------------------------------
+   335	// GAUNTLET (§6) — reviewers run in PARALLEL against one frozen bundle.
+   336	// The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE
+   337	// rather than merely asserted. Different models miss different bugs.
+   338	//
+   339	// Four families available: gpt (brain/workhorse), claude (reviewer),
+   340	// grok (grinder_paid), qwen (grinder_local).
+   341	// ---------------------------------------------------------------------------
+   342	[gauntlet]
+   343	reviewers = ["brain", "grinder_paid", "grinder_local"]
+   344	min_model_families = 2                      // §6 floor; we can reach 4
+   345	escalate_to = "reviewer"                    // contested verdicts → Claude...
+   346	escalate_to_human_on = ["needs_human"]      // ...or Neill's queue
+     1	# Task #10 — Make the full review gauntlet run (parallel panel)
+     2	
+     3	**Status:** spec, pre-build. Design-gate with Sol before writing code.
+     4	**Owner ask:** "Make the full review panel run (right now it's one reviewer)."
+     5	
+     6	## Where it is now (grounded in the code)
+     7	
+     8	- `harness/dispatch.py::run_gauntlet(conn, job_id, cfg)` returns a list of reviewer
+     9	  **names** (skipping over-budget ones) and **launches nobody, records no verdict**.
+    10	- The executor already has a *working single-reviewer* path:
+    11	  `harness/executor.py::_run_one_review(...)` → resolves the seat, picks a reviewer fn
+    12	  from `_REVIEWERS` (keyed by provider), runs it, and calls
+    13	  `harness/db/jobs.py::record_verdict(...)` bound to the reviewed version, emitting events.
+    14	- Config — `harness/config/seats.toml [gauntlet]`:
+    15	  `reviewers = ["brain", "grinder_paid", "grinder_local"]`, `min_model_families = 2`,
+    16	  `escalate_to = "reviewer"`.
+    17	- `record_verdict` snapshots the reviewing seat's **family** and pins `reviewed_version`.
+    18	- The schema trigger already refuses to ship a job without a passing higher-tier
+    19	  **cross-family** verdict on **this** version. The panel's job is to *produce* those
+    20	  verdicts across ≥2 families — not to re-implement the guard.
+    21	
+    22	## What to build
+    23	
+    24	1. **Parallel fan-out.** `run_gauntlet` runs every configured reviewer seat concurrently
+    25	   (threads, like `start_in_background`) against **one frozen bundle** — the same
+    26	   `head_version` + built code snapshot handed to every reviewer, so no two verdicts bind
+    27	   to different versions.
+    28	2. **Per reviewer:** skip-if-over-budget stays, but **log the skip** (no silent caps);
+    29	   reserve budget **before** the provider call; run via the shared reviewer path; record a
+    30	   verdict bound to the frozen `reviewed_version`.
+    31	3. **Panel decision:**
+    32	   - Count **families that actually produced a verdict**. If `< min_model_families`, the
+    33	     job **cannot be certified** — it stays parked. Never count a family that didn't run.
+    34	   - Contested (some pass, some fail) → escalate to the `escalate_to` seat for a tiebreak.
+    35	4. **Return structured result** (seats run, families covered, verdicts, escalation), not
+    36	   names.
+    37	
+    38	## Risks to pressure-test (for Sol)
+    39	
+    40	- **Frozen bundle:** guarantee every reviewer sees the identical version; nothing mutates
+    41	  mid-panel.
+    42	- **Budget reservation race:** two reviewers reserving concurrently must not both pass a
+    43	  cap — reserve atomically before the call (ties to the #11 gatekeeper principle).
+    44	- **Family-floor honesty:** over-budget/errored reviewers shrink family coverage; a panel
+    45	  that can't reach 2 families must **fail closed** (parked), not ship. Don't fake a family.
+    46	- **SQLite + threads:** each thread needs its own connection; connections aren't shareable.
+    47	- **Do not route around the DB guard.** The trigger is the boundary; the panel feeds it.
+    48	
+    49	## Out of scope
+    50	
+    51	- The metered reviewers (grok/gpt seats) need the leaked keys rotated first — build and
+    52	  test with the Claude-CLI reviewers; wire the metered seats behind the rotation.
+    53	- The #11 gatekeeper (sole holder of merge/deploy/spend) is a separate task; #10 only
+    54	  produces verdicts, it does not grant irreversible powers.
+
+codex
+The core contradictions are confirmed. I’m doing one short pass for less-obvious bypasses: version freezing, duplicate verdicts, lifecycle transitions, and whether configuration can even load the claimed families.
+exec
+/bin/zsh -lc "nl -ba harness/config/seats.toml | sed -n '1,115p;330,350p'; nl -ba harness/db/jobs.py | sed -n '110,215p'; nl -ba harness/db/schema.sql | sed -n '640,705p;775,890p'; rg -n \"run_gauntlet\\(|run_job\\(|dispatch_local\\(|reviewer_seat=|required_reviews|min_model_families|record_usage\\(\" harness --glob '*.py' --glob '*.sql' --glob '*.toml'; rg -n \"UNIQUE.*verdict|verdicts.*UNIQUE|head_version|set_head_version\" harness/db/schema.sql harness/db/jobs.py harness/tests" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+     1	// Chief Command v2 — seat definitions (spec §4)
+     2	//
+     3	// Providers sit behind NAMED ROLES so any of them can be swapped without touching
+     4	// orchestration logic. Nothing else in the harness may reference a provider by name —
+     5	// only by seat id. Vendor policy drift is risk #1 on this project (§9).
+     6	//
+     7	// Hardware (Phase 0 RAM check, §2): M2 Pro, 16 GB. BELOW the spec's 36 GB threshold,
+     8	// so the free grinder is a 7B coder, not the hoped-for 30B.
+     9	//
+    10	// ===========================================================================
+    11	// THE ORGANIZING PRINCIPLE
+    12	//
+    13	// Every seat answers ONE of two questions: "how fast does it talk?" or "how well
+    14	// does it think?" Nothing is good at both, because thinking well MEANS taking time.
+    15	// So we don't fight the tension — we seat around it:
+    16	//
+    17	//   MOUTH   fast, dumb, never blocks. Dispatches and narrates.
+    18	//   BRAIN   slow, deep. A dispatch target you are never waiting on.
+    19	//   WORKHORSE  the best autonomous coder we can buy. Volume + quality.
+    20	//   GRINDERS   cheap parallel attempts. Output NEVER ships unreviewed (DB-enforced).
+    21	//   REVIEWER   escalation, highest judgment. Optional and droppable.
+    22	// ===========================================================================
+    23	
+    24	// ---------------------------------------------------------------------------
+    25	// MOUTH — the Talker. What Neill actually talks to.
+    26	//
+    27	// Speech-to-speech: audio in, audio out, ONE model, native tool calling. This is
+    28	// what deletes the Whisper + Kokoro + Pipecat-plumbing stack that killed v1.
+    29	//
+    30	// DECISION DEFERRED ON PURPOSE. Both candidates are GA, sub-second, and speak the
+    31	// SAME wire protocol (xAI is OpenAI-Realtime-compatible — you change the base URL).
+    32	// So: build against the OpenAI Realtime event schema, keep base_url in config, and
+    33	// the other becomes a ONE-LINE swap. Do not marry either one.
+    34	//
+    35	// Price is a WASH — do not choose on it:
+    36	//   grok-voice-think-fast-1.0  $3.00/hr flat  (~$0.05/min)
+    37	//   gpt-realtime-2.1-mini      ~$0.04/min real-world once prompt caching kicks in
+    38	//                              (and it will — a voice head resends the same system
+    39	//                              prompt + tool defs every single turn)
+    40	// The "Grok is 6x cheaper" claim compares against the FLAGSHIP gpt-realtime, not mini.
+    41	//
+    42	// Choose on tool-calling reliability instead. Grok wins on native MCP + session
+    43	// resumption; OpenAI wins on configurable reasoning effort + a longer tool-calling
+    44	// track record. Settle it with Spike C (bake-off), not with a blog post.
+    45	// ---------------------------------------------------------------------------
+    46	[seats.mouth]
+    47	provider = "xai-realtime"
+    48	model = "grok-voice-think-fast-1.0"
+    49	base_url = "wss://api.x.ai/v1/realtime"     // swap to OpenAI's and it still works
+    50	family = "grok"
+    51	tier = "metered"
+    52	turn_detection = "semantic_vad"             // NOT push-to-talk. Owner override.
+    53	eagerness = "low"                           // a driver pauses mid-sentence to merge
+    54	interrupt_response = true                   // barge-in
+    55	
+    56	// VOICE HAS ITS OWN BUDGET, separate from Grok-the-builder. Owner: "we need to do
+    57	// more than $30 cap. that was for when we go over with grok stuff."
+    58	// $3/hr, so 300c/day = ~1 hour of talking a day = ~$90/mo worst case.
+    59	// Start here and tune once we see real usage — the meter only runs while you talk.
+    60	daily_cap_cents = 300
+    61	notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok]."
+    62	
+    63	// ---------------------------------------------------------------------------
+    64	// BRAIN — deep reasoning, planning, decomposition, judging the gauntlet.
+    65	// SLOW BY DESIGN and that is fine: it is a dispatch target, never a conversation
+    66	// partner. Its ~13s time-to-first-token is invisible because you are never waiting.
+    67	//
+    68	// Ultra mode is literally an orchestrator: it decomposes the task and spawns
+    69	// parallel subagents trained to coordinate MID-task rather than merge at the end.
+    70	// That is the reviewer-gauntlet shape (§6), native.
+    71	//   Terminal-Bench 2.1: 88.8% single-agent / 91.9% Ultra — SOTA for agentic work.
+    72	// ---------------------------------------------------------------------------
+    73	// ═══════════════════════════════════════════════════════════════════════════
+    74	// MODEL TIERS — nothing gets the top model by default. Owner (2026-07-14):
+    75	//     "If we do highest model every time for every build, on autonomous work, Claude
+    76	//      and ChatGPT are gonna bottom out."
+    77	//
+    78	// THE KEY FACT: the binding constraint on autonomous work is RATE LIMITS, not money.
+    79	// Claude and OpenAI are both flat-rate — you already paid. But you CANNOT BUY YOUR WAY
+    80	// OUT OF A WEEKLY CAP. Every top-tier call spent on boilerplate is one you don't have
+    81	// left for the thing that actually needed it.
+    82	//
+    83	// So the top tier is EARNED: you ask for it, the work is dangerous (auth/money/data),
+    84	// it already failed twice, a reviewer flagged p0/p1, or it's a decision that's
+    85	// expensive to reverse. Everything else runs light or standard. See tiering.py — the
+    86	// escalation is a RULE, not a vibe, and every job records which tier it got AND WHY.
+    87	// ═══════════════════════════════════════════════════════════════════════════
+    88	
+    89	[seats.brain]
+    90	provider = "codex"
+    91	model = "gpt-5.6-sol"
+    92	tier = "subscription"
+    93	
+    94	// Owner: "Sol needs to be the brain, but prolly doesn't need to be ultra for most
+    95	// convos. Maybe if it's managing a major spec and deciding builds and such, but
+    96	// generally lower effort in convo."
+    97	//
+    98	// Measured, and he's right: Sol at FULL effort took over FIVE MINUTES on a real
+    99	// question. In a conversation that isn't thorough — it's a hang. Claude at ~8s gave a
+   100	// genuinely better answer. So Sol's heavy tier is reserved for what it's actually for:
+   101	// specs, architecture, and pushback.
+   102	model_light    = "gpt-5.6-luna"             // quick takes
+   103	model_standard = "gpt-5.6-terra"            // most work
+   104	model_heavy    = "gpt-5.6-sol"              // specs, decisions, pushback. EARNED.
+   105	effort_light    = "low"
+   106	effort_standard = "medium"
+   107	effort_heavy    = "high"
+   108	
+   109	mode = "ultra"                              // ONLY at heavy. Coordinated subagents.
+   110	max_threads = 6                             // spec said 8; the real default is 6
+   111	max_depth = 1
+   112	notes = "OAuth is TOLERATED, not sanctioned. Most likely seat to break. Keep API-key swap ready."
+   113	
+   114	// ---------------------------------------------------------------------------
+   115	// WORKHORSE — volume autonomous coding. Migrations, refactors, test backfills.
+   330	
+   331	// Spoken replies get truncated to this. The full text is always in the log.
+   332	max_spoken_seconds = 12
+   333	
+   334	// ---------------------------------------------------------------------------
+   335	// GAUNTLET (§6) — reviewers run in PARALLEL against one frozen bundle.
+   336	// The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE
+   337	// rather than merely asserted. Different models miss different bugs.
+   338	//
+   339	// Four families available: gpt (brain/workhorse), claude (reviewer),
+   340	// grok (grinder_paid), qwen (grinder_local).
+   341	// ---------------------------------------------------------------------------
+   342	[gauntlet]
+   343	reviewers = ["brain", "grinder_paid", "grinder_local"]
+   344	min_model_families = 2                      // §6 floor; we can reach 4
+   345	escalate_to = "reviewer"                    // contested verdicts → Claude...
+   346	escalate_to_human_on = ["needs_human"]      // ...or Neill's queue
+   110	def create_job(
+   111	    conn: sqlite3.Connection,
+   112	    request: str,
+   113	    builder_seat: str,
+   114	    origin: str = "text",
+   115	    parent_job_id: Optional[int] = None,
+   116	    task_name: Optional[str] = None,
+   117	) -> int:
+   118	    """task_name is the 2-4 word handle the voice will use ("the rate limiter").
+   119	
+   120	    The mouth coins it at dispatch. Without one the voice falls back to truncating
+   121	    the request, which reads back the owner's own paragraph at him — exactly what a
+   122	    colleague would never do.
+   123	    """
+   124	    row = seat(conn, builder_seat)
+   125	    if row is None:
+   126	        raise ValueError(f"unknown builder seat: {builder_seat}")
+   127	
+   128	    # Snapshot who built this, AT BUILD TIME. Sol's cross-family review found that
+   129	    # reading the builder's tier live meant re-tiering a local seat retroactively
+   130	    # legitimized its old unreviewed work. What a seat is today cannot change what
+   131	    # it was. The schema then freezes these columns.
+   132	    cur = conn.execute(
+   133	        """
+   134	        INSERT INTO jobs (request, builder_seat, builder_tier, builder_family,
+   135	                          origin, parent_job_id, task_name)
+   136	        VALUES (?, ?, ?, ?, ?, ?, ?)
+   137	        """,
+   138	        (request, builder_seat, row["tier"], row["family"],
+   139	         origin, parent_job_id, task_name),
+   140	    )
+   141	    return int(cur.lastrowid)
+   142	
+   143	
+   144	def claim_next_job(conn: sqlite3.Connection, builder_seat: str) -> sqlite3.Row | None:
+   145	    """Atomically claim the oldest queued job for this seat.
+   146	
+   147	    Uses UPDATE...RETURNING against a subquery so two workers racing for the same
+   148	    row cannot both win — SQLite serializes the write and only one claim lands.
+   149	    Cribbed from clu's approach; it removes the need for any external lock.
+   150	    """
+   151	    row = conn.execute(
+   152	        """
+   153	        UPDATE jobs
+   154	           SET status = 'in_progress',
+   155	               started_at = datetime('now'),
+   156	               attempts = attempts + 1
+   157	         WHERE id = (
+   158	             SELECT id FROM jobs
+   159	              WHERE status = 'todo' AND builder_seat = ?
+   160	              ORDER BY id
+   161	              LIMIT 1
+   162	         )
+   163	        RETURNING *
+   164	        """,
+   165	        (builder_seat,),
+   166	    ).fetchone()
+   167	    return row
+   168	
+   169	
+   170	def attach_run(
+   171	    conn: sqlite3.Connection,
+   172	    job_id: int,
+   173	    run_id: str,
+   174	    session_key: str | None = None,
+   175	    branch: str | None = None,
+   176	    worktree: str | None = None,
+   177	) -> None:
+   178	    """Record the OpenClaw spawn that is actually doing the work."""
+   179	    conn.execute(
+   180	        """
+   181	        UPDATE jobs SET run_id = ?, session_key = ?, branch = ?, worktree = ?
+   182	         WHERE id = ?
+   183	        """,
+   184	        (run_id, session_key, branch, worktree, job_id),
+   185	    )
+   186	
+   187	
+   188	@_guarded
+   189	def set_head_version(conn: sqlite3.Connection, job_id: int, version: str) -> None:
+   190	    """Record the exact version (git commit id) the builder is putting forward.
+   191	
+   192	    This is the pivot of the review-to-version chain: every completion guard only
+   193	    counts verdicts whose reviewed_version matches this. Calling it again after the
+   194	    builder iterates voids all earlier approvals by construction — nothing needs to
+   195	    remember to revoke them. Frozen by the schema once the job is done.
+   196	    """
+   197	    if not version or not version.strip():
+   198	        raise ValueError("a version must actually name a version")
+   199	    conn.execute(
+   200	        "UPDATE jobs SET head_version = ? WHERE id = ?", (version.strip(), job_id)
+   201	    )
+   202	
+   203	
+   204	@_guarded
+   205	def set_status(
+   206	    conn: sqlite3.Connection,
+   207	    job_id: int,
+   208	    status: str,
+   209	    result: str | None = None,
+   210	    error: str | None = None,
+   211	    spoken_summary: str | None = None,
+   212	) -> None:
+   213	    """Move a job's status.
+   214	
+   215	    Moving to 'done' runs the schema guards. If the builder was a local seat and no
+   640	-- A job may never be BORN finished. (Sol, round 1, #1 — the worst one.)
+   641	CREATE TRIGGER IF NOT EXISTS guard_no_job_is_born_done
+   642	BEFORE INSERT ON jobs
+   643	WHEN NEW.status IN ('done', 'shipped')
+   644	BEGIN
+   645	    SELECT RAISE(ABORT, 'guard: a job cannot be created already finished — it must earn it');
+   646	END;
+   647	
+   648	-- A job may not LIE ABOUT WHO BUILT IT AT BIRTH. (Sol, round 2, #1 — critical.)
+   649	--
+   650	-- I froze the builder's identity AFTER creation, so it couldn't be rewritten. But I
+   651	-- never checked it AT creation. Sol: "A direct database write can label local work as
+   652	-- subscription work, then complete it without the required higher-quality review. The
+   653	-- identity is frozen only after creation; the initial lie is never caught."
+   654	--
+   655	-- Freezing a lie just makes it a permanent lie.
+   656	CREATE TRIGGER IF NOT EXISTS guard_builder_identity_must_be_real
+   657	BEFORE INSERT ON jobs
+   658	WHEN NEW.builder_tier   <> (SELECT tier   FROM seats WHERE id = NEW.builder_seat)
+   659	  OR NEW.builder_family <> (SELECT family FROM seats WHERE id = NEW.builder_seat)
+   660	BEGIN
+   661	    SELECT RAISE(ABORT, 'guard: a job cannot misrepresent who built it');
+   662	END;
+   663	
+   664	-- The builder's tier/family are snapshotted at creation and are then HISTORY.
+   665	-- (Sol #5, #6 — re-tiering a seat rewrote the past.)
+   666	CREATE TRIGGER IF NOT EXISTS guard_builder_identity_is_frozen
+   667	BEFORE UPDATE ON jobs
+   668	WHEN OLD.builder_seat <> NEW.builder_seat
+   669	  OR OLD.builder_tier <> NEW.builder_tier
+   670	  OR OLD.builder_family <> NEW.builder_family
+   671	BEGIN
+   672	    SELECT RAISE(ABORT, 'guard: who built this cannot be rewritten after the fact');
+   673	END;
+   674	
+   675	-- The panel size is fixed at dispatch. (Sol #7 — it could be set to zero later.)
+   676	CREATE TRIGGER IF NOT EXISTS guard_panel_size_is_fixed
+   677	BEFORE UPDATE OF required_reviews ON jobs
+   678	WHEN OLD.required_reviews > 0 AND NEW.required_reviews < OLD.required_reviews
+   679	BEGIN
+   680	    SELECT RAISE(ABORT, 'guard: the panel cannot be shrunk after dispatch');
+   681	END;
+   682	
+   683	-- A verdict, once written, is a fact. It cannot be edited into a pass.
+   684	-- (Sol #2 — every verdict guard checked INSERT only, so you could rewrite the row.)
+   685	CREATE TRIGGER IF NOT EXISTS guard_verdicts_are_append_only
+   686	BEFORE UPDATE ON verdicts
+   687	WHEN OLD.verdict <> NEW.verdict
+   688	     AND NOT (OLD.verdict = 'needs_human' AND NEW.verdict IN ('pass','fail'))
+   689	BEGIN
+   690	    SELECT RAISE(ABORT, 'guard: a verdict cannot be rewritten — only an escalation may be answered');
+   691	END;
+   692	
+   693	CREATE TRIGGER IF NOT EXISTS guard_verdict_identity_is_frozen
+   694	BEFORE UPDATE ON verdicts
+   695	WHEN OLD.role <> NEW.role OR OLD.model_family <> NEW.model_family
+   696	  OR OLD.reviewer_seat <> NEW.reviewer_seat OR OLD.reviewer_tier <> NEW.reviewer_tier
+   697	BEGIN
+   698	    SELECT RAISE(ABORT, 'guard: who reviewed this cannot be rewritten after the fact');
+   699	END;
+   700	
+   701	-- ═══════════════════════════════════════════════════════════════════════════
+   702	-- THE REVIEW-TO-VERSION CHAIN (Sol build gate 3, 2026-07-20).
+   703	--
+   704	-- Sol's most dangerous flaw: "approve version A, builder changes it to B, the old
+   705	-- approval still counts — believable green checks on code nobody reviewed."
+   775	-- ===========================================================================
+   776	-- GUARD 1 — local output never ships unreviewed (§4.3, §9)
+   777	-- Now reads the SNAPSHOT (builder_tier), not the live seat.
+   778	-- ===========================================================================
+   779	CREATE TRIGGER IF NOT EXISTS guard_local_output_needs_review
+   780	BEFORE UPDATE OF status ON jobs
+   781	WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+   782	     AND NEW.builder_tier = 'local'
+   783	BEGIN
+   784	    SELECT RAISE(ABORT, 'guard: local-built job requires a passing subscription-tier review before done')
+   785	    WHERE NOT EXISTS (
+   786	        SELECT 1 FROM verdicts v
+   787	        WHERE v.job_id = NEW.id
+   788	          AND v.reviewer_tier IN ('subscription', 'metered')
+   789	          AND v.verdict = 'pass'
+   790	          -- gate 3: a pass only counts for the version it actually reviewed
+   791	          AND v.reviewed_version IS NEW.head_version
+   792	    );
+   793	END;
+   794	
+   795	-- ===========================================================================
+   796	-- GUARD 2 — escalations must be answered, not outrun (§6)
+   797	-- ===========================================================================
+   798	CREATE TRIGGER IF NOT EXISTS guard_unresolved_escalation
+   799	BEFORE UPDATE OF status ON jobs
+   800	WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+   801	BEGIN
+   802	    SELECT RAISE(ABORT, 'guard: job has an unresolved needs_human verdict')
+   803	    WHERE EXISTS (
+   804	        SELECT 1 FROM verdicts v WHERE v.job_id = NEW.id AND v.verdict = 'needs_human'
+   805	    );
+   806	END;
+   807	
+   808	-- ===========================================================================
+   809	-- GUARD 3 — a tester's verdict must cite REAL BUILD EVIDENCE.
+   810	--
+   811	-- ⚠️ Sol #3: "The 'no screenshot, no verdict' claim is false." My original guard
+   812	-- accepted ANY artifact — including a research source, or an empty row. So a tester
+   813	-- could "pass" a job on the strength of a URL somebody pasted. Now it must be
+   814	-- evidence the HARNESS captured by actually driving the app.
+   815	-- ===========================================================================
+   816	CREATE TRIGGER IF NOT EXISTS guard_tester_must_cite_artifacts
+   817	BEFORE INSERT ON verdicts
+   818	WHEN NEW.role = 'tester'
+   819	BEGIN
+   820	    SELECT RAISE(ABORT, 'guard: a tester verdict requires real captured evidence — no screenshot, no verdict')
+   821	    WHERE NOT EXISTS (
+   822	        SELECT 1 FROM artifacts a
+   823	        WHERE a.job_id = NEW.job_id
+   824	          AND a.kind IN ('screenshot', 'trace', 'video', 'dom_snapshot')
+   825	          AND a.captured_by IN ('harness', 'playwright')
+   826	          AND COALESCE(a.path, a.value) IS NOT NULL
+   827	    );
+   828	END;
+   829	
+   830	-- ===========================================================================
+   831	-- GUARD 4 — a model family may not test its own work.
+   832	-- Reads the snapshot, so re-pointing a seat later changes nothing.
+   833	-- ===========================================================================
+   834	CREATE TRIGGER IF NOT EXISTS guard_no_self_family_testing
+   835	BEFORE INSERT ON verdicts
+   836	WHEN NEW.role = 'tester'
+   837	     AND NEW.model_family = (SELECT builder_family FROM jobs WHERE id = NEW.job_id)
+   838	BEGIN
+   839	    SELECT RAISE(ABORT, 'guard: a model family may not test its own build');
+   840	END;
+   841	
+   842	-- ===========================================================================
+   843	-- GUARD 5 — the full panel, always. DISTINCT reviewers.
+   844	--
+   845	-- ⚠️ Sol #7: "The full panel can be faked with duplicate passes." It counted ROWS.
+   846	-- One reviewer could pass the same job six times. Now it counts distinct seats.
+   847	-- ===========================================================================
+   848	CREATE TRIGGER IF NOT EXISTS guard_full_panel
+   849	BEFORE UPDATE OF status ON jobs
+   850	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+   851	BEGIN
+   852	    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+   853	    WHERE (
+   854	        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+   855	        -- the panel could be "filled" by the wrong kinds of check entirely.
+   856	        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+   857	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+   858	          -- gate 3: the panel must have reviewed THIS version, not an earlier one
+   859	          AND v.reviewed_version IS NEW.head_version
+   860	    ) < NEW.required_reviews;
+   861	END;
+   862	
+   863	-- ═══════════════════════════════════════════════════════════════════════════
+   864	-- GUARD 10 — A FAILING REVIEW STOPS THE JOB. (Sol, round 2, #5 — and this one is bad.)
+   865	--
+   866	-- My panel guard counted PASSES and never looked at FAILS. So three passes and one
+   867	-- serious failure satisfied it. A reviewer could scream that the thing was broken and
+   868	-- be outvoted by colleagues who hadn't noticed.
+   869	--
+   870	-- That is the opposite of what a gauntlet is FOR. One reviewer finding a real bug is
+   871	-- the whole point — it isn't a democracy, it's a set of independent smoke detectors.
+   872	-- Any one of them going off stops the job.
+   873	-- ═══════════════════════════════════════════════════════════════════════════
+   874	CREATE TRIGGER IF NOT EXISTS guard_a_failing_review_stops_it
+   875	BEFORE UPDATE OF status ON jobs
+   876	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+   877	BEGIN
+   878	    SELECT RAISE(ABORT, 'guard: a reviewer failed this — it does not get outvoted')
+   879	    WHERE EXISTS (
+   880	        SELECT 1 FROM verdicts v
+   881	        WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+   882	          -- gate 3: a fail condemns the VERSION it reviewed, not the job forever.
+   883	          -- A fail with no version condemned we-don't-know-what: it blocks
+   884	          -- everything. Same if the job itself is unversioned. Fail-closed.
+   885	          AND (NEW.head_version IS NULL
+   886	               OR v.reviewed_version IS NULL
+   887	               OR v.reviewed_version = NEW.head_version)
+   888	    );
+   889	END;
+   890	
+harness/executor.py:154:def run_job(job_id: int, *, reviewer_seat: str | None = None) -> dict[str, Any]:
+harness/db/jobs.py:369:def record_usage(
+harness/db/schema.sql:277:    required_reviews INTEGER NOT NULL DEFAULT 0,
+harness/db/schema.sql:677:BEFORE UPDATE OF required_reviews ON jobs
+harness/db/schema.sql:678:WHEN OLD.required_reviews > 0 AND NEW.required_reviews < OLD.required_reviews
+harness/db/schema.sql:850:WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+harness/db/schema.sql:860:    ) < NEW.required_reviews;
+harness/db/migrations/001_harden_live_db_2026-07-20.sql:35:WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+harness/db/migrations/001_harden_live_db_2026-07-20.sql:43:    ) < NEW.required_reviews;
+harness/server.py:218:        need = j["required_reviews"] or 0
+harness/server.py:375:        d = dispatch_mod.dispatch_local(
+harness/server.py:377:            origin="text", dispatch_key=nonce, reviewer_seat=reviewer,
+harness/server.py:378:            required_reviews=1,
+harness/render.py:233:        total = job["required_reviews"] or len(verdicts)
+harness/db/migrations/002_review_version_chain_2026-07-20.sql:68:WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+harness/db/migrations/002_review_version_chain_2026-07-20.sql:78:    ) < NEW.required_reviews;
+harness/dispatch.py:68:def dispatch_local(
+harness/dispatch.py:76:    required_reviews: int = 1,
+harness/dispatch.py:115:        "UPDATE jobs SET required_reviews = ?, tier = ?, tier_reason = ?, "
+harness/dispatch.py:117:        (required_reviews, call.tier, call.reason, dispatch_key, f"job/{job_id}", job_id),
+harness/dispatch.py:122:        executor.start_in_background(job_id, reviewer_seat=reviewer_seat)
+harness/dispatch.py:199:    conn.execute("UPDATE jobs SET required_reviews = ? WHERE id = ?", (required, job_id))
+harness/dispatch.py:236:def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> list[str]:
+harness/tests/test_sol_attacks.py:193:    conn.execute("UPDATE jobs SET required_reviews=3 WHERE id=?", (job,))
+harness/tests/test_sol_attacks.py:203:    conn.execute("UPDATE jobs SET required_reviews=3, head_version='abc123' WHERE id=?", (job,))
+harness/tests/test_sol_attacks.py:212:    conn.execute("UPDATE jobs SET required_reviews=3 WHERE id=?", (job,))
+harness/tests/test_sol_attacks.py:214:        conn.execute("UPDATE jobs SET required_reviews=0 WHERE id=?", (job,))
+harness/tests/test_sol_attacks.py:221:    record_usage(conn, "grok", cost_cents=95)
+harness/tests/test_sol_attacks.py:223:        record_usage(conn, "grok", cost_cents=10)   # 95 + 10 > 100
+harness/tests/test_sol_attacks.py:227:    record_usage(conn, "grok", cost_cents=100)
+harness/tests/test_sol_attacks.py:229:        record_usage(conn, "grok", cost_cents=-50)
+harness/tests/test_sol_attacks.py:233:    record_usage(conn, "grok", cost_cents=100)
+harness/tests/test_sol_attacks.py:270:    record_usage(conn, "grok", cost_cents=25, role="build")   # ration spent
+harness/tests/test_sol_attacks.py:273:        record_usage(conn, "grok", cost_cents=5, role="build")
+harness/tests/test_sol_attacks.py:276:    record_usage(conn, "grok", cost_cents=40, role="review")
+harness/tests/test_sol_attacks.py:277:    record_usage(conn, "grok", cost_cents=20, role="test")
+harness/tests/test_sol_attacks.py:295:        record_usage(conn, "riggs", cost_cents=0, output_tokens=5000, role="build")
+harness/tests/test_sol_attacks.py:296:        record_usage(conn, "sol", cost_cents=0, output_tokens=5000, role="build")
+harness/tests/test_sol_attacks.py:308:    record_usage(conn, "grok", cost_cents=25, role="build")
+harness/tests/test_sol_attacks.py:309:    record_usage(conn, "grok", cost_cents=70, role="review")   # 95 of 100 spent
+harness/tests/test_sol_attacks.py:313:        record_usage(conn, "grok", cost_cents=10, role="review")
+harness/config/seats.toml:344:min_model_families = 2                      // §6 floor; we can reach 4
+harness/tests/test_jobs.py:226:    min_model_families rule handles diversity there. Only the tester seat is hard-gated.
+harness/tests/test_jobs.py:430:    record_usage(conn, "orchestrator", cost_cents=900)   # $9, well under the $100 month
+harness/tests/test_jobs.py:436:    record_usage(conn, "reviewer", cost_cents=499)
+harness/tests/test_jobs.py:438:    record_usage(conn, "reviewer", cost_cents=1)  # now at 500 of 500
+harness/tests/test_dispatch_executor.py:37:    # default — these tests drive run_job() synchronously where they want it.
+harness/tests/test_dispatch_executor.py:59:    d = dispatch.dispatch_local(conn, "add a helper function", "grinder_local", start=False)
+harness/tests/test_dispatch_executor.py:62:    assert row["required_reviews"] == 1
+harness/tests/test_dispatch_executor.py:70:    first = dispatch.dispatch_local(conn, "build X", "grinder_local",
+harness/tests/test_dispatch_executor.py:72:    second = dispatch.dispatch_local(conn, "build X", "grinder_local",
+harness/tests/test_dispatch_executor.py:81:    a = dispatch.dispatch_local(conn, "build X", "grinder_local", dispatch_key="k1", start=False)
+harness/tests/test_dispatch_executor.py:82:    b = dispatch.dispatch_local(conn, "build Y", "grinder_local", dispatch_key="k2", start=False)
+harness/tests/test_dispatch_executor.py:89:        dispatch.dispatch_local(conn, "build X", "nobody", start=False)
+harness/tests/test_dispatch_executor.py:94:        dispatch.dispatch_local(conn, "build X", "off_seat", start=False)
+harness/tests/test_dispatch_executor.py:102:    d = dispatch.dispatch_local(conn, task, "grinder_local", start=False)
+harness/tests/test_dispatch_executor.py:104:    result = executor.run_job(d.job_id)          # synchronous; no reviewer wired
+harness/tests/test_review_version_binding.py:74:    conn.execute("UPDATE jobs SET required_reviews=2 WHERE id=?", (job,))
+harness/tests/test_sol_round2.py:91:    conn.execute("UPDATE jobs SET required_reviews=2 WHERE id=?", (job,))
+harness/db/jobs.py:189:def set_head_version(conn: sqlite3.Connection, job_id: int, version: str) -> None:
+harness/db/jobs.py:200:        "UPDATE jobs SET head_version = ? WHERE id = ?", (version.strip(), job_id)
+harness/db/jobs.py:295:    omitted, it defaults to the job's current head_version — correct only when
+harness/db/jobs.py:308:            "SELECT head_version FROM jobs WHERE id = ?", (job_id,)
+harness/db/jobs.py:311:            reviewed_version = job_row["head_version"]
+harness/db/schema.sql:258:    head_version  TEXT,
+harness/db/schema.sql:323:    -- whose version no longer matches the job's head_version is history, not
+harness/db/schema.sql:720:WHEN (SELECT head_version FROM jobs WHERE id = NEW.job_id) IS NOT NULL
+harness/db/schema.sql:731:     AND TRIM(COALESCE(NEW.head_version, '')) = ''
+harness/db/schema.sql:736:-- Once finished, WHAT finished is history. Rewriting head_version after done would
+harness/db/schema.sql:739:BEFORE UPDATE OF head_version ON jobs
+harness/db/schema.sql:740:WHEN OLD.status IN ('done', 'shipped') AND OLD.head_version IS NOT NEW.head_version
+harness/db/schema.sql:791:          AND v.reviewed_version IS NEW.head_version
+harness/db/schema.sql:859:          AND v.reviewed_version IS NEW.head_version
+harness/db/schema.sql:885:          AND (NEW.head_version IS NULL
+harness/db/schema.sql:887:               OR v.reviewed_version = NEW.head_version)
+harness/db/schema.sql:905:                   AND (NEW.head_version IS NULL
+harness/db/schema.sql:907:                        OR v.reviewed_version = NEW.head_version)))
+harness/db/schema.sql:933:             AND v.reviewed_version IS NEW.head_version
+harness/tests/test_sol_attacks.py:203:    conn.execute("UPDATE jobs SET required_reviews=3, head_version='abc123' WHERE id=?", (job,))
+harness/tests/test_sol_round2.py:105:    conn.execute("UPDATE jobs SET head_version='abc123' WHERE id=?", (job,))
+harness/tests/test_jobs.py:29:    set_head_version,
+harness/tests/test_jobs.py:83:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:95:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:131:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:183:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:230:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:247:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:260:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:389:    set_head_version(conn, job, "abc123")
+harness/tests/test_jobs.py:447:    set_head_version(conn, job, "abc123")
+harness/tests/test_review_version_binding.py:24:    set_head_version,
+harness/tests/test_review_version_binding.py:51:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:54:    set_head_version(conn, job, "version-B")  # builder quietly changes the code
+harness/tests/test_review_version_binding.py:62:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:64:    set_head_version(conn, job, "version-B")
+harness/tests/test_review_version_binding.py:75:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:79:    set_head_version(conn, job, "version-B")
+harness/tests/test_review_version_binding.py:90:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:94:    set_head_version(conn, job, "version-B")  # the fix
+harness/tests/test_review_version_binding.py:103:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:116:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:125:    set_head_version(conn, job, "version-B")
+harness/tests/test_review_version_binding.py:126:    conn.execute("UPDATE jobs SET head_version=NULL WHERE id=?", (job,))
+harness/tests/test_review_version_binding.py:136:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:140:    set_head_version(conn, job, "version-B")
+harness/tests/test_review_version_binding.py:150:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:168:    then flip head_version to B so the record claims B was the approved thing."""
+harness/tests/test_review_version_binding.py:170:    set_head_version(conn, job, "version-A")
+harness/tests/test_review_version_binding.py:175:        set_head_version(conn, job, "version-B")
+harness/tests/test_review_version_binding.py:180:    set_head_version(conn, job, "version-A")
+harness/tests/test_dispatch_executor.py:108:    assert row["head_version"], "the produced version was not recorded"
+
+exec
+/bin/zsh -lc "nl -ba harness/server.py | sed -n '350,390p'; nl -ba harness/tests/test_jobs.py | sed -n '210,240p'; nl -ba harness/db/schema.sql | sed -n '548,625p;1020,1060p'; nl -ba harness/db/migrations/001_harden_live_db_2026-07-20.sql | sed -n '1,95p'; nl -ba harness/db/migrations/002_review_version_chain_2026-07-20.sql | sed -n '1,100p'" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+   350	
+   351	
+   352	@app.post("/api/dispatch")
+   353	async def dispatch_endpoint(request: Request):
+   354	    """Give the team a real job. Non-blocking: returns as soon as it's recorded and
+   355	    the worker has started, so the page stays live while the work grinds."""
+   356	    import dispatch as dispatch_mod
+   357	
+   358	    body = await request.json()
+   359	    text = (body.get("text") or "").strip()
+   360	    if not text:
+   361	        return JSONResponse({"error": "Say what to build."}, status_code=400)
+   362	    # The client stamps a nonce so a double-tap or a re-send can't start it twice.
+   363	    nonce = (body.get("nonce") or "").strip() or None
+   364	
+   365	    c = db()
+   366	    builder = _pick_local_builder(c)
+   367	    if not builder:
+   368	        return JSONResponse(
+   369	            {"error": "The free local coder isn't available on this machine right now."},
+   370	            status_code=503,
+   371	        )
+   372	    reviewer = _pick_reviewer(c)
+   373	
+   374	    try:
+   375	        d = dispatch_mod.dispatch_local(
+   376	            c, text, builder,
+   377	            origin="text", dispatch_key=nonce, reviewer_seat=reviewer,
+   378	            required_reviews=1,
+   379	        )
+   380	    except dispatch_mod.DispatchRefused as exc:
+   381	        return JSONResponse({"error": str(exc)}, status_code=409)
+   382	
+   383	    who = builder.title()
+   384	    if d.reused:
+   385	        reply = f"Already on it — {who} picked that up a moment ago."
+   386	    else:
+   387	        reply = f"{who} is on it. A stronger model will check the work before it's called done."
+   388	    return {"job_id": d.job_id, "reused": d.reused, "reply": reply, "builder": builder}
+   389	
+   390	
+   210	    job = create_job(conn, "add the login form", builder_seat="claude_builder")
+   211	    record_artifact(conn, job, kind="screenshot", path="/tmp/x.png")
+   212	
+   213	    record_verdict(conn, job, "grok_tester", verdict="fail", role="tester",
+   214	                   severity="p2", summary="Validation fires on blur; users expect it on submit.")
+   215	
+   216	    row = conn.execute(
+   217	        "SELECT verdict, model_family FROM verdicts WHERE job_id = ? AND role='tester'", (job,)
+   218	    ).fetchone()
+   219	    assert row["verdict"] == "fail" and row["model_family"] == "grok"
+   220	
+   221	
+   222	def test_the_same_family_may_still_REVIEW_its_own_build(conn):
+   223	    """The no-self-testing rule is about DRIVING THE APP, not reading a diff.
+   224	
+   225	    A same-family reviewer is a weaker signal, but it isn't forbidden — the gauntlet's
+   226	    min_model_families rule handles diversity there. Only the tester seat is hard-gated.
+   227	    """
+   228	    upsert_seat(conn, Seat("claude_builder", "claude-cli", "claude-opus-4-8", "claude", "subscription"))
+   229	    job = create_job(conn, "add the login form", builder_seat="claude_builder")
+   230	    set_head_version(conn, job, "abc123")
+   231	    record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")  # claude reviewing claude
+   232	    set_status(conn, job, "done")
+   233	    assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
+   234	
+   235	
+   236	# ---------------------------------------------------------------------------
+   237	# Guard 6 — a job ships on the GATES, not on a human and not on agent confidence.
+   238	#
+   239	# Owner override: "I don't want shipped depending on me. If it is reviewed and
+   240	# tested, then it ships." Neill is out of the critical path — so the schema now
+   548	);
+   549	
+   550	CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id);
+   551	
+   552	-- ---------------------------------------------------------------------------
+   553	-- Usage: per-seat spend, so the caps in `seats` mean something.
+   554	-- OpenClaw core has NO per-agent cost or token budget. This is ours.
+   555	-- ---------------------------------------------------------------------------
+   556	CREATE TABLE IF NOT EXISTS usage (
+   557	    id            INTEGER PRIMARY KEY,
+   558	    seat_id       TEXT NOT NULL REFERENCES seats(id),
+   559	    job_id        INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+   560	    -- What kind of work this spend was. Lets us ration building separately from
+   561	    -- reviewing — the whole point of the per-role caps above.
+   562	    role          TEXT NOT NULL DEFAULT 'build'
+   563	                  CHECK (role IN ('build', 'review', 'test', 'research', 'voice')),
+   564	    day           TEXT NOT NULL DEFAULT (date('now')),
+   565	    input_tokens  INTEGER NOT NULL DEFAULT 0,
+   566	    output_tokens INTEGER NOT NULL DEFAULT 0,
+   567	    cost_cents    INTEGER NOT NULL DEFAULT 0,
+   568	    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+   569	);
+   570	
+   571	CREATE INDEX IF NOT EXISTS idx_usage_seat_day ON usage(seat_id, day);
+   572	CREATE INDEX IF NOT EXISTS idx_usage_month ON usage(day);
+   573	
+   574	-- ═══════════════════════════════════════════════════════════════════════════
+   575	-- THE MONEY. Owner (2026-07-14): "$100/mo limit, notify me at $50."
+   576	--
+   577	-- TWO LAYERS, deliberately:
+   578	--
+   579	--   1. OpenAI's OWN monthly budget cap ($100), set in their dashboard. That is the
+   580	--      REAL ceiling — it physically stops them serving requests, and no bug in this
+   581	--      codebase can defeat it. It is also a terrible way to find out, because it
+   582	--      cuts you off mid-sentence.
+   583	--
+   584	--   2. THIS. A softer, earlier layer that warns at $50 and refuses to spend past a
+   585	--      budget we set ourselves — so we stop gracefully, say why, and never hit
+   586	--      their wall at all.
+   587	--
+   588	-- Belt and braces. The dashboard cap is the thing that saves you if I'm wrong.
+   589	-- ═══════════════════════════════════════════════════════════════════════════
+   590	CREATE TABLE IF NOT EXISTS budget (
+   591	    id              INTEGER PRIMARY KEY CHECK (id = 1),   -- exactly one row
+   592	    monthly_cap_cents  INTEGER NOT NULL DEFAULT 10000,    -- $100
+   593	    warn_at_cents      INTEGER NOT NULL DEFAULT 5000,     -- $50
+   594	    warned_this_month  TEXT,                              -- 'YYYY-MM' so we warn once
+   595	    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+   596	);
+   597	
+   598	INSERT OR IGNORE INTO budget (id, monthly_cap_cents, warn_at_cents) VALUES (1, 10000, 5000);
+   599	
+   600	-- The month's spend, all seats. This is the number that matters.
+   601	CREATE VIEW IF NOT EXISTS month_spend AS
+   602	SELECT
+   603	    COALESCE(SUM(cost_cents), 0)                                   AS spent_cents,
+   604	    (SELECT monthly_cap_cents FROM budget WHERE id = 1)            AS cap_cents,
+   605	    (SELECT warn_at_cents     FROM budget WHERE id = 1)            AS warn_cents
+   606	FROM usage
+   607	WHERE strftime('%Y-%m', day) = strftime('%Y-%m', 'now');
+   608	
+   609	-- ═══════════════════════════════════════════════════════════════════════════
+   610	-- GUARD 11 — the month's budget is hard. It refuses the entry that would breach it.
+   611	--
+   612	-- Same principle as every other guard here: this is not a policy an agent is asked
+   613	-- to respect, it is a write that fails.
+   614	-- ═══════════════════════════════════════════════════════════════════════════
+   615	CREATE TRIGGER IF NOT EXISTS guard_monthly_budget_is_hard
+   616	BEFORE INSERT ON usage
+   617	BEGIN
+   618	    SELECT RAISE(ABORT, 'guard: this would blow the monthly budget')
+   619	    WHERE (SELECT spent_cents FROM month_spend) + NEW.cost_cents
+   620	        > (SELECT monthly_cap_cents FROM budget WHERE id = 1);
+   621	END;
+   622	
+   623	-- ===========================================================================
+   624	-- THE GUARDS
+   625	--
+  1020	-- Keep updated_at honest.
+  1021	CREATE TRIGGER IF NOT EXISTS jobs_touch_updated_at
+  1022	AFTER UPDATE ON jobs
+  1023	FOR EACH ROW
+  1024	BEGIN
+  1025	    UPDATE jobs SET updated_at = datetime('now') WHERE id = NEW.id;
+  1026	END;
+  1027	
+  1028	-- ---------------------------------------------------------------------------
+  1029	-- The §7 voice query: "what did the overnight run do?"
+  1030	-- ---------------------------------------------------------------------------
+  1031	CREATE VIEW IF NOT EXISTS job_report AS
+  1032	SELECT
+  1033	    j.id,
+  1034	    j.created_at,
+  1035	    j.finished_at,
+  1036	    j.request,
+  1037	    j.origin,
+  1038	    j.builder_seat,
+  1039	    s.provider   AS builder_provider,
+  1040	    s.tier       AS builder_tier,
+  1041	    j.status,
+  1042	    j.branch,
+  1043	    j.spoken_summary,
+  1044	    (SELECT COUNT(*) FROM verdicts v WHERE v.job_id = j.id)                        AS review_count,
+  1045	    (SELECT COUNT(DISTINCT v.model_family) FROM verdicts v WHERE v.job_id = j.id)  AS families_reviewed,
+  1046	    (SELECT COUNT(*) FROM verdicts v WHERE v.job_id = j.id AND v.verdict = 'fail') AS fail_count,
+  1047	    (SELECT COUNT(*) FROM verdicts v WHERE v.job_id = j.id AND v.verdict = 'needs_human') AS escalations
+  1048	FROM jobs j
+  1049	JOIN seats s ON s.id = j.builder_seat;
+     1	-- Migration 001 — bring the LIVE database up to the hardened schema.sql
+     2	-- Sol build gate 1 (round 7): "migrate the live DB to the hardened rules."
+     3	--
+     4	-- Found by diffing the live DB against a fresh build of schema.sql on 2026-07-20:
+     5	--   1. guard_verdicts_cannot_be_deleted   MISSING — a failing review could be deleted,
+     6	--      then the job completed (Sol round 3, verified exploit).
+     7	--   2. guard_no_approval_is_born_granted  MISSING — an approval could be inserted
+     8	--      pre-granted, skipping the read-back guards (Sol round 3, verified exploit).
+     9	--   3. guard_full_panel                   STALE — live version counts any 'pass',
+    10	--      so testers/verifiers could fill the reviewer panel (Sol round 2, #5).
+    11	--   4. jobs.tier / jobs.tier_reason       MISSING — tiering has nowhere to record.
+    12	--   5. seats model_/effort_ tier columns  MISSING — same.
+    13	--
+    14	-- Additive ALTERs + trigger recreation only. No row is rewritten or re-inserted —
+    15	-- replaying history through the guards is exactly what the guards exist to prevent.
+    16	-- Backup taken first: harness/db/backups/chief.db.pre-hardening-2026-07-20
+    17	
+    18	BEGIN;
+    19	
+    20	ALTER TABLE jobs ADD COLUMN tier TEXT NOT NULL DEFAULT 'standard'
+    21	    CHECK (tier IN ('light', 'standard', 'heavy'));
+    22	ALTER TABLE jobs ADD COLUMN tier_reason TEXT;
+    23	
+    24	ALTER TABLE seats ADD COLUMN model_light    TEXT;
+    25	ALTER TABLE seats ADD COLUMN model_standard TEXT;
+    26	ALTER TABLE seats ADD COLUMN model_heavy    TEXT;
+    27	ALTER TABLE seats ADD COLUMN effort_light    TEXT DEFAULT 'low';
+    28	ALTER TABLE seats ADD COLUMN effort_standard TEXT DEFAULT 'medium';
+    29	ALTER TABLE seats ADD COLUMN effort_heavy    TEXT DEFAULT 'high';
+    30	
+    31	-- Replace the stale panel guard with the round-2 fix: only role='reviewer' counts.
+    32	DROP TRIGGER guard_full_panel;
+    33	CREATE TRIGGER guard_full_panel
+    34	BEFORE UPDATE OF status ON jobs
+    35	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+    36	BEGIN
+    37	    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+    38	    WHERE (
+    39	        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+    40	        -- the panel could be "filled" by the wrong kinds of check entirely.
+    41	        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+    42	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+    43	    ) < NEW.required_reviews;
+    44	END;
+    45	
+    46	CREATE TRIGGER guard_no_approval_is_born_granted
+    47	BEFORE INSERT ON approvals
+    48	WHEN NEW.granted_at IS NOT NULL
+    49	BEGIN
+    50	    SELECT RAISE(ABORT, 'guard: an approval cannot be created already granted — it must be granted through a read-back');
+    51	END;
+    52	
+    53	CREATE TRIGGER guard_verdicts_cannot_be_deleted
+    54	BEFORE DELETE ON verdicts
+    55	BEGIN
+    56	    SELECT RAISE(ABORT, 'guard: a verdict is a fact on the record — it cannot be deleted');
+    57	END;
+    58	
+    59	COMMIT;
+     1	-- Migration 002 — the review-to-version chain (Sol build gate 3).
+     2	--
+     3	-- Sol's most dangerous flaw: approve version A, builder changes it to B, the old
+     4	-- approval still counts — "believable green checks on code nobody reviewed."
+     5	--
+     6	-- Jobs now carry head_version (the exact content hash being put forward); verdicts
+     7	-- carry reviewed_version (what the reviewer actually looked at). Completion guards
+     8	-- only count verdicts whose version MATCHES, so moving the code voids approvals by
+     9	-- construction, and a fail condemns the version it saw instead of the job forever.
+    10	--
+    11	-- Existing rows keep NULL versions: job 1 shipped before versioning existed (its
+    12	-- record is history and stays untouched); job 2 cannot now complete until it gets a
+    13	-- version and version-matched reviews — which is correct, nobody reviewed a
+    14	-- recorded version of it.
+    15	
+    16	BEGIN;
+    17	
+    18	ALTER TABLE jobs ADD COLUMN head_version TEXT;
+    19	ALTER TABLE verdicts ADD COLUMN reviewed_version TEXT;
+    20	
+    21	CREATE TRIGGER guard_verdict_must_cite_what_it_reviewed
+    22	BEFORE INSERT ON verdicts
+    23	WHEN (SELECT head_version FROM jobs WHERE id = NEW.job_id) IS NOT NULL
+    24	     AND TRIM(COALESCE(NEW.reviewed_version, '')) = ''
+    25	BEGIN
+    26	    SELECT RAISE(ABORT, 'guard: this job is versioned — a verdict must say which version it reviewed');
+    27	END;
+    28	
+    29	CREATE TRIGGER guard_a_build_finishes_a_version
+    30	BEFORE UPDATE OF status ON jobs
+    31	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+    32	     AND NEW.kind = 'build'
+    33	     AND TRIM(COALESCE(NEW.head_version, '')) = ''
+    34	BEGIN
+    35	    SELECT RAISE(ABORT, 'guard: a build cannot finish without naming the exact version that is finished');
+    36	END;
+    37	
+    38	CREATE TRIGGER guard_finished_version_is_frozen
+    39	BEFORE UPDATE OF head_version ON jobs
+    40	WHEN OLD.status IN ('done', 'shipped') AND OLD.head_version IS NOT NEW.head_version
+    41	BEGIN
+    42	    SELECT RAISE(ABORT, 'guard: what version finished cannot be rewritten after the fact');
+    43	END;
+    44	
+    45	-- The five completion guards, rebuilt with version matching. Executable text must
+    46	-- stay identical to schema.sql — the drift test compares them.
+    47	
+    48	DROP TRIGGER guard_local_output_needs_review;
+    49	CREATE TRIGGER guard_local_output_needs_review
+    50	BEFORE UPDATE OF status ON jobs
+    51	WHEN NEW.status IN ('done','shipped') AND OLD.status NOT IN ('done','shipped')
+    52	     AND NEW.builder_tier = 'local'
+    53	BEGIN
+    54	    SELECT RAISE(ABORT, 'guard: local-built job requires a passing subscription-tier review before done')
+    55	    WHERE NOT EXISTS (
+    56	        SELECT 1 FROM verdicts v
+    57	        WHERE v.job_id = NEW.id
+    58	          AND v.reviewer_tier IN ('subscription', 'metered')
+    59	          AND v.verdict = 'pass'
+    60	          -- gate 3: a pass only counts for the version it actually reviewed
+    61	          AND v.reviewed_version IS NEW.head_version
+    62	    );
+    63	END;
+    64	
+    65	DROP TRIGGER guard_full_panel;
+    66	CREATE TRIGGER guard_full_panel
+    67	BEFORE UPDATE OF status ON jobs
+    68	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+    69	BEGIN
+    70	    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+    71	    WHERE (
+    72	        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+    73	        -- the panel could be "filled" by the wrong kinds of check entirely.
+    74	        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+    75	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+    76	          -- gate 3: the panel must have reviewed THIS version, not an earlier one
+    77	          AND v.reviewed_version IS NEW.head_version
+    78	    ) < NEW.required_reviews;
+    79	END;
+    80	
+    81	DROP TRIGGER guard_a_failing_review_stops_it;
+    82	CREATE TRIGGER guard_a_failing_review_stops_it
+    83	BEFORE UPDATE OF status ON jobs
+    84	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+    85	BEGIN
+    86	    SELECT RAISE(ABORT, 'guard: a reviewer failed this — it does not get outvoted')
+    87	    WHERE EXISTS (
+    88	        SELECT 1 FROM verdicts v
+    89	        WHERE v.job_id = NEW.id AND v.verdict = 'fail'
+    90	          -- gate 3: a fail condemns the VERSION it reviewed, not the job forever.
+    91	          -- A fail with no version condemned we-don't-know-what: it blocks
+    92	          -- everything. Same if the job itself is unversioned. Fail-closed.
+    93	          AND (NEW.head_version IS NULL
+    94	               OR v.reviewed_version IS NULL
+    95	               OR v.reviewed_version = NEW.head_version)
+    96	    );
+    97	END;
+    98	
+    99	DROP TRIGGER guard_late_escalation_still_blocks_shipping;
+   100	CREATE TRIGGER guard_late_escalation_still_blocks_shipping
+
+exec
+/bin/zsh -lc "nl -ba harness/db/schema.sql | sed -n '1,18p'; nl -ba harness/server.py | sed -n '40,90p'; rg -n \"def _pick_reviewer|def _pick_local_builder|sync_seats|init_db|journal_mode|busy_timeout\" harness" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+     1	-- Chief Command v2 — harness job store
+     2	--
+     3	-- This is the layer OpenClaw does NOT give us. Its subagent sessions auto-archive
+     4	-- after ~60 minutes and get soft-deleted; that is session archival, not durable job
+     5	-- history. Spec §7 wants "what did the overnight run do?" to be answerable. This is that.
+     6	--
+     7	-- Two rules are enforced STRUCTURALLY here rather than in a prompt, because rules that
+     8	-- live in prompts quietly stop holding at 4am:
+     9	--   1. Local-model output can never reach `done` without a higher-tier passing review
+    10	--      (spec §4.3 / §9 — "enforce in the pipeline itself, not by convention").
+    11	--   2. Per-seat spend caps (OpenClaw core has no per-agent budget of any kind).
+    12	
+    13	PRAGMA journal_mode = WAL;
+    14	PRAGMA foreign_keys = ON;
+    15	
+    16	-- ---------------------------------------------------------------------------
+    17	-- Seats: the named roles from spec §4. Providers are swappable behind these.
+    18	-- ---------------------------------------------------------------------------
+    40	            line = line[len("export "):]
+    41	        if "=" not in line:
+    42	            continue
+    43	        key, _, val = line.partition("=")
+    44	        key, val = key.strip(), val.strip().strip('"').strip("'")
+    45	        os.environ.setdefault(key, val)
+    46	
+    47	
+    48	_load_chief_env()
+    49	
+    50	from fastapi import FastAPI, File, Form, Request, UploadFile
+    51	from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    52	
+    53	from db.jobs import connect, init_db, month_spend
+    54	
+    55	app = FastAPI(title="Chief Command")
+    56	
+    57	DB = Path(__file__).resolve().parent / "db" / "chief.db"
+    58	
+    59	FAMILY_COLOR = {"claude": "#FF8A3D", "gpt": "#00E5A0", "grok": "#B06CFF", "qwen": "#2E9BFF"}
+    60	
+    61	
+    62	def db():
+    63	    c = connect(DB)
+    64	    init_db(c)
+    65	    return c
+    66	
+    67	
+    68	# ── The plain-English layer. He must never see a machine word. ───────────────
+    69	#
+    70	# Sol caught the UI leaking filenames and shell commands straight into the detail view.
+    71	# This is the translation layer that stops it. The rule from AGENTS.md:
+    72	#
+    73	#     "If you cannot explain what you did without jargon, you do not yet understand
+    74	#      what you did."
+    75	
+    76	_EVENT_ENGLISH = {
+    77	    "dispatched": "Picked it up",
+    78	    "read":       "Read through the existing code",
+    79	    "thinking":   "Worked out how to do it",
+    80	    "edit":       "Changed the code",
+    81	    "write":      "Wrote new code",
+    82	    "command":    "Ran something",
+    83	    "test_run":   "Ran the tests",
+    84	    "browse":     "Clicked through it like a user",
+    85	    "verdict":    "Gave a verdict",
+    86	    "done":       "Finished",
+    87	    "error":      "Hit a problem",
+    88	}
+    89	
+    90	
+harness/db/jobs.py:54:def init_db(conn: sqlite3.Connection) -> None:
+harness/db/schema.sql:13:PRAGMA journal_mode = WAL;
+harness/scripts/smoke_dispatch.py:29:    init_db,
+harness/scripts/smoke_dispatch.py:68:    init_db(conn)
+harness/dispatch.py:35:    init_db,
+harness/dispatch.py:142:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+harness/server.py:53:from db.jobs import connect, init_db, month_spend
+harness/server.py:64:    init_db(c)
+harness/server.py:334:def _pick_local_builder(c) -> str | None:
+harness/server.py:342:def _pick_reviewer(c) -> str | None:
+harness/tests/test_sol_attacks.py:32:    GuardViolation, Seat, connect, create_job, init_db, record_artifact,
+harness/tests/test_sol_attacks.py:53:    init_db(c)
+harness/tests/test_review_version_binding.py:21:    init_db,
+harness/tests/test_review_version_binding.py:40:    init_db(c)
+harness/tests/test_planning.py:14:from db.jobs import connect, init_db  # noqa: E402
+harness/tests/test_planning.py:28:    init_db(c)
+harness/tests/test_projects.py:15:from db.jobs import connect, init_db  # noqa: E402
+harness/tests/test_projects.py:26:    # init_db runs schema.sql, which SEEDS the real projects (chief, jess, arch) so Chief
+harness/tests/test_projects.py:29:    init_db(c)
+harness/tests/test_sol_round2.py:32:from db.jobs import (GuardViolation, Seat, connect, create_job, init_db,
+harness/tests/test_sol_round2.py:48:    c = connect(tmp_path / "t.db"); init_db(c)
+harness/tests/test_dispatch_executor.py:21:    init_db,
+harness/tests/test_dispatch_executor.py:42:    init_db(c)
+harness/tests/test_jobs.py:23:    init_db,
+harness/tests/test_jobs.py:46:    init_db(c)
+
+exec
+/bin/zsh -lc "nl -ba harness/server.py | sed -n '325,350p'; rg -n \"sync_seats\\(\" -S . --glob '"'!harness/.worktrees/**'"' --glob '"'!frontend/**'"' --glob '"'!backend/**'"'" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+   325	
+   326	# ═══════════════════════════════════════════════════════════════════════════════
+   327	# DISPATCH — where "putting someone on it" stops being a figure of speech.
+   328	#
+   329	# This starts a REAL worker. Today it runs the free local coder, so the whole loop
+   330	# can be exercised with no money and no keys: you type a job, a real model builds it
+   331	# in its own isolated copy of the code, and a stronger model checks it before it can
+   332	# be called done. The paid coding seats will hang off this same path through OpenClaw.
+   333	# ═══════════════════════════════════════════════════════════════════════════════
+   334	def _pick_local_builder(c) -> str | None:
+   335	    """The free local coder, whatever it's named in this database."""
+   336	    row = c.execute(
+   337	        "SELECT id FROM seats WHERE provider = 'ollama' AND enabled = 1 ORDER BY id LIMIT 1"
+   338	    ).fetchone()
+   339	    return row["id"] if row else None
+   340	
+   341	
+   342	def _pick_reviewer(c) -> str | None:
+   343	    """A stronger model to check the local work — a Claude seat (its own login, no
+   344	    metered key involved), so the loop can close without touching anything that still
+   345	    needs rotating."""
+   346	    row = c.execute(
+   347	        "SELECT id FROM seats WHERE provider = 'claude-cli' AND enabled = 1 ORDER BY id LIMIT 1"
+   348	    ).fetchone()
+   349	    return row["id"] if row else None
+   350	
+./harness/dispatch.py:142:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_task10_gauntlet.out:235:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_task10_gauntlet.out:2930:harness/dispatch.py:142:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_round2.out:1354:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_round5.out:1543:    63	def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out_v2.txt:1355:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_round4.out:704:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out2.txt:2643:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out2.txt:6074:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out2.txt:7023:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out2.txt:8412:harness/dispatch.py:63:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_round1.out:3505:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+./docs/sol/sol_out.txt:4031:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+
+codex
+### A. Findings 1–8
+
+I agree with 1–5, 7, and 8. Finding 6 is directionally right but overstates SQLite’s immediate-lock behavior.
+
+1. Correct. There is no database-enforced reviewer-family floor. Guard 1 requires a version-matched pass from a subscription or metered reviewer, regardless of family ([schema.sql:779](/Users/user/code-projects/chief-command/harness/db/schema.sql:779)). Guard 5 counts distinct passing reviewer seats, not families ([schema.sql:848](/Users/user/code-projects/chief-command/harness/db/schema.sql:848)). Family separation is enforced only for testers and verifiers ([schema.sql:834](/Users/user/code-projects/chief-command/harness/db/schema.sql:834), [schema.sql:956](/Users/user/code-projects/chief-command/harness/db/schema.sql:956)). An existing test explicitly documents that same-family reviewing is permitted and claims Python will handle diversity ([test_jobs.py:222](/Users/user/code-projects/chief-command/harness/tests/test_jobs.py:222)). The spec’s statement that guards 1–3 already enforce this is false; Guard 3 is about tester evidence, not reviewer diversity ([schema.sql:816](/Users/user/code-projects/chief-command/harness/db/schema.sql:816)).
+
+2. Correct. `grinder_paid` is referenced by the gauntlet ([seats.toml:342](/Users/user/code-projects/chief-command/harness/config/seats.toml:342)), but the actual paid Grok seat is `grok` ([seats.toml:206](/Users/user/code-projects/chief-command/harness/config/seats.toml:206)). An unknown seat will either be treated as uncapped by `over_budget()` or rejected later by `record_verdict()` ([jobs.py:356](/Users/user/code-projects/chief-command/harness/db/jobs.py:356), [jobs.py:302](/Users/user/code-projects/chief-command/harness/db/jobs.py:302)). That is an especially bad split: the preliminary check says “fine,” then execution fails.
+
+3. Correct. The only in-process reviewer implementation is `claude-cli` ([executor.py:145](/Users/user/code-projects/chief-command/harness/executor.py:145)). The panel names Codex, nonexistent, and Ollama seats; `_run_one_review()` silently returns when no provider implementation exists ([executor.py:228](/Users/user/code-projects/chief-command/harness/executor.py:228)). The only usable Claude escalation seat is not in the panel ([seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253)). Therefore the proposed panel produces zero verdicts today.
+
+4. Correct. Normal dispatch freezes `required_reviews` at the configured reviewer count—three ([dispatch.py:194](/Users/user/code-projects/chief-command/harness/dispatch.py:194)). The database demands three distinct version-matched passing reviewer seats ([schema.sql:848](/Users/user/code-projects/chief-command/harness/db/schema.sql:848)) and prevents later shrinking ([schema.sql:676](/Users/user/code-projects/chief-command/harness/db/schema.sql:676)). A two-family quorum cannot complete unless it also happens to contain all three configured passing seats. The spec contains two incompatible completion contracts.
+
+5. Correct. A current-version fail is not outvotable; it blocks both `done` and `shipped` ([schema.sql:874](/Users/user/code-projects/chief-command/harness/db/schema.sql:874)). Verdicts cannot change except `needs_human → pass|fail` ([schema.sql:685](/Users/user/code-projects/chief-command/harness/db/schema.sql:685)). Adding a tiebreaker pass does nothing to the original fail. A contested version must be revised into a new version, not “won” by escalation. Escalation makes sense for uncertainty represented as `needs_human`, provided the design resolves that exact row through the existing resolution path ([jobs.py:326](/Users/user/code-projects/chief-command/harness/db/jobs.py:326)).
+
+6. Partly correct. Each thread needs its own connection, and write failures must not be treated as reviewer absence. But “immediately” is inaccurate: Python’s SQLite connection has a default five-second lock timeout even though this wrapper does not state one explicitly ([jobs.py:47](/Users/user/code-projects/chief-command/harness/db/jobs.py:47)). WAL is enabled when the schema is initialized ([schema.sql:13](/Users/user/code-projects/chief-command/harness/db/schema.sql:13)). Contention can still exceed the implicit timeout, so retries or a serialized result writer are needed. Any verdict-write failure must be returned as a panel error and prevent completion; otherwise a failed write—especially a lost fail—can disappear from the decision.
+
+7. Correct. Production code never calls `record_usage()`; the references are tests. The hard cap applies when a usage row is inserted ([jobs.py:368](/Users/user/code-projects/chief-command/harness/db/jobs.py:368), [schema.sql:979](/Users/user/code-projects/chief-command/harness/db/schema.sql:979)). Merely calling `over_budget()` reserves nothing. Worse, “reserve budget” is underspecified: the system needs a conservative cost amount before the provider call and a reconciliation rule afterward. The Claude seat is uncapped in the stored budget fields, while its `max_calls_per_day` setting is neither represented by `Seat` nor synchronized into SQLite ([seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253), [dispatch.py:142](/Users/user/code-projects/chief-command/harness/dispatch.py:142)). This machinery would be safety-significant and essentially untested in the stated scope.
+
+8. Correct. `run_gauntlet()` has no caller. The live local route explicitly requests one reviewer and fixes `required_reviews=1` ([server.py:372](/Users/user/code-projects/chief-command/harness/server.py:372)). `run_job()` invokes `_run_one_review()` directly ([executor.py:210](/Users/user/code-projects/chief-command/harness/executor.py:210)), and a single pass attempts `done` ([executor.py:251](/Users/user/code-projects/chief-command/harness/executor.py:251)). The integration point must replace that step after the build is versioned and parked for review. Leaving both paths alive leaves a bypass.
+
+### B. Minimal correct completion contract
+
+Add an immutable `required_review_families` value to each job, snapshotted at dispatch alongside `required_reviews`. Do not have a database trigger consult current configuration: changing configuration later must not rewrite the contract for an existing job.
+
+Completion should require all of the following for the current `head_version`:
+
+- At least `required_reviews` distinct passing seats with `role='reviewer'`.
+- At least `required_review_families` distinct passing `model_family` values with `role='reviewer'`.
+- No current-version fail.
+- No unresolved current-version escalation.
+- For local output, at least one qualifying higher-tier pass.
+
+Yes, the family floor belongs in a database guard. Counting “families that produced any verdict” is insufficient; completion must count passing families. Failing families already block separately.
+
+`required_reviews` is not mathematically redundant with the family floor. Three seats could all be one family; two families could be represented by only two of a required three-seat panel. It should stay if “full set, always” remains policy, as the database comment says ([schema.sql:274](/Users/user/code-projects/chief-command/harness/db/schema.sql:274)). If the actual policy is “any two families may certify despite panel dropouts,” then remove the full-panel requirement deliberately. Do not leave `required_reviews=3` and pretend the Python quorum supersedes it.
+
+There is another subtle gap: separate conditions do not necessarily produce a single “higher-tier cross-family” reviewer. A higher-tier same-family pass plus a local different-family pass satisfies both independent conditions. If the intended contract is literally one pass that is both higher-tier and different from the builder, encode that conjunction explicitly.
+
+### C. Risk ranking and verdict
+
+STOP as written. It needs a corrected design before implementation.
+
+Most dangerous first:
+
+1. The panel has no integration point, while the old single-review path remains capable of attempting completion. More broadly, the full-panel guard runs only for transitions to `done`, not direct transitions to `shipped` ([schema.sql:850](/Users/user/code-projects/chief-command/harness/db/schema.sql:850)). `ship()` does not require the prior state to be `done` ([dispatch.py:250](/Users/user/code-projects/chief-command/harness/dispatch.py:250)). That is an existing database-level bypass of the reviewer panel.
+
+2. The asserted safety boundary does not exist. Reviewer-family coverage is only a Python convention, and the two proposed completion rules contradict one another.
+
+3. The configured panel cannot run: one phantom seat and zero supported panel providers.
+
+4. “Tiebreaker overturns a fail” contradicts the deliberate smoke-detector semantics of the database. Implementing it would either park every contested version or tempt someone to weaken the fail guard.
+
+5. The database does not enforce membership in the assigned panel. Guard 5 accepts any distinct reviewer seats; three unrelated seats can fill a nominal three-seat panel ([schema.sql:856](/Users/user/code-projects/chief-command/harness/db/schema.sql:856)). If the contract is “these configured reviewers,” the assigned roster must also be frozen per job.
+
+6. Concurrent verdict recording and error handling. Lock timeouts are not immediate, but swallowed write failures can falsify the panel record.
+
+7. Budget reservation is undefined and unexercised in scope. Call-count limits for flat-rate seats are configuration comments, not enforced state.
+
+8. “Frozen code snapshot” is not yet a real repository snapshot. The worker hashes the generated response and writes it as a text file ([executor.py:200](/Users/user/code-projects/chief-command/harness/executor.py:200)); reviewers receive the request and that text, not a frozen commit or complete diff ([executor.py:228](/Users/user/code-projects/chief-command/harness/executor.py:228)). The database comment calls `head_version` a git commit, but the implementation currently stores a hash of model prose.
+
+### D. Additional omissions
+
+The configuration itself is incomplete beyond the phantom seat. `sync_seats()` requires every seat to contain `family` ([dispatch.py:142](/Users/user/code-projects/chief-command/harness/dispatch.py:142)), but `brain`, `grinder_local`, and `reviewer` omit it ([seats.toml:89](/Users/user/code-projects/chief-command/harness/config/seats.toml:89), [seats.toml:230](/Users/user/code-projects/chief-command/harness/config/seats.toml:230), [seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253)). TOML does not infer families from comments or provider names. A fresh synchronization will fail before the panel runs.
+
+A schema edit alone will not harden the live database. Existing triggers use `CREATE TRIGGER IF NOT EXISTS`; they are not replaced by rerunning the schema. This needs a numbered migration that adds the frozen family requirement and recreates every affected completion trigger, following the existing migration pattern ([002_review_version_chain_2026-07-20.sql:45](/Users/user/code-projects/chief-command/harness/db/migrations/002_review_version_chain_2026-07-20.sql:45)).
+
+There is no uniqueness or idempotency constraint for one reviewer, role, job, and version. A retry can append multiple or contradictory verdicts. Distinct-seat counting prevents duplicate passes from inflating the count, but a duplicated fail permanently condemns that version. Freeze panel assignments and add a clear retry/attempt model.
+
+Finally, unresolved `needs_human` verdicts are not version-scoped ([schema.sql:798](/Users/user/code-projects/chief-command/harness/db/schema.sql:798)). Unlike a fail, uncertainty about version A continues blocking version B. That may be intentional, but it conflicts with the stated version-chain semantics and must be decided explicitly.
+
+Residual risks remain even after these adjustments: the database cannot prove that the bytes shown to a remote model correspond to the recorded hash, provider identity is trusted through the runner, and task #11’s eventual gatekeeper must independently verify that the code leaving the system is exactly the reviewed version.
+tokens used
+58,373
+### A. Findings 1–8
+
+I agree with 1–5, 7, and 8. Finding 6 is directionally right but overstates SQLite’s immediate-lock behavior.
+
+1. Correct. There is no database-enforced reviewer-family floor. Guard 1 requires a version-matched pass from a subscription or metered reviewer, regardless of family ([schema.sql:779](/Users/user/code-projects/chief-command/harness/db/schema.sql:779)). Guard 5 counts distinct passing reviewer seats, not families ([schema.sql:848](/Users/user/code-projects/chief-command/harness/db/schema.sql:848)). Family separation is enforced only for testers and verifiers ([schema.sql:834](/Users/user/code-projects/chief-command/harness/db/schema.sql:834), [schema.sql:956](/Users/user/code-projects/chief-command/harness/db/schema.sql:956)). An existing test explicitly documents that same-family reviewing is permitted and claims Python will handle diversity ([test_jobs.py:222](/Users/user/code-projects/chief-command/harness/tests/test_jobs.py:222)). The spec’s statement that guards 1–3 already enforce this is false; Guard 3 is about tester evidence, not reviewer diversity ([schema.sql:816](/Users/user/code-projects/chief-command/harness/db/schema.sql:816)).
+
+2. Correct. `grinder_paid` is referenced by the gauntlet ([seats.toml:342](/Users/user/code-projects/chief-command/harness/config/seats.toml:342)), but the actual paid Grok seat is `grok` ([seats.toml:206](/Users/user/code-projects/chief-command/harness/config/seats.toml:206)). An unknown seat will either be treated as uncapped by `over_budget()` or rejected later by `record_verdict()` ([jobs.py:356](/Users/user/code-projects/chief-command/harness/db/jobs.py:356), [jobs.py:302](/Users/user/code-projects/chief-command/harness/db/jobs.py:302)). That is an especially bad split: the preliminary check says “fine,” then execution fails.
+
+3. Correct. The only in-process reviewer implementation is `claude-cli` ([executor.py:145](/Users/user/code-projects/chief-command/harness/executor.py:145)). The panel names Codex, nonexistent, and Ollama seats; `_run_one_review()` silently returns when no provider implementation exists ([executor.py:228](/Users/user/code-projects/chief-command/harness/executor.py:228)). The only usable Claude escalation seat is not in the panel ([seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253)). Therefore the proposed panel produces zero verdicts today.
+
+4. Correct. Normal dispatch freezes `required_reviews` at the configured reviewer count—three ([dispatch.py:194](/Users/user/code-projects/chief-command/harness/dispatch.py:194)). The database demands three distinct version-matched passing reviewer seats ([schema.sql:848](/Users/user/code-projects/chief-command/harness/db/schema.sql:848)) and prevents later shrinking ([schema.sql:676](/Users/user/code-projects/chief-command/harness/db/schema.sql:676)). A two-family quorum cannot complete unless it also happens to contain all three configured passing seats. The spec contains two incompatible completion contracts.
+
+5. Correct. A current-version fail is not outvotable; it blocks both `done` and `shipped` ([schema.sql:874](/Users/user/code-projects/chief-command/harness/db/schema.sql:874)). Verdicts cannot change except `needs_human → pass|fail` ([schema.sql:685](/Users/user/code-projects/chief-command/harness/db/schema.sql:685)). Adding a tiebreaker pass does nothing to the original fail. A contested version must be revised into a new version, not “won” by escalation. Escalation makes sense for uncertainty represented as `needs_human`, provided the design resolves that exact row through the existing resolution path ([jobs.py:326](/Users/user/code-projects/chief-command/harness/db/jobs.py:326)).
+
+6. Partly correct. Each thread needs its own connection, and write failures must not be treated as reviewer absence. But “immediately” is inaccurate: Python’s SQLite connection has a default five-second lock timeout even though this wrapper does not state one explicitly ([jobs.py:47](/Users/user/code-projects/chief-command/harness/db/jobs.py:47)). WAL is enabled when the schema is initialized ([schema.sql:13](/Users/user/code-projects/chief-command/harness/db/schema.sql:13)). Contention can still exceed the implicit timeout, so retries or a serialized result writer are needed. Any verdict-write failure must be returned as a panel error and prevent completion; otherwise a failed write—especially a lost fail—can disappear from the decision.
+
+7. Correct. Production code never calls `record_usage()`; the references are tests. The hard cap applies when a usage row is inserted ([jobs.py:368](/Users/user/code-projects/chief-command/harness/db/jobs.py:368), [schema.sql:979](/Users/user/code-projects/chief-command/harness/db/schema.sql:979)). Merely calling `over_budget()` reserves nothing. Worse, “reserve budget” is underspecified: the system needs a conservative cost amount before the provider call and a reconciliation rule afterward. The Claude seat is uncapped in the stored budget fields, while its `max_calls_per_day` setting is neither represented by `Seat` nor synchronized into SQLite ([seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253), [dispatch.py:142](/Users/user/code-projects/chief-command/harness/dispatch.py:142)). This machinery would be safety-significant and essentially untested in the stated scope.
+
+8. Correct. `run_gauntlet()` has no caller. The live local route explicitly requests one reviewer and fixes `required_reviews=1` ([server.py:372](/Users/user/code-projects/chief-command/harness/server.py:372)). `run_job()` invokes `_run_one_review()` directly ([executor.py:210](/Users/user/code-projects/chief-command/harness/executor.py:210)), and a single pass attempts `done` ([executor.py:251](/Users/user/code-projects/chief-command/harness/executor.py:251)). The integration point must replace that step after the build is versioned and parked for review. Leaving both paths alive leaves a bypass.
+
+### B. Minimal correct completion contract
+
+Add an immutable `required_review_families` value to each job, snapshotted at dispatch alongside `required_reviews`. Do not have a database trigger consult current configuration: changing configuration later must not rewrite the contract for an existing job.
+
+Completion should require all of the following for the current `head_version`:
+
+- At least `required_reviews` distinct passing seats with `role='reviewer'`.
+- At least `required_review_families` distinct passing `model_family` values with `role='reviewer'`.
+- No current-version fail.
+- No unresolved current-version escalation.
+- For local output, at least one qualifying higher-tier pass.
+
+Yes, the family floor belongs in a database guard. Counting “families that produced any verdict” is insufficient; completion must count passing families. Failing families already block separately.
+
+`required_reviews` is not mathematically redundant with the family floor. Three seats could all be one family; two families could be represented by only two of a required three-seat panel. It should stay if “full set, always” remains policy, as the database comment says ([schema.sql:274](/Users/user/code-projects/chief-command/harness/db/schema.sql:274)). If the actual policy is “any two families may certify despite panel dropouts,” then remove the full-panel requirement deliberately. Do not leave `required_reviews=3` and pretend the Python quorum supersedes it.
+
+There is another subtle gap: separate conditions do not necessarily produce a single “higher-tier cross-family” reviewer. A higher-tier same-family pass plus a local different-family pass satisfies both independent conditions. If the intended contract is literally one pass that is both higher-tier and different from the builder, encode that conjunction explicitly.
+
+### C. Risk ranking and verdict
+
+STOP as written. It needs a corrected design before implementation.
+
+Most dangerous first:
+
+1. The panel has no integration point, while the old single-review path remains capable of attempting completion. More broadly, the full-panel guard runs only for transitions to `done`, not direct transitions to `shipped` ([schema.sql:850](/Users/user/code-projects/chief-command/harness/db/schema.sql:850)). `ship()` does not require the prior state to be `done` ([dispatch.py:250](/Users/user/code-projects/chief-command/harness/dispatch.py:250)). That is an existing database-level bypass of the reviewer panel.
+
+2. The asserted safety boundary does not exist. Reviewer-family coverage is only a Python convention, and the two proposed completion rules contradict one another.
+
+3. The configured panel cannot run: one phantom seat and zero supported panel providers.
+
+4. “Tiebreaker overturns a fail” contradicts the deliberate smoke-detector semantics of the database. Implementing it would either park every contested version or tempt someone to weaken the fail guard.
+
+5. The database does not enforce membership in the assigned panel. Guard 5 accepts any distinct reviewer seats; three unrelated seats can fill a nominal three-seat panel ([schema.sql:856](/Users/user/code-projects/chief-command/harness/db/schema.sql:856)). If the contract is “these configured reviewers,” the assigned roster must also be frozen per job.
+
+6. Concurrent verdict recording and error handling. Lock timeouts are not immediate, but swallowed write failures can falsify the panel record.
+
+7. Budget reservation is undefined and unexercised in scope. Call-count limits for flat-rate seats are configuration comments, not enforced state.
+
+8. “Frozen code snapshot” is not yet a real repository snapshot. The worker hashes the generated response and writes it as a text file ([executor.py:200](/Users/user/code-projects/chief-command/harness/executor.py:200)); reviewers receive the request and that text, not a frozen commit or complete diff ([executor.py:228](/Users/user/code-projects/chief-command/harness/executor.py:228)). The database comment calls `head_version` a git commit, but the implementation currently stores a hash of model prose.
+
+### D. Additional omissions
+
+The configuration itself is incomplete beyond the phantom seat. `sync_seats()` requires every seat to contain `family` ([dispatch.py:142](/Users/user/code-projects/chief-command/harness/dispatch.py:142)), but `brain`, `grinder_local`, and `reviewer` omit it ([seats.toml:89](/Users/user/code-projects/chief-command/harness/config/seats.toml:89), [seats.toml:230](/Users/user/code-projects/chief-command/harness/config/seats.toml:230), [seats.toml:253](/Users/user/code-projects/chief-command/harness/config/seats.toml:253)). TOML does not infer families from comments or provider names. A fresh synchronization will fail before the panel runs.
+
+A schema edit alone will not harden the live database. Existing triggers use `CREATE TRIGGER IF NOT EXISTS`; they are not replaced by rerunning the schema. This needs a numbered migration that adds the frozen family requirement and recreates every affected completion trigger, following the existing migration pattern ([002_review_version_chain_2026-07-20.sql:45](/Users/user/code-projects/chief-command/harness/db/migrations/002_review_version_chain_2026-07-20.sql:45)).
+
+There is no uniqueness or idempotency constraint for one reviewer, role, job, and version. A retry can append multiple or contradictory verdicts. Distinct-seat counting prevents duplicate passes from inflating the count, but a duplicated fail permanently condemns that version. Freeze panel assignments and add a clear retry/attempt model.
+
+Finally, unresolved `needs_human` verdicts are not version-scoped ([schema.sql:798](/Users/user/code-projects/chief-command/harness/db/schema.sql:798)). Unlike a fail, uncertainty about version A continues blocking version B. That may be intentional, but it conflicts with the stated version-chain semantics and must be decided explicitly.
+
+Residual risks remain even after these adjustments: the database cannot prove that the bytes shown to a remote model correspond to the recorded hash, provider identity is trusted through the runner, and task #11’s eventual gatekeeper must independently verify that the code leaving the system is exactly the reviewed version.

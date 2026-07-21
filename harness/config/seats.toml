@@ -90,6 +90,7 @@ notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok].
 provider = "codex"
 model = "gpt-5.6-sol"
 tier = "subscription"
+family = "gpt"
 
 // Owner: "Sol needs to be the brain, but prolly doesn't need to be ultra for most
 // convos. Maybe if it's managing a major spec and deciding builds and such, but
@@ -141,6 +142,7 @@ notes = "OAuth is TOLERATED, not sanctioned. Most likely seat to break. Keep API
 provider = "codex"
 model = "gpt-5.6-sol"
 tier = "subscription"
+family = "gpt"
 worktree_isolated = true
 
 model_light    = "gpt-5.6-luna"             // scaffolding, boilerplate, first drafts
@@ -208,6 +210,16 @@ provider = "xai"
 model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
 tier = "subscription"                       // $30 SuperGrok, primary
 family = "grok"
+
+// OFF UNTIL THE LEAKED xAI KEY IS ROTATED (owner task). Turned off rather than left on
+// and failing: an enabled seat with no working key is counted as a panel member that
+// can never report, which parks every job forever and looks like a bug. The panel is
+// claude + gpt today — two families, which meets the floor. Flip this back the day the
+// key is rotated and grok is a third mind again.
+//
+// Owner decision, 2026-07-21: GROK DOES NOT TOUCH THE ARCH MEDICAL-RECORDS REPO. That
+// repo is out of scope entirely (Decision C); this line records the standing rule.
+disabled = true
 worktree_isolated = true
 daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
 build_cap_cents  = 25                       // ~25c/day of building — a RATION
@@ -231,6 +243,7 @@ notes = "Reviews freely. Builds sparingly. Sub primary, API fallback."
 provider = "ollama"
 model = "qwen2.5-coder:7b"
 tier = "local"
+family = "qwen"
 endpoint = "http://127.0.0.1:11434"
 notes = "Bump to qwen3-coder:30b on the Studio (§8 phase 5). One line."
 
@@ -254,6 +267,7 @@ notes = "Bump to qwen3-coder:30b on the Studio (§8 phase 5). One line."
 provider = "claude-cli"                     // sanctioned path; subscription OAuth is NOT
 model = "claude-opus-4-8"
 tier = "subscription"                       // NOT credits — the pool was paused, never shipped
+family = "claude"
 optional = true
 max_calls_per_day = 25                      // keeps escalation from eating interactive headroom
 
@@ -336,11 +350,17 @@ max_spoken_seconds = 12
 // The model-family rule is recorded per-verdict in the DB, so it is AUDITABLE
 // rather than merely asserted. Different models miss different bugs.
 //
-// Four families available: gpt (brain/workhorse), claude (reviewer),
-// grok (grinder_paid), qwen (grinder_local).
+// Four families available: gpt (brain), claude (reviewer), grok (grok),
+// qwen (grinder_local, the LOCAL builder — not a reviewer of its own work).
+//
+// The panel is HIGHER-TIER cross-family reviewers of a local build. Only the
+// claude-cli seat has a working runner today; brain needs the codex login and
+// grok needs the leaked xAI key rotated. Until a SECOND family can run, the
+// family-floor guard correctly PARKS jobs (it does not lower the bar) — see
+// migration 005. That is the safe failure, not a bug.
 // ---------------------------------------------------------------------------
 [gauntlet]
-reviewers = ["brain", "grinder_paid", "grinder_local"]
+reviewers = ["reviewer", "brain", "grok"]   // claude · gpt · grok — real seats, all resolve
 min_model_families = 2                      // §6 floor; we can reach 4
-escalate_to = "reviewer"                    // contested verdicts → Claude...
+escalate_to = "reviewer"                    // needs_human resolution seat
 escalate_to_human_on = ["needs_human"]      // ...or Neill's queue

@@ -59,10 +59,34 @@ DB = Path(__file__).resolve().parent / "db" / "chief.db"
 FAMILY_COLOR = {"claude": "#FF8A3D", "gpt": "#00E5A0", "grok": "#B06CFF", "qwen": "#2E9BFF"}
 
 
+_SEATS_SYNCED = False
+
+
 def db():
     c = connect(DB)
     init_db(c)
+    _sync_seats_once(c)
     return c
+
+
+def _sync_seats_once(c) -> None:
+    """Push seats.toml into the store on the first request after a restart.
+
+    This was never wired up, so the seat definitions only reached the live database when
+    somebody ran it by hand — meaning an edit to the config (a new reviewer, a seat
+    switched off) could sit there looking applied and do nothing. It also runs the
+    startup validation: a gauntlet naming a seat that doesn't exist, or a seat with no
+    model family, is refused loudly here instead of failing later, mid-panel.
+    """
+    global _SEATS_SYNCED
+    if _SEATS_SYNCED:
+        return
+    _SEATS_SYNCED = True          # set first: a broken config must not retry every request
+    try:
+        import dispatch
+        dispatch.sync_seats(c, dispatch.load_config())
+    except Exception as exc:      # noqa: BLE001 — the app must still serve the record
+        print(f"[chief] seat config was not applied: {exc}")
 
 
 # ── The plain-English layer. He must never see a machine word. ───────────────
@@ -85,6 +109,10 @@ _EVENT_ENGLISH = {
     "verdict":    "Gave a verdict",
     "done":       "Finished",
     "error":      "Hit a problem",
+    # A reviewer that sat out MUST NOT read as one that worked. Without this line it
+    # fell through to the default "Worked on it" — the record was honest about the
+    # panel shrinking and the screen quietly contradicted it. (task #10)
+    "skipped":    "Sat this one out",
 }
 
 
@@ -215,10 +243,21 @@ def _why_blocked(c, j) -> str | None:
                        for v in j["verdicts"])
             if not paid:
                 return "Coal wrote this. It can't go anywhere until a better model checks it."
+        if any(v["verdict"] == "fail" for v in j["verdicts"]):
+            return "A reviewer sent this back. It needs another go."
         need = j["required_reviews"] or 0
         got = len({v["reviewer_seat"] for v in j["verdicts"] if v["verdict"] == "pass"})
         if need and got < need:
             return f"Waiting on the others — {got} of {need} have looked at it."
+        # The seat count can be satisfied while the FAMILY floor isn't — three seats
+        # that are all the same underlying model is one mind in three hats. Say which
+        # wall it's actually behind, or the page reads "2 of 2 done" next to a job that
+        # is visibly not moving. (task #10)
+        need_fams = j["required_review_families"] or 0
+        fams = {v["model_family"] for v in j["verdicts"] if v["verdict"] == "pass"}
+        if need_fams and len(fams) < need_fams:
+            return (f"Only {len(fams)} of {need_fams} different models have checked it — "
+                    "it needs a second opinion from a different kind of model.")
     return None
 
 
@@ -339,14 +378,10 @@ def _pick_local_builder(c) -> str | None:
     return row["id"] if row else None
 
 
-def _pick_reviewer(c) -> str | None:
-    """A stronger model to check the local work — a Claude seat (its own login, no
-    metered key involved), so the loop can close without touching anything that still
-    needs rotating."""
-    row = c.execute(
-        "SELECT id FROM seats WHERE provider = 'claude-cli' AND enabled = 1 ORDER BY id LIMIT 1"
-    ).fetchone()
-    return row["id"] if row else None
+# Who reviews is NOT the server's decision any more (task #10). It used to hand-pick a
+# single Claude seat here, which quietly made "one reviewer" the real policy no matter
+# what the gauntlet config said. The panel now comes from the config, and the family
+# floor decides whether it's enough.
 
 
 @app.post("/api/dispatch")
@@ -369,13 +404,9 @@ async def dispatch_endpoint(request: Request):
             {"error": "The free local coder isn't available on this machine right now."},
             status_code=503,
         )
-    reviewer = _pick_reviewer(c)
-
     try:
         d = dispatch_mod.dispatch_local(
-            c, text, builder,
-            origin="text", dispatch_key=nonce, reviewer_seat=reviewer,
-            required_reviews=1,
+            c, text, builder, origin="text", dispatch_key=nonce,
         )
     except dispatch_mod.DispatchRefused as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
@@ -384,7 +415,8 @@ async def dispatch_endpoint(request: Request):
     if d.reused:
         reply = f"Already on it — {who} picked that up a moment ago."
     else:
-        reply = f"{who} is on it. A stronger model will check the work before it's called done."
+        reply = (f"{who} is on it. A panel of different models will check the work "
+                 "before it's called done.")
     return {"job_id": d.job_id, "reused": d.reused, "reply": reply, "builder": builder}
 
 

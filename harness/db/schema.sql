@@ -276,6 +276,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     --      on scope.'"
     required_reviews INTEGER NOT NULL DEFAULT 0,
 
+    -- How many DISTINCT model families must have a passing review before done. This is
+    -- the floor "full set, always" doesn't itself guarantee: a full panel could still be
+    -- one family wearing three hats. Set at dispatch from the gauntlet's
+    -- min_model_families. Snapshotted and un-lowerable, like required_reviews. (task #10)
+    required_review_families INTEGER NOT NULL DEFAULT 0,
+
     result        TEXT,                      -- final summary / diff ref
     error         TEXT,
 
@@ -497,9 +503,13 @@ CREATE TABLE IF NOT EXISTS events (
     lane          TEXT NOT NULL,             -- 'riggs' | 'finn' | 'nova' | 'forge' ...
     model         TEXT NOT NULL,             -- who is actually in the chair right now
     family        TEXT NOT NULL,
+    -- 'skipped' is load-bearing (task #10): the record needs a word for something that
+    -- did NOT happen. A reviewer that was capped out or couldn't run must leave a mark,
+    -- or a panel that quietly shrank looks identical to a full one. (Migration 006.)
     kind          TEXT NOT NULL CHECK (kind IN (
                       'dispatched', 'thinking', 'read', 'edit', 'write',
-                      'command', 'test_run', 'browse', 'verdict', 'done', 'error'
+                      'command', 'test_run', 'browse', 'verdict', 'done', 'error',
+                      'skipped'
                   )),
     target        TEXT,                      -- the file / command / URL it touched
     detail        TEXT,                      -- one line, terminal-style
@@ -858,6 +868,33 @@ BEGIN
           -- gate 3: the panel must have reviewed THIS version, not an earlier one
           AND v.reviewed_version IS NEW.head_version
     ) < NEW.required_reviews;
+END;
+
+-- ===========================================================================
+-- GUARD 5b — the family floor (task #10). "Full set, always" counts SEATS; it does
+-- not guarantee more than one MIND looked. Sol's #10 gate: min_model_families was
+-- enforced nowhere in the DB — the gauntlet's core property rested on Python. Now
+-- the DB refuses ->done without >= required_review_families DISTINCT passing families
+-- on this version. Fails closed: too few families -> parked (never lowers the bar).
+-- Snapshotted un-lowerable at dispatch (guard_family_floor_is_fixed).
+-- ===========================================================================
+CREATE TRIGGER IF NOT EXISTS guard_family_floor_is_fixed
+BEFORE UPDATE OF required_review_families ON jobs
+WHEN OLD.required_review_families > 0 AND NEW.required_review_families < OLD.required_review_families
+BEGIN
+    SELECT RAISE(ABORT, 'guard: the family floor cannot be lowered after dispatch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS guard_family_floor
+BEFORE UPDATE OF status ON jobs
+WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_review_families > 0
+BEGIN
+    SELECT RAISE(ABORT, 'guard: fewer model families reviewed this than required')
+    WHERE (
+        SELECT COUNT(DISTINCT v.model_family) FROM verdicts v
+        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+          AND v.reviewed_version IS NEW.head_version
+    ) < NEW.required_review_families;
 END;
 
 -- ═══════════════════════════════════════════════════════════════════════════

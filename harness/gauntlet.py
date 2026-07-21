@@ -1,0 +1,499 @@
+"""The review panel (spec §6, task #10) — several different minds check the same work,
+at the same time, against one frozen version.
+
+Before this file, dispatch ran ONE reviewer. That is enough to close the loop and it is
+not the design: the property this project exists to guarantee is that *a different mind*
+looked, because different model families miss different bugs. One reviewer cannot
+provide it, and a panel of three seats that all run on the same model provides it no
+better — which is why the floor counts FAMILIES, not seats.
+
+Four things are load-bearing here:
+
+  1. ONE FROZEN BUNDLE. Every reviewer is handed the identical version string and the
+     identical code. Nothing re-reads the job row mid-panel. Two verdicts must never
+     bind to two different versions of "the same" work.
+
+  2. NOTHING IS ASSUMED — only recorded. A family counts when a verdict from that
+     family is on the record for THIS version. A reviewer that was skipped, capped out,
+     or crashed contributes nothing, and the panel says so out loud (see `runs`).
+
+  3. FAIL CLOSED. Too few families, any failure, any unanswered escalation → the job
+     stays parked. The panel never lowers the bar to reach a conclusion, and it never
+     forces a status past the database guards. It feeds them.
+
+  4. THE DATABASE IS THE BOUNDARY, NOT THIS FILE. Everything below is also enforced in
+     schema.sql as triggers. If this module were wrong, or replaced by something
+     careless, the guards would still refuse. That is deliberate: Python decides what to
+     TRY; the schema decides what is ALLOWED.
+
+Threads, not async: each reviewer is a subprocess call that blocks for tens of seconds,
+and each thread opens its OWN sqlite connection (connections are not shareable across
+threads).
+"""
+
+from __future__ import annotations
+
+import subprocess
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from db.jobs import (
+    GuardViolation,
+    connect,
+    over_budget,
+    record_usage,
+    record_verdict,
+    seat,
+    set_status,
+)
+
+DB_PATH = Path(__file__).resolve().parent / "db" / "chief.db"
+
+REVIEW_TIMEOUT_S = 300          # a reviewer that hasn't answered by now has hung
+JOIN_GRACE_S = 30               # how long past its own timeout we wait for a thread
+DEFAULT_ESTIMATE_CENTS = 5      # what we reserve for a metered review before calling
+
+
+# ---------------------------------------------------------------------------
+# The reviewers themselves. One function per provider — adding a family to the
+# panel is adding a function here and a seat in seats.toml. Nothing else.
+# ---------------------------------------------------------------------------
+REVIEW_PROMPT = (
+    "You are reviewing another model's work. Judge it on whether it actually does what "
+    "was asked, and whether it is correct.\n"
+    "Reply with EXACTLY one line, nothing else:\n"
+    "  PASS <one-line reason>   — it is correct and does what was asked\n"
+    "  FAIL <one-line reason>   — it is wrong, incomplete, or unsafe\n\n"
+    "The task was: {request}\n\nThe work:\n{code}"
+)
+
+
+MAX_CODE_CHARS = 200_000        # past this the CLI's argument list won't hold it
+
+
+def _parse_verdict(out: str) -> tuple[str, str]:
+    """Pull the verdict line out of a CLI's output.
+
+    Read from the END. The prompt we send contains the literal words "PASS <one-line
+    reason>" and "FAIL <one-line reason>", and CLIs echo their input — codex puts that
+    echo on stderr today, but taking the FIRST match would turn any release that moves
+    it to stdout into an automatic pass on every review. Reading backwards makes the
+    model's actual answer, which comes last, the one that counts.
+
+    Deliberately biased toward FAIL: a reviewer whose answer we cannot read has not
+    passed anything. Silence is not approval.
+    """
+    for line in reversed(out.splitlines()):
+        stripped = line.strip()
+        if stripped.upper().startswith("PASS"):
+            return "pass", stripped[:280]
+        if stripped.upper().startswith("FAIL"):
+            return "fail", stripped[:280]
+    return "fail", ("the reviewer did not answer in the required form: "
+                    + out.strip()[:200]) if out.strip() else "the reviewer said nothing"
+
+
+class ReviewerBroke(RuntimeError):
+    """The reviewer never rendered a judgement — the TOOL failed, not the work.
+
+    This distinction is the whole reason the class exists. A CLI that exits non-zero
+    (expired login, rate limit, renamed model) still prints something to stdout, and
+    that something contains no verdict line — so treating output as an answer records a
+    FAIL against the build. Verdicts are permanent and bound to the version, so an
+    infrastructure hiccup would condemn good work forever, and tell Neill a reviewer
+    "found a problem" when nothing reviewed anything. A broken reviewer is a SKIP.
+    """
+
+
+def _run_cli(cmd: list[str]) -> tuple[str, str]:
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=REVIEW_TIMEOUT_S,
+        stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise ReviewerBroke(
+            f"{cmd[0]} exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout).strip()[:200]}"
+        )
+    return _parse_verdict(proc.stdout)
+
+
+def _prompt(request: str, code: str) -> str:
+    if len(code) > MAX_CODE_CHARS:
+        # Say so in the prompt itself. A reviewer that silently judged 20% of the work
+        # would be worse than one that didn't run.
+        code = (code[:MAX_CODE_CHARS]
+                + f"\n\n[TRUNCATED — {len(code) - MAX_CODE_CHARS} more characters were "
+                  "not shown. If you cannot judge the whole thing, answer FAIL.]")
+    return REVIEW_PROMPT.format(request=request, code=code)
+
+
+def _claude_review(request: str, code: str, model: str) -> tuple[str, str]:
+    return _run_cli(["claude", "-p", "--model", model, _prompt(request, code)])
+
+
+def _codex_review(request: str, code: str, model: str) -> tuple[str, str]:
+    """The GPT-family reviewer, through the codex CLI.
+
+    `--skip-git-repo-check` because the reviewer reads the work it was handed; it is not
+    operating on a checkout, and requiring one would tie the panel to where it runs.
+    """
+    return _run_cli(["codex", "exec", "--skip-git-repo-check", "--model", model,
+                     _prompt(request, code)])
+
+
+REVIEWERS: dict[str, Callable[[str, str, str], tuple[str, str]]] = {
+    "claude-cli": _claude_review,
+    "codex": _codex_review,
+    # xai / xai-api land here once the key is rotated — see seats.toml.
+}
+
+
+def has_runner(provider: str) -> bool:
+    return provider in REVIEWERS
+
+
+# ---------------------------------------------------------------------------
+# What came back
+# ---------------------------------------------------------------------------
+@dataclass
+class ReviewerRun:
+    """One seat's participation — including the ones that did NOT participate.
+
+    A skipped reviewer is part of the result, never an omission. "No silent caps": a
+    panel that quietly shrank reads as a full panel to anyone looking at the verdicts.
+    """
+    seat_id: str
+    family: str = ""
+    verdict: str | None = None      # pass | fail | needs_human | None if it never ran
+    summary: str = ""
+    skipped: str = ""               # why it didn't run, in plain words
+
+    @property
+    def ran(self) -> bool:
+        return self.verdict is not None
+
+
+@dataclass
+class PanelResult:
+    job_id: int
+    version: str
+    required_families: int
+    runs: list[ReviewerRun] = field(default_factory=list)
+    certified: bool = False         # did the job actually reach 'done'
+    parked_reason: str = ""         # if not, why — in plain words
+
+    @property
+    def families_passed(self) -> set[str]:
+        return {r.family for r in self.runs if r.verdict == "pass"}
+
+    @property
+    def failed(self) -> list[ReviewerRun]:
+        return [r for r in self.runs if r.verdict == "fail"]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "version": self.version,
+            "required_families": self.required_families,
+            "families_passed": sorted(self.families_passed),
+            "certified": self.certified,
+            "parked_reason": self.parked_reason,
+            "runs": [
+                {"seat": r.seat_id, "family": r.family, "verdict": r.verdict,
+                 "summary": r.summary, "skipped": r.skipped}
+                for r in self.runs
+            ],
+        }
+
+    def spoken(self) -> str:
+        """One sentence for the voice. No seat names, no jargon."""
+        n = len([r for r in self.runs if r.ran])
+        minds = len(self.families_passed)
+        if self.certified:
+            return f"{n} different models checked it and it passed. Ready for you."
+        if self.failed:
+            return "It was checked and sent back — one of the reviewers found a problem."
+        return f"Only {minds} of the {self.required_families} required models could check it, so it's waiting."
+
+
+# ---------------------------------------------------------------------------
+# The panel
+# ---------------------------------------------------------------------------
+def _event(conn, job_id: int, seat_row, kind: str, detail: str) -> None:
+    conn.execute(
+        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (job_id, seat_row["id"], seat_row["id"], seat_row["model"],
+         seat_row["family"], kind, detail),
+    )
+
+
+def _reserve_review_budget(conn, seat_id: str, job_id: int, cents: int) -> bool:
+    """Take the money BEFORE the call, not after.
+
+    Sol: "refusing to RECORD a charge doesn't unspend it." Two reviewers reserving at
+    once both hit the ledger, and the ledger's own cap trigger refuses the one that
+    would breach — so the race resolves in the database, not in a Python check that
+    both threads passed a moment earlier. Uncapped seats reserve nothing.
+    """
+    row = seat(conn, seat_id)
+    if row is None or row["daily_cap_cents"] is None:
+        return True
+    try:
+        record_usage(conn, seat_id, cents, job_id=job_id, role="review")
+        return True
+    except GuardViolation:
+        return False
+
+
+def _review_one(
+    job_id: int,
+    seat_id: str,
+    request: str,
+    code: str,
+    version: str,
+    cfg: dict[str, Any],
+    out: ReviewerRun,
+    db_path: Path,
+    decided: threading.Event,
+) -> None:
+    """One reviewer, in its own thread, on its own connection. Never raises.
+
+    The outer try/except is not belt-and-braces. ANY escape from this function kills the
+    thread with the run left blank — neither a verdict nor a stated reason — and a
+    reviewer that is neither counted nor excused is precisely the silent shrink this
+    panel exists to prevent. So every exit lands in `out`.
+    """
+    conn = None
+    try:
+        conn = connect(db_path)
+        row = seat(conn, seat_id)
+        if row is None:
+            out.skipped = "that reviewer isn't set up"
+            return
+        out.family = row["family"]
+        if not row["enabled"]:
+            out.skipped = "that reviewer is turned off"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+        runner = REVIEWERS.get(row["provider"])
+        if runner is None:
+            out.skipped = "we can't run that reviewer on this machine yet"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+        if over_budget(conn, seat_id):
+            out.skipped = "that reviewer is out of budget for today"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+
+        estimate = int(
+            cfg.get("seats", {}).get(seat_id, {}).get(
+                "review_estimate_cents", DEFAULT_ESTIMATE_CENTS)
+        )
+        # Already reviewed this exact version? Then this is a re-run, and repeating it
+        # would spend the money twice and stack duplicate verdicts on the record.
+        already = conn.execute(
+            "SELECT verdict, summary FROM verdicts WHERE job_id=? AND reviewer_seat=? "
+            "AND reviewed_version IS ? ORDER BY id DESC LIMIT 1",
+            (job_id, seat_id, version),
+        ).fetchone()
+        if already is not None:
+            out.verdict, out.summary = already["verdict"], already["summary"] or ""
+            return
+
+        if not _reserve_review_budget(conn, seat_id, job_id, estimate):
+            out.skipped = "that reviewer is out of budget for today"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+
+        _event(conn, job_id, row, "thinking", "Checking the work.")
+        try:
+            verdict, summary = runner(request, code, row["model"])
+        except subprocess.TimeoutExpired:
+            out.skipped = "that reviewer took too long and was stopped"
+            _event(conn, job_id, row, "error", out.skipped)
+            return
+        except ReviewerBroke as exc:
+            # The TOOL failed, not the work. Never a verdict — see ReviewerBroke.
+            out.skipped = "that reviewer couldn't run"
+            _event(conn, job_id, row, "error", f"{out.skipped}: {str(exc)[:160]}")
+            return
+        except Exception as exc:                      # noqa: BLE001 — a dead reviewer
+            out.skipped = "that reviewer couldn't finish"   # is a skip, never a pass
+            _event(conn, job_id, row, "error", f"{out.skipped}: {str(exc)[:120]}")
+            return
+
+        # The panel has already decided and moved on without us. Recording now would
+        # land a verdict on a job that was called finished a moment ago — and if it were
+        # a FAIL, the completion guards could no longer act on it, because they only fire
+        # on the way INTO done. A late answer is a non-answer.
+        if decided.is_set():
+            out.skipped = "that reviewer answered after the panel had already decided"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+
+        # reviewed_version is passed EXPLICITLY, never defaulted. The default reads the
+        # job's current head — which is only correct if nothing moved, and the whole
+        # point of the frozen bundle is not to depend on that being true.
+        try:
+            record_verdict(conn, job_id, seat_id, verdict=verdict,
+                           summary=summary, role="reviewer", reviewed_version=version)
+        except GuardViolation as exc:
+            out.skipped = "the record refused that verdict"
+            _event(conn, job_id, row, "error", str(exc)[:160])
+            return
+
+        out.summary = summary
+        out.verdict = verdict          # set LAST: `verdict` is what marks the run as real
+        _event(conn, job_id, row, "verdict",
+               "Passed the check." if verdict == "pass" else "Sent it back with notes.")
+    except Exception as exc:                          # noqa: BLE001
+        out.skipped = out.skipped or f"that reviewer couldn't finish: {str(exc)[:120]}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def run_panel(
+    conn,
+    job_id: int,
+    request: str,
+    code: str,
+    version: str,
+    cfg: dict[str, Any],
+    *,
+    roster: list[str] | None = None,
+    db_path: Path | None = None,
+) -> PanelResult:
+    """Run the whole panel in parallel against one frozen bundle, then decide.
+
+    `conn` is the caller's connection, used only for the final decision. Each reviewer
+    gets its own. Returns what actually happened — including who didn't run and why.
+    """
+    import dispatch                      # local: dispatch imports this module
+
+    gauntlet = cfg.get("gauntlet", {})
+    # Ask the SAME question dispatch asked when it stamped the panel size on the job:
+    # who can actually sit? Falling back to the raw config list would put the panel and
+    # the job's own requirements at odds — the job needing 2 seats while the panel tried
+    # 3, one of which cannot run.
+    roster = roster if roster is not None else dispatch.panel_roster(conn, cfg)[0]
+    floor = int(gauntlet.get("min_model_families", 0))
+    db_path = db_path or DB_PATH
+
+    result = PanelResult(job_id=job_id, version=version, required_families=floor)
+
+    # A floor of zero is not "no requirement" — it is an UNCONFIGURED panel, and
+    # `0 < 0` is False, so every later check would wave it through and certify work
+    # nobody looked at. dispatch refuses this at the door; refuse it here too, because
+    # this function is reachable from anywhere and must not depend on its caller having
+    # been careful. Same for an empty roster: nobody to ask is not everybody agreeing.
+    if floor < 1 or not roster:
+        result.parked_reason = (
+            "no review panel is configured for this job — nothing would have checked it"
+        )
+        return result
+
+    result.runs = [ReviewerRun(seat_id=s) for s in roster]
+    decided = threading.Event()
+
+    threads = [
+        threading.Thread(
+            target=_review_one,
+            args=(job_id, run.seat_id, request, code, version, cfg, run, db_path,
+                  decided),
+            name=f"review-{job_id}-{run.seat_id}", daemon=True,
+        )
+        for run in result.runs
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=REVIEW_TIMEOUT_S + JOIN_GRACE_S)
+
+    # Close the door BEFORE reading any results. A reviewer still running has not
+    # answered, and must not be able to answer into a decision already made — the
+    # completion guards only fire on the way INTO done, so a late objection could never
+    # stop anything. It is recorded as not having participated, which is the truth.
+    decided.set()
+    for t, run in zip(threads, result.runs):
+        if t.is_alive() and not run.ran:
+            run.skipped = run.skipped or "that reviewer never answered"
+
+    # ── The decision. Every branch below ends in "leave it parked" except one. ──
+    if result.failed:
+        result.parked_reason = "a reviewer failed this version"
+        return result
+
+    families = result.families_passed
+    if len(families) < floor:
+        ran = len([r for r in result.runs if r.ran])
+        result.parked_reason = (
+            f"only {len(families)} model famil{'y' if len(families) == 1 else 'ies'} "
+            f"reviewed this ({ran} of {len(result.runs)} reviewers ran); "
+            f"{floor} are required"
+        )
+        return result
+
+    try:
+        set_status(conn, job_id, "done",
+                   spoken_summary=f"Checked by {len(families)} different models. Ready for you.")
+        result.certified = True
+    except GuardViolation as exc:
+        # Another gate still holds (panel size, an unanswered escalation, an old
+        # objection). Park honestly rather than argue with the boundary.
+        result.parked_reason = str(exc).replace("guard: ", "")
+
+    if result.certified:
+        _reconcile(conn, result)
+    if not result.certified:
+        # Say why it stopped, in the record, in plain words. A job parked with no stated
+        # reason is indistinguishable from a job nobody looked at.
+        conn.execute("UPDATE jobs SET spoken_summary = ? WHERE id = ?",
+                     (result.spoken(), job_id))
+    return result
+
+
+def _reconcile(conn, result: PanelResult) -> None:
+    """Last look: did an objection land while we were deciding?
+
+    The `decided` flag narrows that window; it cannot close it, because a straggler can
+    pass the check and be writing as the main thread commits. So after certifying we ask
+    the record — not our own bookkeeping — whether a failure exists against this version,
+    and un-certify if one does. Status can move back out of 'done'; the guards only
+    police the way in. A job wrongly parked costs a re-run. A job wrongly called finished
+    is the thing this project exists to prevent.
+    """
+    late = conn.execute(
+        "SELECT reviewer_seat FROM verdicts WHERE job_id=? AND verdict='fail' "
+        "AND reviewed_version IS ?", (result.job_id, result.version),
+    ).fetchone()
+    if late is None:
+        return
+    set_status(conn, result.job_id, "review",
+               spoken_summary="Sent back — a reviewer found a problem.")
+    result.certified = False
+    result.parked_reason = "a reviewer failed this version (it answered late)"
+
+
+def run_gauntlet_for_job(conn, job_id: int, cfg: dict[str, Any], *,
+                         db_path: Path | None = None) -> PanelResult:
+    """Run the panel for a job that is already parked at review.
+
+    Reads the frozen bundle off the job row ONCE — the request, the output that was put
+    forward, and the version it was recorded under — and hands that same snapshot to
+    everyone.
+    """
+    job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        raise ValueError(f"no such job: {job_id}")
+    if not job["head_version"]:
+        # Nothing was put forward, so there is nothing to bind a verdict to. A verdict
+        # with no version condemns or approves we-don't-know-what.
+        return PanelResult(job_id=job_id, version="", required_families=0,
+                           parked_reason="no finished version to review")
+    return run_panel(conn, job_id, job["request"], job["result"] or "",
+                     job["head_version"], cfg, db_path=db_path)

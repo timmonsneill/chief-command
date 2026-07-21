@@ -231,6 +231,14 @@ def render_voice(conn: sqlite3.Connection, job_id: int, depth: str = "brief") ->
             return f"{lane} is done. Review's happening."
         passed = sum(1 for v in verdicts if v["verdict"] == "pass")
         total = job["required_reviews"] or len(verdicts)
+        # Count MINDS, not chairs — the floor the job is actually waiting on is how many
+        # different kinds of model signed off, and that is also the honest thing to say
+        # out loud. "Two of two are in" next to a stalled job is a lie by omission.
+        fams = {v["model_family"] for v in verdicts if v["verdict"] == "pass"}
+        need_fams = job["required_review_families"] or 0
+        if need_fams and len(fams) < need_fams:
+            return (f"{who} finished {task}. It's with the panel — "
+                    f"{len(fams)} of {need_fams} different models have signed off.")
         return (f"{who} finished {task}. "
                 f"It's with the panel — {passed} of {total} in so far.")
 

@@ -27,8 +27,16 @@ SEATS = [
     Seat("grinder_local", "ollama", "qwen2.5-coder:7b", "qwen", "local"),
     Seat("reviewer", "claude-cli", "claude-opus-4-8", "claude", "subscription",
          daily_cap_cents=500),
+    Seat("brain", "codex", "gpt-5.6-sol", "gpt", "subscription"),
     Seat("off_seat", "ollama", "qwen2.5-coder:7b", "qwen", "local"),
 ]
+
+# Two families that both have real runners — the minimum panel that can certify
+# anything. Dispatch now reads its review requirements from here, never from the caller.
+CFG = {
+    "seats": {},
+    "gauntlet": {"reviewers": ["reviewer", "brain"], "min_model_families": 2},
+}
 
 
 @pytest.fixture()
@@ -56,10 +64,12 @@ def _ollama_up() -> bool:
 
 # ── Recording: nothing runs without a row, and the row says the right things ──
 def test_dispatch_records_the_job_before_starting(conn):
-    d = dispatch.dispatch_local(conn, "add a helper function", "grinder_local", start=False)
+    d = dispatch.dispatch_local(conn, "add a helper function", "grinder_local",
+                                cfg=CFG, start=False)
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (d.job_id,)).fetchone()
     assert row["status"] == "in_progress"
-    assert row["required_reviews"] == 1
+    assert row["required_reviews"] == 2, "the panel size must come from the config"
+    assert row["required_review_families"] == 2, "the family floor must be stamped on"
     assert row["tier"] and row["tier_reason"]          # tiering actually ran
     assert row["branch"] == f"job/{d.job_id}"
     assert d.reused is False
@@ -68,9 +78,9 @@ def test_dispatch_records_the_job_before_starting(conn):
 # ── Duplicate protection: a retry must not start the same job twice ───────────
 def test_a_repeated_dispatch_key_returns_the_same_job(conn):
     first = dispatch.dispatch_local(conn, "build X", "grinder_local",
-                                    dispatch_key="abc-123", start=False)
+                                    cfg=CFG, dispatch_key="abc-123", start=False)
     second = dispatch.dispatch_local(conn, "build X", "grinder_local",
-                                     dispatch_key="abc-123", start=False)
+                                     cfg=CFG, dispatch_key="abc-123", start=False)
     assert second.reused is True
     assert second.job_id == first.job_id
     n = conn.execute("SELECT COUNT(*) c FROM jobs").fetchone()["c"]
@@ -78,20 +88,20 @@ def test_a_repeated_dispatch_key_returns_the_same_job(conn):
 
 
 def test_different_keys_are_different_jobs(conn):
-    a = dispatch.dispatch_local(conn, "build X", "grinder_local", dispatch_key="k1", start=False)
-    b = dispatch.dispatch_local(conn, "build Y", "grinder_local", dispatch_key="k2", start=False)
+    a = dispatch.dispatch_local(conn, "build X", "grinder_local", cfg=CFG, dispatch_key="k1", start=False)
+    b = dispatch.dispatch_local(conn, "build Y", "grinder_local", cfg=CFG, dispatch_key="k2", start=False)
     assert a.job_id != b.job_id
 
 
 # ── Refusals: the store says no before any work is done ───────────────────────
 def test_unknown_seat_is_refused(conn):
     with pytest.raises(dispatch.DispatchRefused, match="unknown seat"):
-        dispatch.dispatch_local(conn, "build X", "nobody", start=False)
+        dispatch.dispatch_local(conn, "build X", "nobody", cfg=CFG, start=False)
 
 
 def test_disabled_seat_is_refused(conn):
     with pytest.raises(dispatch.DispatchRefused, match="turned off"):
-        dispatch.dispatch_local(conn, "build X", "off_seat", start=False)
+        dispatch.dispatch_local(conn, "build X", "off_seat", cfg=CFG, start=False)
 
 
 # ── End to end: the local model actually runs and lands real work ─────────────
@@ -99,9 +109,9 @@ def test_disabled_seat_is_refused(conn):
 def test_the_local_worker_actually_produces_and_parks_for_review(conn):
     task = ("Write a Python function `add(a, b)` that returns their sum. "
             "Return ONLY the code.")
-    d = dispatch.dispatch_local(conn, task, "grinder_local", start=False)
+    d = dispatch.dispatch_local(conn, task, "grinder_local", cfg=CFG, start=False)
 
-    result = executor.run_job(d.job_id)          # synchronous; no reviewer wired
+    result = executor.run_job(d.job_id)          # synchronous; no panel wired
     assert result["status"] == "review", "local output should park for review"
 
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (d.job_id,)).fetchone()

@@ -45,13 +45,33 @@ class Seat:
 
 
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, isolation_level=None)  # autocommit; we manage txns
+    # timeout is stated rather than inherited from the stdlib default: the review panel
+    # writes verdicts from several threads at once, and how long a writer waits for the
+    # lock before giving up is a real property of this system, not a detail to leave to
+    # whatever the standard library happens to pick.
+    conn = sqlite3.connect(db_path, isolation_level=None,  # autocommit; we manage txns
+                           timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    """Build the schema on a FRESH database only.
+
+    This used to run schema.sql on EVERY call — including server startup against the LIVE
+    DB. That made editing schema.sql a silent live deploy: a new `CREATE TRIGGER IF NOT
+    EXISTS` installs on the next restart while `CREATE TABLE IF NOT EXISTS` stays a no-op,
+    so a trigger can land WITHOUT the column it references and jam every status change (it
+    did, 2026-07-20). An existing DB now advances ONLY through the numbered migrations in
+    db/migrations/, applied deliberately — never as a side effect of a restart.
+    """
+    initialized = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+    ).fetchone()
+    if initialized:
+        return
     conn.executescript(SCHEMA_PATH.read_text())
 
 
