@@ -3,8 +3,13 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
-> ⚠️ **2026-07-20: the current consolidated state + all open todos live in
-> `docs/HANDOFF_2026-07-20.md`. Read that first.** In one session the build went from
+> ⚠️ **2026-07-21: read `docs/HANDOFF_2026-07-21.md` FIRST.** The review panel (#10) is
+> done and pushed; the gatekeeper (#11) is built but deliberately NOT pushed — 19 old
+> tests still assert the rules migration 007 changed. The live open todos now live in the
+> DATABASE (Projects tab + the terminal status line), not in this file.
+>
+> ⚠️ **2026-07-20: the previous consolidated state lives in
+> `docs/HANDOFF_2026-07-20.md`.** In one session the build went from
 > "a dashboard that lied" to a working system: all 3 Sol build gates closed, dispatch
 > is real, the app installs as a PWA, the command center is real (projects, per-project
 > todos, timeline, uploads), and voice is wired. 113 tests pass. Remaining core: full
