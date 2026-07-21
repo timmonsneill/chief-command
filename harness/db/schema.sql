@@ -855,9 +855,13 @@ END;
 -- ⚠️ Sol #7: "The full panel can be faked with duplicate passes." It counted ROWS.
 -- One reviewer could pass the same job six times. Now it counts distinct seats.
 -- ===========================================================================
+-- The floor is UNCONDITIONAL (migration 007). It used to fire only when
+-- required_reviews > 0 — so a job whose requirements were never stamped had no
+-- requirements to fail, and reached 'done' with zero verdicts. Unstamped is not
+-- unrequired.
 CREATE TRIGGER IF NOT EXISTS guard_full_panel
 BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+WHEN NEW.status = 'done' AND OLD.status <> 'done'
 BEGIN
     SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
     WHERE (
@@ -867,7 +871,7 @@ BEGIN
         WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
           -- gate 3: the panel must have reviewed THIS version, not an earlier one
           AND v.reviewed_version IS NEW.head_version
-    ) < NEW.required_reviews;
+    ) < MAX(NEW.required_reviews, 1);
 END;
 
 -- ===========================================================================
@@ -887,14 +891,47 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS guard_family_floor
 BEFORE UPDATE OF status ON jobs
-WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_review_families > 0
+WHEN NEW.status = 'done' AND OLD.status <> 'done'
 BEGIN
     SELECT RAISE(ABORT, 'guard: fewer model families reviewed this than required')
     WHERE (
         SELECT COUNT(DISTINCT v.model_family) FROM verdicts v
         WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
           AND v.reviewed_version IS NEW.head_version
-    ) < NEW.required_review_families;
+          -- The AUTHOR is not a second opinion. Same-family review is allowed (it is a
+          -- weaker signal, not a forbidden one — see test_jobs.py) but it does not COUNT
+          -- toward diversity, or "two different minds" could include the one that wrote
+          -- it. (Migration 007.)
+          AND v.model_family <> NEW.builder_family
+    ) < MAX(NEW.required_review_families, 1);
+END;
+
+-- ---------------------------------------------------------------------------
+-- The gatekeeper's own log (task #11). events.job_id is NOT NULL, and a deploy is not
+-- necessarily about a job — so without this, a deploy's grants AND refusals had nowhere
+-- to go and were silently dropped. Append-only, like verdicts: a record, not a draft.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS gate_log (
+    id          INTEGER PRIMARY KEY,
+    verb        TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    granted     INTEGER NOT NULL CHECK (granted IN (0,1)),
+    detail      TEXT NOT NULL,
+    asked_by    TEXT NOT NULL,
+    job_id      INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TRIGGER IF NOT EXISTS guard_gate_log_is_append_only
+BEFORE UPDATE ON gate_log
+BEGIN
+    SELECT RAISE(ABORT, 'guard: the gatekeeper log is a record, not a draft');
+END;
+
+CREATE TRIGGER IF NOT EXISTS guard_gate_log_cannot_be_deleted
+BEFORE DELETE ON gate_log
+BEGIN
+    SELECT RAISE(ABORT, 'guard: the gatekeeper log cannot be deleted');
 END;
 
 -- ═══════════════════════════════════════════════════════════════════════════

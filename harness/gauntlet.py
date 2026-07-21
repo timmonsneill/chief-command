@@ -240,12 +240,24 @@ def _reserve_review_budget(conn, seat_id: str, job_id: int, cents: int) -> bool:
     both threads passed a moment earlier. Uncapped seats reserve nothing.
     """
     row = seat(conn, seat_id)
-    if row is None or row["daily_cap_cents"] is None:
+    if row is None:
         return True
+    # ALWAYS go through the ledger, even for a seat with no daily cap. Skipping the write
+    # when daily_cap_cents was NULL meant the MONTHLY budget and the per-role review
+    # ration never saw those calls at all — and today's two working reviewers are both
+    # uncapped, so that was every review in production. A flat-rate seat records 0 and
+    # still shows up in the account of what ran.
+    if row["tier"] != "metered":
+        cents = 0
+    # ASK, don't take. Spending is the gatekeeper's power (task #11) — the panel is a
+    # caller like any other, and gets no special path to the money because it happens
+    # to live in the same process.
+    import gatekeeper
     try:
-        record_usage(conn, seat_id, cents, job_id=job_id, role="review")
+        gatekeeper.spend(conn, seat_id, cents, job_id=job_id, role="review",
+                         asked_by="the review panel")
         return True
-    except GuardViolation:
+    except gatekeeper.Refused:
         return False
 
 

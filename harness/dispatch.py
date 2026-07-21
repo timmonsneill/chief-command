@@ -315,18 +315,15 @@ def dispatch(
             f"seat '{builder_seat}' is over its daily cap — refusing to dispatch"
         )
 
+    # SAME roster question dispatch_local asks. This path used to count the raw config
+    # list, so a job here was stamped as needing 3 reviewers when only 2 could ever run —
+    # and then parked forever with nothing to explain it, instead of one legible refusal
+    # at the door. Both entrances, one rule.
     gauntlet = cfg.get("gauntlet", {})
-    required = len(gauntlet.get("reviewers", []))          # full set, always (seats)
-    families = int(gauntlet.get("min_model_families", 0))  # the family floor (task #10)
-
-    # Fail CLOSED. A missing/empty gauntlet would set both requirements to 0 and silently
-    # disable the completion guards — a job would sail to done with no review at all. An
-    # unconfigured panel is a refusal to dispatch, never an open door. (Sol re-gate)
-    if required < 1 or families < 1:
-        raise DispatchRefused(
-            "gauntlet is not configured (needs reviewers and min_model_families >= 1) "
-            "— refusing to dispatch work nothing would review"
-        )
+    roster, excluded = panel_roster(conn, cfg)
+    required = len(roster)
+    families = int(gauntlet.get("min_model_families", 0))
+    _refuse_a_panel_that_cannot_hold(conn, roster, families)
 
     # One transaction: the job must never exist for even a moment without its review
     # requirements stamped on (autocommit would otherwise leave a floor-0 gap).
@@ -397,21 +394,26 @@ def run_gauntlet(conn, job_id: int, cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def ship(conn, job_id: int, owner_confirmed: bool = False) -> None:
-    """Ship a job. The GATES decide, not a human and not an agent's confidence.
+    """DO NOT CALL. Shipping belongs to the gatekeeper now (task #11).
 
-    Owner override (2026-07-13): Neill is out of the critical path. A job that cleared
-    'done' AND carries a passing cross-family tester verdict backed by real Playwright
-    artifacts will ship on its own. The schema refuses anything less — so an agent
-    cannot ship on vibes, and Neill doesn't have to stay up to approve it.
+    This function is the reason #11 exists: it was one import away from any agent, and
+    it did the thing because it was called. `gatekeeper.merge()` does the same job and
+    re-reads the record instead of trusting the caller.
 
-    owner_confirmed is optional and only stamps the record (useful when he DOES eyeball
-    something). It grants no extra power: the gates apply either way.
+    Kept as a refusal rather than deleted, so that anything still reaching for the old
+    power gets a legible answer instead of an ImportError somebody "fixes" by
+    reimplementing it locally.
     """
-    if owner_confirmed:
-        conn.execute(
-            "UPDATE jobs SET owner_confirmed_at = datetime('now') WHERE id = ?", (job_id,)
-        )
-    set_status(conn, job_id, "shipped")
+    raise DispatchRefused(
+        "shipping is the gatekeeper's job now — ask it to merge (gatekeeper.merge), "
+        "which checks the panel, the version and the families itself"
+    )
+
+
+# The original ship() implementation used to sit here, renamed. That was the mistake the
+# comment above warns about, made in the same file: the new ship() refused politely while
+# the old power stayed callable eight lines below it. Deleted. gatekeeper.merge() is the
+# only route to 'shipped', and it re-reads the record instead of trusting the caller.
 
 
 def morning_report(conn) -> list[dict[str, Any]]:

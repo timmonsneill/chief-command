@@ -7893,3 +7893,661 @@ Traceback (most recent call last):
   File "<string>", line 1, in <module>
 sqlite3.OperationalError: default value of column [created_at] is not constant
 
+exec
+/bin/zsh -lc "ls -lt harness/gauntlet.py harness/dispatch.py harness/db/jobs.py harness/db/schema.sql harness/tests | head -20
+rg -n \"zero.floor|min_model_families.*1|unversioned.*research|late.*fail|review_cap|sync_seats|PASS/FAIL|PASSENGER|disabled.*reviewer|full panel\" harness/tests --glob '*.py'" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+-rw-r--r--  1 user  staff  17954 Jul 21 10:29 harness/dispatch.py
+-rw-r--r--  1 user  staff  21490 Jul 21 10:27 harness/gauntlet.py
+-rw-r--r--  1 user  staff  18260 Jul 21 10:25 harness/db/jobs.py
+-rw-r--r--  1 user  staff  58898 Jul 21 10:13 harness/db/schema.sql
+
+harness/tests:
+total 240
+drwxr-xr-x  15 user  staff    480 Jul 21 10:29 __pycache__
+-rw-r--r--   1 user  staff  20397 Jul 21 10:29 test_gauntlet_panel.py
+-rw-r--r--   1 user  staff   5568 Jul 21 10:12 test_dispatch_executor.py
+-rw-r--r--   1 user  staff   4045 Jul 20 18:39 test_family_floor.py
+-rw-r--r--   1 user  staff   2178 Jul 20 18:33 test_gauntlet_config.py
+-rw-r--r--   1 user  staff   3701 Jul 20 17:58 test_projects.py
+-rw-r--r--   1 user  staff   3475 Jul 20 15:14 test_planning.py
+-rw-r--r--   1 user  staff   7957 Jul 20 06:25 test_review_version_binding.py
+-rw-r--r--   1 user  staff   7947 Jul 20 06:24 test_sol_round2.py
+-rw-r--r--   1 user  staff  18759 Jul 20 06:24 test_sol_attacks.py
+-rw-r--r--   1 user  staff  20876 Jul 20 06:24 test_jobs.py
+-rw-r--r--   1 user  staff   2324 Jul 20 06:18 test_bypass_paths_are_dead.py
+-rw-r--r--   1 user  staff   3280 Jul 20 06:06 test_live_db_matches_schema.py
+harness/tests/test_gauntlet_config.py:19:    sync_seats,
+harness/tests/test_gauntlet_config.py:49:def test_sync_seats_refuses_a_phantom_reviewer(tmp_path):
+harness/tests/test_gauntlet_config.py:55:        sync_seats(c, bad)
+harness/tests/test_gauntlet_config.py:58:def test_sync_seats_refuses_a_familyless_seat(tmp_path):
+harness/tests/test_gauntlet_config.py:64:        sync_seats(c, bad)
+harness/tests/test_family_floor.py:27:# Two seats share the GPT family on purpose — a "full panel" of distinct seats can still
+harness/tests/test_family_floor.py:91:def test_a_zero_floor_is_inert_for_legacy_jobs(conn):
+harness/tests/test_sol_attacks.py:268:                           daily_cap_cents=100, build_cap_cents=25, review_cap_cents=75))
+harness/tests/test_sol_attacks.py:307:                           daily_cap_cents=100, build_cap_cents=25, review_cap_cents=90))
+harness/tests/test_jobs.py:269:    """You cannot skip 'done' — that's where the full panel and escalation gates live."""
+harness/tests/test_gauntlet_panel.py:92:# ── One mind in two hats: a full panel that is not a real panel ──────────────
+harness/tests/test_gauntlet_panel.py:177:           "gauntlet": {"reviewers": ["grok"], "min_model_families": 1}}
+harness/tests/test_gauntlet_panel.py:326:def test_a_late_failure_un_certifies_the_job(db, monkeypatch):
+harness/tests/test_gauntlet_panel.py:345:    assert r.certified is False, "a late failure did not un-certify the job"
+
+exec
+/bin/zsh -lc "nl -ba harness/tests/test_gauntlet_panel.py | sed -n '280,380p'
+nl -ba harness/tests/test_gauntlet_panel.py | sed -n '130,195p'" in /Users/user/code-projects/chief-command
+ succeeded in 220ms:
+   130	    assert r.certified is False
+   131	    assert r.families_passed == {"claude"}
+   132	    brain = [x for x in r.runs if x.seat_id == "brain"][0]
+   133	    assert brain.verdict is None and brain.skipped, "a dead reviewer must be recorded as skipped"
+   134	
+   135	
+   136	def test_a_reviewer_that_answers_gibberish_does_not_pass():
+   137	    """Silence is not approval. An unreadable answer is a FAIL, not a shrug."""
+   138	    assert gauntlet._parse_verdict("I think it's probably fine?")[0] == "fail"
+   139	    assert gauntlet._parse_verdict("")[0] == "fail"
+   140	    assert gauntlet._parse_verdict("PASS looks correct")[0] == "pass"
+   141	    assert gauntlet._parse_verdict("thinking...\nFAIL off-by-one in the loop")[0] == "fail"
+   142	
+   143	
+   144	# ── Money: the reservation happens BEFORE the call, and a capped seat is skipped ──
+   145	def test_a_capped_out_reviewer_is_skipped_and_said_so(db, monkeypatch):
+   146	    c, path = db
+   147	    record_usage(c, "grok", 100, role="review")        # grok's whole daily cap, spent
+   148	    _wire(monkeypatch, _stub({"claude-opus-4-8": "pass", "grok-4.5": "pass"}))
+   149	    job = _parked_job(c)
+   150	    cfg = {"seats": {}, "gauntlet": {"reviewers": ["reviewer", "grok"],
+   151	                                     "min_model_families": 2}}
+   152	
+   153	    r = gauntlet.run_gauntlet_for_job(c, job, cfg, db_path=path)
+   154	
+   155	    grok = [x for x in r.runs if x.seat_id == "grok"][0]
+   156	    assert grok.verdict is None
+   157	    assert "budget" in grok.skipped
+   158	    assert r.certified is False, "a skipped reviewer must not be counted toward the floor"
+   159	
+   160	
+   161	def test_budget_is_reserved_before_the_provider_call(db, monkeypatch):
+   162	    """Refusing to RECORD a charge doesn't unspend it — so the charge lands first."""
+   163	    c, path = db
+   164	    spend_at_call_time = {}
+   165	
+   166	    def runner(request, code, model):
+   167	        probe = connect(path)
+   168	        spend_at_call_time[model] = probe.execute(
+   169	            "SELECT COALESCE(SUM(cost_cents),0) FROM usage WHERE seat_id='grok'"
+   170	        ).fetchone()[0]
+   171	        probe.close()
+   172	        return "pass", "ok"
+   173	
+   174	    _wire(monkeypatch, runner)
+   175	    job = _parked_job(c)
+   176	    cfg = {"seats": {"grok": {"review_estimate_cents": 7}},
+   177	           "gauntlet": {"reviewers": ["grok"], "min_model_families": 1}}
+   178	
+   179	    gauntlet.run_gauntlet_for_job(c, job, cfg, db_path=path)
+   180	    assert spend_at_call_time["grok-4.5"] == 7, "the money was not reserved before the call"
+   181	
+   182	
+   183	# ── One frozen bundle: everyone reviews the same version ─────────────────────
+   184	def test_every_reviewer_binds_to_the_same_version(db, monkeypatch):
+   185	    c, path = db
+   186	    _wire(monkeypatch, _stub({"claude-opus-4-8": "pass", "gpt-5.6-sol": "pass"},
+   187	                             delay=0.05))
+   188	    job = _parked_job(c)
+   189	
+   190	    gauntlet.run_gauntlet_for_job(c, job, CFG, db_path=path)
+   191	
+   192	    versions = {r[0] for r in c.execute(
+   193	        "SELECT reviewed_version FROM verdicts WHERE job_id=?", (job,))}
+   194	    assert versions == {"v1"}, f"the panel split across versions: {versions}"
+   195	
+
+codex
+I’ve confirmed two direct database bypasses with executable probes: a newly created subscription-built job can reach `done` with both review requirements at zero, and an unversioned research job can reach `done` because `NULL IS NULL` makes unversioned verdicts look version-matched. The live database is in WAL mode and connections now have an explicit 15-second lock wait; that prevents immediate lock failures but does not fix the remaining audit and finalization races.
+exec
+/bin/zsh -lc "stat -f '%m %N' harness/gauntlet.py harness/db/jobs.py harness/dispatch.py harness/db/schema.sql harness/executor.py harness/server.py
+nl -ba harness/executor.py | sed -n '135,205p'
+nl -ba harness/server.py | sed -n '50,68p'
+rg -n \"sync_seats\\(\" harness --glob '*.py'" in /Users/user/code-projects/chief-command
+ succeeded in 308ms:
+    50	from fastapi import FastAPI, File, Form, Request, UploadFile
+    51	from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    52	
+    53	from db.jobs import connect, init_db, month_spend
+    54	
+    55	app = FastAPI(title="Chief Command")
+    56	
+    57	DB = Path(__file__).resolve().parent / "db" / "chief.db"
+    58	
+    59	FAMILY_COLOR = {"claude": "#FF8A3D", "gpt": "#00E5A0", "grok": "#B06CFF", "qwen": "#2E9BFF"}
+    60	
+    61	
+    62	_SEATS_SYNCED = False
+    63	
+    64	
+    65	def db():
+    66	    c = connect(DB)
+    67	    init_db(c)
+    68	    _sync_seats_once(c)
+harness/tests/test_gauntlet_config.py:55:        sync_seats(c, bad)
+harness/tests/test_gauntlet_config.py:64:        sync_seats(c, bad)
+harness/server.py:87:        dispatch.sync_seats(c, dispatch.load_config())
+harness/dispatch.py:255:def sync_seats(conn, cfg: dict[str, Any]) -> None:
+
+exec
+/bin/zsh -lc "nl -ba harness/server.py | sed -n '60,100p'
+nl -ba harness/dispatch.py | sed -n '245,290p'
+stat -f '%m %N' harness/server.py harness/dispatch.py" in /Users/user/code-projects/chief-command
+ succeeded in 267ms:
+   245	            "— refusing to start work that nothing would check"
+   246	        )
+   247	    families = {seat(conn, s)["family"] for s in roster}
+   248	    if len(families) < floor:
+   249	        raise DispatchRefused(
+   250	            f"only {len(families)} model family/families can review right now and "
+   251	            f"{floor} are required — refusing to start work that could never be checked"
+   252	        )
+   253	
+   254	
+   255	def sync_seats(conn, cfg: dict[str, Any]) -> None:
+   256	    """Push the config's seats into the store, so guards can reason about them.
+   257	
+   258	    Refuses a config whose gauntlet names a seat that doesn't exist, or a seat missing a
+   259	    family — both would blow up later, mid-panel, where it's far harder to see.
+   260	    """
+   261	    missing = unresolved_reviewers(cfg)
+   262	    if missing:
+   263	        raise DispatchRefused(f"gauntlet names seats that don't exist: {missing}")
+   264	    for seat_id, s in cfg.get("seats", {}).items():
+   265	        if "family" not in s:
+   266	            raise DispatchRefused(f"seat '{seat_id}' has no family — the gauntlet can't count it")
+   267	    for seat_id, s in cfg.get("seats", {}).items():
+   268	        upsert_seat(conn, Seat(
+   269	            id=seat_id,
+   270	            provider=s["provider"],
+   271	            model=s["model"],
+   272	            family=s["family"],
+   273	            tier=s["tier"],
+   274	            daily_cap_cents=s.get("daily_cap_cents"),
+   275	            enabled=not s.get("disabled", False),
+   276	            notes=s.get("notes", ""),
+   277	        ))
+   278	
+   279	
+   280	# ---------------------------------------------------------------------------
+   281	# Dispatch
+   282	# ---------------------------------------------------------------------------
+   283	@dataclass
+   284	class Dispatch:
+   285	    job_id: int
+   286	    run_id: str | None
+   287	    seat_id: str
+   288	
+   289	
+   290	def dispatch(
+1784644094 harness/server.py
+1784644194 harness/dispatch.py
+
+exec
+/bin/zsh -lc "nl -ba harness/server.py | sed -n '100,122p'
+stat -f '%Sm %N' -t '%H:%M:%S' harness/server.py harness/dispatch.py harness/gauntlet.py harness/db/jobs.py" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+   100	_EVENT_ENGLISH = {
+   101	    "dispatched": "Picked it up",
+   102	    "read":       "Read through the existing code",
+   103	    "thinking":   "Worked out how to do it",
+   104	    "edit":       "Changed the code",
+   105	    "write":      "Wrote new code",
+   106	    "command":    "Ran something",
+   107	    "test_run":   "Ran the tests",
+   108	    "browse":     "Clicked through it like a user",
+   109	    "verdict":    "Gave a verdict",
+   110	    "done":       "Finished",
+   111	    "error":      "Hit a problem",
+   112	    # A reviewer that sat out MUST NOT read as one that worked. Without this line it
+   113	    # fell through to the default "Worked on it" — the record was honest about the
+   114	    # panel shrinking and the screen quietly contradicted it. (task #10)
+   115	    "skipped":    "Sat this one out",
+   116	}
+   117	
+   118	
+   119	def _in_plain_english(e: dict) -> dict:
+   120	    """Translate one line of machine activity into something a person can read.
+   121	
+   122	    NOTE the deliberate asymmetry: we keep the OUTCOME of a test run ("6 passed") but
+10:28:14 harness/server.py
+10:29:54 harness/dispatch.py
+10:27:56 harness/gauntlet.py
+10:25:27 harness/db/jobs.py
+
+exec
+/bin/zsh -lc "nl -ba harness/db/jobs.py | sed -n '305,345p;385,415p'
+nl -ba harness/db/schema.sql | sed -n '720,750p;850,905p;1008,1058p'" in /Users/user/code-projects/chief-command
+ succeeded in 0ms:
+   305	    """Record one seat's verdict.
+   306	
+   307	    role='reviewer' reads the diff and judges it.
+   308	    role='tester'   drove the app (Playwright) and judges what it observed. Two guards
+   309	                    apply: it must cite captured artifacts, and its family must differ
+   310	                    from the builder's — Playwright stops a tester fabricating what
+   311	                    happened; only a different mind stops it rationalizing it.
+   312	
+   313	    reviewed_version is WHAT the reviewer looked at. The gauntlet runner pins the
+   314	    version before handing work to a reviewer and must pass it explicitly. When
+   315	    omitted, it defaults to the job's current head_version — correct only when
+   316	    nothing moved between review and recording, which the runner must guarantee.
+   317	    A verdict whose version stops matching the job simply stops counting.
+   318	
+   319	    tier and family are snapshotted from the seat at write time, so re-tiering or
+   320	    re-pointing a seat later cannot retroactively legitimize a job.
+   321	    """
+   322	    row = seat(conn, reviewer_seat)
+   323	    if row is None:
+   324	        raise ValueError(f"unknown seat: {reviewer_seat}")
+   325	
+   326	    if reviewed_version is None:
+   327	        job_row = conn.execute(
+   328	            "SELECT head_version FROM jobs WHERE id = ?", (job_id,)
+   329	        ).fetchone()
+   330	        if job_row is not None:
+   331	            reviewed_version = job_row["head_version"]
+   332	
+   333	    cur = conn.execute(
+   334	        """
+   335	        INSERT INTO verdicts
+   336	            (job_id, reviewer_seat, reviewer_tier, role, model_family,
+   337	             verdict, severity, summary, detail, reviewed_version)
+   338	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   339	        """,
+   340	        (job_id, reviewer_seat, row["tier"], role, row["family"],
+   341	         verdict, severity, summary, detail, reviewed_version),
+   342	    )
+   343	    return int(cur.lastrowid)
+   344	
+   345	
+   385	    return spend_today(conn, seat_id) >= int(row["daily_cap_cents"])
+   386	
+   387	
+   388	@_guarded
+   389	def record_usage(
+   390	    conn: sqlite3.Connection,
+   391	    seat_id: str,
+   392	    cost_cents: int,
+   393	    job_id: int | None = None,
+   394	    input_tokens: int = 0,
+   395	    output_tokens: int = 0,
+   396	    role: str = "build",
+   397	) -> None:
+   398	    """Record spend. The DATABASE refuses an entry that would breach the daily cap.
+   399	
+   400	    This used to be a Python check before dispatch — which Sol correctly called a
+   401	    race (two dispatches both pass the check before either records spend) and easily
+   402	    bypassed by any direct write. The ledger itself now says no.
+   403	    """
+   404	    conn.execute(
+   405	        """
+   406	        INSERT INTO usage (seat_id, job_id, role, input_tokens, output_tokens, cost_cents)
+   407	        VALUES (?, ?, ?, ?, ?, ?)
+   408	        """,
+   409	        (seat_id, job_id, role, input_tokens, output_tokens, cost_cents),
+   410	    )
+   411	
+   412	
+   413	def can_build(conn: sqlite3.Connection, seat_id: str) -> bool:
+   414	    """Has this seat used up its BUILDING budget? (It may still be able to review.)"""
+   415	    row = seat(conn, seat_id)
+   720	-- approvals by construction, nothing needs to remember to revoke anything. And a
+   721	-- FAIL condemns the version it saw, not the job forever: fix the code, the version
+   722	-- changes, the old fail becomes history. (A fail with no recorded version blocks
+   723	-- everything — fail-closed, because it condemned we-don't-know-what.)
+   724	-- ═══════════════════════════════════════════════════════════════════════════
+   725	
+   726	-- A versioned job accepts no unversioned verdicts. (Unversioned legacy jobs keep
+   727	-- their old semantics; the gatekeeper will not push anything unversioned anyway.)
+   728	CREATE TRIGGER IF NOT EXISTS guard_verdict_must_cite_what_it_reviewed
+   729	BEFORE INSERT ON verdicts
+   730	WHEN (SELECT head_version FROM jobs WHERE id = NEW.job_id) IS NOT NULL
+   731	     AND TRIM(COALESCE(NEW.reviewed_version, '')) = ''
+   732	BEGIN
+   733	    SELECT RAISE(ABORT, 'guard: this job is versioned — a verdict must say which version it reviewed');
+   734	END;
+   735	
+   736	-- A build cannot finish without declaring WHICH code is finished.
+   737	CREATE TRIGGER IF NOT EXISTS guard_a_build_finishes_a_version
+   738	BEFORE UPDATE OF status ON jobs
+   739	WHEN NEW.status IN ('done', 'shipped') AND OLD.status NOT IN ('done', 'shipped')
+   740	     AND NEW.kind = 'build'
+   741	     AND TRIM(COALESCE(NEW.head_version, '')) = ''
+   742	BEGIN
+   743	    SELECT RAISE(ABORT, 'guard: a build cannot finish without naming the exact version that is finished');
+   744	END;
+   745	
+   746	-- Once finished, WHAT finished is history. Rewriting head_version after done would
+   747	-- let approved-hash-A ship as hash-B while every record still looks green.
+   748	CREATE TRIGGER IF NOT EXISTS guard_finished_version_is_frozen
+   749	BEFORE UPDATE OF head_version ON jobs
+   750	WHEN OLD.status IN ('done', 'shipped') AND OLD.head_version IS NOT NEW.head_version
+   850	END;
+   851	
+   852	-- ===========================================================================
+   853	-- GUARD 5 — the full panel, always. DISTINCT reviewers.
+   854	--
+   855	-- ⚠️ Sol #7: "The full panel can be faked with duplicate passes." It counted ROWS.
+   856	-- One reviewer could pass the same job six times. Now it counts distinct seats.
+   857	-- ===========================================================================
+   858	CREATE TRIGGER IF NOT EXISTS guard_full_panel
+   859	BEFORE UPDATE OF status ON jobs
+   860	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_reviews > 0
+   861	BEGIN
+   862	    SELECT RAISE(ABORT, 'guard: the full review panel has not reported')
+   863	    WHERE (
+   864	        -- Sol, round 2, #5: this counted testers and fact-checkers as reviewers, so
+   865	        -- the panel could be "filled" by the wrong kinds of check entirely.
+   866	        SELECT COUNT(DISTINCT v.reviewer_seat) FROM verdicts v
+   867	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+   868	          -- gate 3: the panel must have reviewed THIS version, not an earlier one
+   869	          AND v.reviewed_version IS NEW.head_version
+   870	    ) < NEW.required_reviews;
+   871	END;
+   872	
+   873	-- ===========================================================================
+   874	-- GUARD 5b — the family floor (task #10). "Full set, always" counts SEATS; it does
+   875	-- not guarantee more than one MIND looked. Sol's #10 gate: min_model_families was
+   876	-- enforced nowhere in the DB — the gauntlet's core property rested on Python. Now
+   877	-- the DB refuses ->done without >= required_review_families DISTINCT passing families
+   878	-- on this version. Fails closed: too few families -> parked (never lowers the bar).
+   879	-- Snapshotted un-lowerable at dispatch (guard_family_floor_is_fixed).
+   880	-- ===========================================================================
+   881	CREATE TRIGGER IF NOT EXISTS guard_family_floor_is_fixed
+   882	BEFORE UPDATE OF required_review_families ON jobs
+   883	WHEN OLD.required_review_families > 0 AND NEW.required_review_families < OLD.required_review_families
+   884	BEGIN
+   885	    SELECT RAISE(ABORT, 'guard: the family floor cannot be lowered after dispatch');
+   886	END;
+   887	
+   888	CREATE TRIGGER IF NOT EXISTS guard_family_floor
+   889	BEFORE UPDATE OF status ON jobs
+   890	WHEN NEW.status = 'done' AND OLD.status <> 'done' AND NEW.required_review_families > 0
+   891	BEGIN
+   892	    SELECT RAISE(ABORT, 'guard: fewer model families reviewed this than required')
+   893	    WHERE (
+   894	        SELECT COUNT(DISTINCT v.model_family) FROM verdicts v
+   895	        WHERE v.job_id = NEW.id AND v.verdict = 'pass' AND v.role = 'reviewer'
+   896	          AND v.reviewed_version IS NEW.head_version
+   897	    ) < NEW.required_review_families;
+   898	END;
+   899	
+   900	-- ═══════════════════════════════════════════════════════════════════════════
+   901	-- GUARD 10 — A FAILING REVIEW STOPS THE JOB. (Sol, round 2, #5 — and this one is bad.)
+   902	--
+   903	-- My panel guard counted PASSES and never looked at FAILS. So three passes and one
+   904	-- serious failure satisfied it. A reviewer could scream that the thing was broken and
+   905	-- be outvoted by colleagues who hadn't noticed.
+  1008	-- ===========================================================================
+  1009	CREATE TRIGGER IF NOT EXISTS guard_no_negative_spend
+  1010	BEFORE INSERT ON usage
+  1011	WHEN NEW.cost_cents < 0
+  1012	BEGIN
+  1013	    SELECT RAISE(ABORT, 'guard: spend cannot be negative — no unwinding the meter');
+  1014	END;
+  1015	
+  1016	CREATE TRIGGER IF NOT EXISTS guard_daily_cap_is_hard
+  1017	BEFORE INSERT ON usage
+  1018	BEGIN
+  1019	    SELECT RAISE(ABORT, 'guard: this seat is over its daily cap')
+  1020	    WHERE (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+  1021	      AND (
+  1022	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+  1023	         WHERE seat_id = NEW.seat_id AND day = date('now')
+  1024	      ) + NEW.cost_cents
+  1025	      > (SELECT daily_cap_cents FROM seats WHERE id = NEW.seat_id);
+  1026	END;
+  1027	
+  1028	-- Ration the EXPENSIVE work separately. A seat can be generous on reviewing and
+  1029	-- stingy on building — which is exactly how you want a metered seat to behave when
+  1030	-- you already pay flat-rate for two better builders.
+  1031	CREATE TRIGGER IF NOT EXISTS guard_build_cap_is_hard
+  1032	BEFORE INSERT ON usage
+  1033	WHEN NEW.role = 'build'
+  1034	BEGIN
+  1035	    SELECT RAISE(ABORT, 'guard: this seat has used up its building budget for today — it can still review')
+  1036	    WHERE (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+  1037	      AND (
+  1038	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+  1039	         WHERE seat_id = NEW.seat_id AND day = date('now') AND role = 'build'
+  1040	      ) + NEW.cost_cents
+  1041	      > (SELECT build_cap_cents FROM seats WHERE id = NEW.seat_id);
+  1042	END;
+  1043	
+  1044	CREATE TRIGGER IF NOT EXISTS guard_review_cap_is_hard
+  1045	BEFORE INSERT ON usage
+  1046	WHEN NEW.role IN ('review', 'test')
+  1047	BEGIN
+  1048	    SELECT RAISE(ABORT, 'guard: this seat is over its reviewing budget for today')
+  1049	    WHERE (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id) IS NOT NULL
+  1050	      AND (
+  1051	        SELECT COALESCE(SUM(cost_cents), 0) FROM usage
+  1052	         WHERE seat_id = NEW.seat_id AND day = date('now') AND role IN ('review','test')
+  1053	      ) + NEW.cost_cents
+  1054	      > (SELECT review_cap_cents FROM seats WHERE id = NEW.seat_id);
+  1055	END;
+  1056	
+  1057	-- Keep updated_at honest.
+  1058	CREATE TRIGGER IF NOT EXISTS jobs_touch_updated_at
+
+codex
+I would not approve this change yet. Two database-level guarantees can still be bypassed, and the configured “full panel” is not actually enforced.
+
+## Findings
+
+1. **CRITICAL — The database does not enforce a minimum of two families**
+
+   [schema.sql:277](/Users/user/code-projects/chief-command/harness/db/schema.sql:277), [schema.sql:283](/Users/user/code-projects/chief-command/harness/db/schema.sql:283), [schema.sql:888](/Users/user/code-projects/chief-command/harness/db/schema.sql:888), [migration 005:25](/Users/user/code-projects/chief-command/harness/db/migrations/005_family_floor_2026-07-20.sql:25), [dispatch.py:239](/Users/user/code-projects/chief-command/harness/dispatch.py:239)
+
+   Both review requirements default to zero, and the family trigger only runs when `required_review_families > 0`. Dispatch also accepts a configured floor of one.
+
+   Concrete failures:
+
+   - Direct SQL/create-job path: create a subscription-built job, set a head version, then move it to `done`. With both requirements at their zero defaults, no verdict is required. I reproduced this: the resulting row was `('done', 0, 0)`.
+   - Set `min_model_families = 1`; one family can pass and complete a newly dispatched job.
+   - An empty family string is also accepted and can be counted as a distinct “family.”
+
+   Fix: make the completion trigger unconditional and require at least `MAX(2, NEW.required_review_families)` distinct non-empty families. Reject any dispatch configuration below two and reject blank family values. Existing terminal history does not need changing because the trigger only affects new transitions into `done`.
+
+2. **CRITICAL — Disabling a configured reviewer permanently lowers the “full panel” requirement**
+
+   [dispatch.py:89](/Users/user/code-projects/chief-command/harness/dispatch.py:89), [dispatch.py:203](/Users/user/code-projects/chief-command/harness/dispatch.py:203), [dispatch.py:132](/Users/user/code-projects/chief-command/harness/dispatch.py:132), [dispatch.py:316](/Users/user/code-projects/chief-command/harness/dispatch.py:316), [gauntlet.py:383](/Users/user/code-projects/chief-command/harness/gauntlet.py:383), [schema.sql:858](/Users/user/code-projects/chief-command/harness/db/schema.sql:858)
+
+   The current config names three reviewers, but the disabled Grok seat is filtered out. `dispatch_local()` therefore stamps `required_reviews = 2`, and two passing reviewers can complete the job. Recording that Grok sat out makes the shrink visible, but it does not preserve “full set, always.”
+
+   The second dispatch path behaves differently: `dispatch()` stamps three reviewers, while `run_panel()` filters the roster down to two. With the current configuration, that path can never complete.
+
+   The database stores only a count, not the identities of the required seats. Passes from any registered seats can fill the count, even if those seats were never in the dispatched panel.
+
+   Fix: snapshot exact required panel members in a `job_reviewers`/`review_attempts` table at dispatch, including seat, model and family. Completion must require a current-version pass from every snapshotted member. Use one shared roster function for both dispatch paths and refuse dispatch when a configured member cannot participate—do not lower the requirement.
+
+3. **HIGH — Unversioned non-build jobs can treat NULL verdicts as current-version reviews**
+
+   [schema.sql:728](/Users/user/code-projects/chief-command/harness/db/schema.sql:728), [schema.sql:737](/Users/user/code-projects/chief-command/harness/db/schema.sql:737), [schema.sql:896](/Users/user/code-projects/chief-command/harness/db/schema.sql:896)
+
+   Only builds are required to name a finished version. For research jobs, `head_version` may remain `NULL`; unversioned verdicts are allowed, and `reviewed_version IS head_version` treats `NULL IS NULL` as a match.
+
+   I reproduced a research job reaching `done` with two passing families and `head_version = NULL`.
+
+   Fix: any job with review requirements must have a non-empty content/version hash before completion, regardless of `kind`. Reviewer verdicts for such jobs must always carry a non-empty version. Hash the frozen research answer just as build output is hashed.
+
+4. **HIGH — A late failing reviewer can still leave the job at `done`**
+
+   [gauntlet.py:333](/Users/user/code-projects/chief-command/harness/gauntlet.py:333), [gauntlet.py:421](/Users/user/code-projects/chief-command/harness/gauntlet.py:421), [gauntlet.py:441](/Users/user/code-projects/chief-command/harness/gauntlet.py:441), [gauntlet.py:460](/Users/user/code-projects/chief-command/harness/gauntlet.py:460)
+
+   The `decided` flag and `_reconcile()` both have check-then-act races:
+
+   1. Reviewer checks `decided.is_set()` and sees false.
+   2. It pauses before inserting its verdict.
+   3. The main thread times out, sets `decided`, completes the job, and `_reconcile()` sees no failure.
+   4. The reviewer inserts its failure afterward.
+
+   The job remains `done` with a current-version failure. A direct SQL failure inserted after completion produces the same state.
+
+   Fix: make review attempts durable database rows with terminal states, and refuse completion while any required attempt is running. Also add a database response to a late current-version failure—either atomically return `done` to `review`, or reject verdict insertion only if it is also durably recorded as a late non-participation. The in-memory event cannot be the boundary.
+
+5. **HIGH — Review-budget reservation bypasses review and monthly caps when the daily cap is NULL**
+
+   [gauntlet.py:234](/Users/user/code-projects/chief-command/harness/gauntlet.py:234), [schema.sql:1016](/Users/user/code-projects/chief-command/harness/db/schema.sql:1016), [schema.sql:1044](/Users/user/code-projects/chief-command/harness/db/schema.sql:1044)
+
+   `_reserve_review_budget()` returns success without writing usage whenever `daily_cap_cents` is `NULL`. That bypasses an independently configured `review_cap_cents` and the global monthly trigger.
+
+   I reproduced a seat with `review_cap_cents=5` and no daily cap: reservation returned true, but the usage table remained empty.
+
+   The concurrent-insert portion itself is safe: SQLite serializes writers, so two recorded reservations cannot both pass against stale totals. The problem is the path that records nothing.
+
+   Fix: always write a reservation before a potentially metered call; let all applicable database triggers decide. Store reservations separately and reconcile actual cost against the reservation. Reject zero/invalid estimates and enforce a provider-side maximum cost/token limit, since a five-cent estimate alone cannot guarantee the provider only spends five cents.
+
+6. **HIGH — Seat synchronization can partially apply configuration and erase caps**
+
+   [server.py:62](/Users/user/code-projects/chief-command/harness/server.py:62), [server.py:84](/Users/user/code-projects/chief-command/harness/server.py:84), [dispatch.py:255](/Users/user/code-projects/chief-command/harness/dispatch.py:255)
+
+   Synchronization is now called, but:
+
+   - `_SEATS_SYNCED` is set before synchronization succeeds.
+   - Failures are printed and swallowed, so dispatch continues with stale seat data.
+   - Updates are autocommitted seat-by-seat, allowing partial configuration.
+   - `sync_seats()` omits `build_cap_cents`, `review_cap_cents`, and all tiered model fields, so `upsert_seat()` overwrites them with `NULL`.
+
+   Concrete evidence: the config gives Grok a 75-cent review cap, while the live seat row currently has `review_cap_cents = NULL`.
+
+   Fix: validate the entire config first, apply every seat field inside one transaction, and set the synchronized flag only after commit. A failed synchronization must block dispatch rather than allow stale policy to remain active.
+
+7. **HIGH — Malformed output beginning with “PASS” becomes a passing verdict**
+
+   [gauntlet.py:87](/Users/user/code-projects/chief-command/harness/gauntlet.py:87)
+
+   `startswith("PASS")` accepts strings that are not pass verdicts. I verified both `PASS/FAIL I cannot determine` and `PASSENGER mode only` are parsed as passes.
+
+   Fix: require an exact full-line format such as `^PASS\s+\S.*$` or `^FAIL\s+\S.*$`. Anything else should be recorded as an invalid reviewer response and contribute no pass.
+
+8. **MEDIUM — Lock failures no longer kill reviewer threads silently, but they still are not durably recorded**
+
+   [jobs.py:47](/Users/user/code-projects/chief-command/harness/db/jobs.py:47), [gauntlet.py:353](/Users/user/code-projects/chief-command/harness/gauntlet.py:353), [gauntlet.py:423](/Users/user/code-projects/chief-command/harness/gauntlet.py:423), [executor.py:140](/Users/user/code-projects/chief-command/harness/executor.py:140)
+
+   Connections now explicitly use a 15-second busy timeout, and the live database is WAL. `_review_one()` catches ordinary `OperationalError`s and fills `ReviewerRun.skipped`, so the original `verdict=None, skipped=""` thread-death hole is closed.
+
+   However, the outer exception path writes no event, and a thread still alive after the join only gets an in-memory skipped string. `executor.run_job()` discards the `PanelResult`, so the individual reason disappears. Separately, final parent writes catch only `GuardViolation`; a lock failure there escapes `run_job()`, whose `finally` closes the connection but records no failure despite claiming it never raises.
+
+   Fix: persist one durable attempt/result row for every panel member from the parent connection, with bounded retry. Catch final `OperationalError`s and leave a recorded parked reason rather than terminating the background worker.
+
+## Checks that held
+
+- A head-version change during the panel invalidates old passes correctly; the final status transition is serialized against the competing version update.
+- Stale earlier-version verdicts do not count.
+- Concurrent recorded budget reservations cannot both breach a cap because SQLite permits only one writer at a time.
+- Migration 006 itself is transactionally safe against the current schema: the copy, drop, rename and index recreation are inside one transaction; no table references `events`; all columns are copied; and a failure rolls the rebuild back.
+tokens used
+166,211
+I would not approve this change yet. Two database-level guarantees can still be bypassed, and the configured “full panel” is not actually enforced.
+
+## Findings
+
+1. **CRITICAL — The database does not enforce a minimum of two families**
+
+   [schema.sql:277](/Users/user/code-projects/chief-command/harness/db/schema.sql:277), [schema.sql:283](/Users/user/code-projects/chief-command/harness/db/schema.sql:283), [schema.sql:888](/Users/user/code-projects/chief-command/harness/db/schema.sql:888), [migration 005:25](/Users/user/code-projects/chief-command/harness/db/migrations/005_family_floor_2026-07-20.sql:25), [dispatch.py:239](/Users/user/code-projects/chief-command/harness/dispatch.py:239)
+
+   Both review requirements default to zero, and the family trigger only runs when `required_review_families > 0`. Dispatch also accepts a configured floor of one.
+
+   Concrete failures:
+
+   - Direct SQL/create-job path: create a subscription-built job, set a head version, then move it to `done`. With both requirements at their zero defaults, no verdict is required. I reproduced this: the resulting row was `('done', 0, 0)`.
+   - Set `min_model_families = 1`; one family can pass and complete a newly dispatched job.
+   - An empty family string is also accepted and can be counted as a distinct “family.”
+
+   Fix: make the completion trigger unconditional and require at least `MAX(2, NEW.required_review_families)` distinct non-empty families. Reject any dispatch configuration below two and reject blank family values. Existing terminal history does not need changing because the trigger only affects new transitions into `done`.
+
+2. **CRITICAL — Disabling a configured reviewer permanently lowers the “full panel” requirement**
+
+   [dispatch.py:89](/Users/user/code-projects/chief-command/harness/dispatch.py:89), [dispatch.py:203](/Users/user/code-projects/chief-command/harness/dispatch.py:203), [dispatch.py:132](/Users/user/code-projects/chief-command/harness/dispatch.py:132), [dispatch.py:316](/Users/user/code-projects/chief-command/harness/dispatch.py:316), [gauntlet.py:383](/Users/user/code-projects/chief-command/harness/gauntlet.py:383), [schema.sql:858](/Users/user/code-projects/chief-command/harness/db/schema.sql:858)
+
+   The current config names three reviewers, but the disabled Grok seat is filtered out. `dispatch_local()` therefore stamps `required_reviews = 2`, and two passing reviewers can complete the job. Recording that Grok sat out makes the shrink visible, but it does not preserve “full set, always.”
+
+   The second dispatch path behaves differently: `dispatch()` stamps three reviewers, while `run_panel()` filters the roster down to two. With the current configuration, that path can never complete.
+
+   The database stores only a count, not the identities of the required seats. Passes from any registered seats can fill the count, even if those seats were never in the dispatched panel.
+
+   Fix: snapshot exact required panel members in a `job_reviewers`/`review_attempts` table at dispatch, including seat, model and family. Completion must require a current-version pass from every snapshotted member. Use one shared roster function for both dispatch paths and refuse dispatch when a configured member cannot participate—do not lower the requirement.
+
+3. **HIGH — Unversioned non-build jobs can treat NULL verdicts as current-version reviews**
+
+   [schema.sql:728](/Users/user/code-projects/chief-command/harness/db/schema.sql:728), [schema.sql:737](/Users/user/code-projects/chief-command/harness/db/schema.sql:737), [schema.sql:896](/Users/user/code-projects/chief-command/harness/db/schema.sql:896)
+
+   Only builds are required to name a finished version. For research jobs, `head_version` may remain `NULL`; unversioned verdicts are allowed, and `reviewed_version IS head_version` treats `NULL IS NULL` as a match.
+
+   I reproduced a research job reaching `done` with two passing families and `head_version = NULL`.
+
+   Fix: any job with review requirements must have a non-empty content/version hash before completion, regardless of `kind`. Reviewer verdicts for such jobs must always carry a non-empty version. Hash the frozen research answer just as build output is hashed.
+
+4. **HIGH — A late failing reviewer can still leave the job at `done`**
+
+   [gauntlet.py:333](/Users/user/code-projects/chief-command/harness/gauntlet.py:333), [gauntlet.py:421](/Users/user/code-projects/chief-command/harness/gauntlet.py:421), [gauntlet.py:441](/Users/user/code-projects/chief-command/harness/gauntlet.py:441), [gauntlet.py:460](/Users/user/code-projects/chief-command/harness/gauntlet.py:460)
+
+   The `decided` flag and `_reconcile()` both have check-then-act races:
+
+   1. Reviewer checks `decided.is_set()` and sees false.
+   2. It pauses before inserting its verdict.
+   3. The main thread times out, sets `decided`, completes the job, and `_reconcile()` sees no failure.
+   4. The reviewer inserts its failure afterward.
+
+   The job remains `done` with a current-version failure. A direct SQL failure inserted after completion produces the same state.
+
+   Fix: make review attempts durable database rows with terminal states, and refuse completion while any required attempt is running. Also add a database response to a late current-version failure—either atomically return `done` to `review`, or reject verdict insertion only if it is also durably recorded as a late non-participation. The in-memory event cannot be the boundary.
+
+5. **HIGH — Review-budget reservation bypasses review and monthly caps when the daily cap is NULL**
+
+   [gauntlet.py:234](/Users/user/code-projects/chief-command/harness/gauntlet.py:234), [schema.sql:1016](/Users/user/code-projects/chief-command/harness/db/schema.sql:1016), [schema.sql:1044](/Users/user/code-projects/chief-command/harness/db/schema.sql:1044)
+
+   `_reserve_review_budget()` returns success without writing usage whenever `daily_cap_cents` is `NULL`. That bypasses an independently configured `review_cap_cents` and the global monthly trigger.
+
+   I reproduced a seat with `review_cap_cents=5` and no daily cap: reservation returned true, but the usage table remained empty.
+
+   The concurrent-insert portion itself is safe: SQLite serializes writers, so two recorded reservations cannot both pass against stale totals. The problem is the path that records nothing.
+
+   Fix: always write a reservation before a potentially metered call; let all applicable database triggers decide. Store reservations separately and reconcile actual cost against the reservation. Reject zero/invalid estimates and enforce a provider-side maximum cost/token limit, since a five-cent estimate alone cannot guarantee the provider only spends five cents.
+
+6. **HIGH — Seat synchronization can partially apply configuration and erase caps**
+
+   [server.py:62](/Users/user/code-projects/chief-command/harness/server.py:62), [server.py:84](/Users/user/code-projects/chief-command/harness/server.py:84), [dispatch.py:255](/Users/user/code-projects/chief-command/harness/dispatch.py:255)
+
+   Synchronization is now called, but:
+
+   - `_SEATS_SYNCED` is set before synchronization succeeds.
+   - Failures are printed and swallowed, so dispatch continues with stale seat data.
+   - Updates are autocommitted seat-by-seat, allowing partial configuration.
+   - `sync_seats()` omits `build_cap_cents`, `review_cap_cents`, and all tiered model fields, so `upsert_seat()` overwrites them with `NULL`.
+
+   Concrete evidence: the config gives Grok a 75-cent review cap, while the live seat row currently has `review_cap_cents = NULL`.
+
+   Fix: validate the entire config first, apply every seat field inside one transaction, and set the synchronized flag only after commit. A failed synchronization must block dispatch rather than allow stale policy to remain active.
+
+7. **HIGH — Malformed output beginning with “PASS” becomes a passing verdict**
+
+   [gauntlet.py:87](/Users/user/code-projects/chief-command/harness/gauntlet.py:87)
+
+   `startswith("PASS")` accepts strings that are not pass verdicts. I verified both `PASS/FAIL I cannot determine` and `PASSENGER mode only` are parsed as passes.
+
+   Fix: require an exact full-line format such as `^PASS\s+\S.*$` or `^FAIL\s+\S.*$`. Anything else should be recorded as an invalid reviewer response and contribute no pass.
+
+8. **MEDIUM — Lock failures no longer kill reviewer threads silently, but they still are not durably recorded**
+
+   [jobs.py:47](/Users/user/code-projects/chief-command/harness/db/jobs.py:47), [gauntlet.py:353](/Users/user/code-projects/chief-command/harness/gauntlet.py:353), [gauntlet.py:423](/Users/user/code-projects/chief-command/harness/gauntlet.py:423), [executor.py:140](/Users/user/code-projects/chief-command/harness/executor.py:140)
+
+   Connections now explicitly use a 15-second busy timeout, and the live database is WAL. `_review_one()` catches ordinary `OperationalError`s and fills `ReviewerRun.skipped`, so the original `verdict=None, skipped=""` thread-death hole is closed.
+
+   However, the outer exception path writes no event, and a thread still alive after the join only gets an in-memory skipped string. `executor.run_job()` discards the `PanelResult`, so the individual reason disappears. Separately, final parent writes catch only `GuardViolation`; a lock failure there escapes `run_job()`, whose `finally` closes the connection but records no failure despite claiming it never raises.
+
+   Fix: persist one durable attempt/result row for every panel member from the parent connection, with bounded retry. Catch final `OperationalError`s and leave a recorded parked reason rather than terminating the background worker.
+
+## Checks that held
+
+- A head-version change during the panel invalidates old passes correctly; the final status transition is serialized against the competing version update.
+- Stale earlier-version verdicts do not count.
+- Concurrent recorded budget reservations cannot both breach a cap because SQLite permits only one writer at a time.
+- Migration 006 itself is transactionally safe against the current schema: the copy, drop, rename and index recreation are inside one transaction; no table references `events`; all columns are copied; and a failure rolls the rebuild back.
