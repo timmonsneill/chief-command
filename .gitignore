@@ -72,3 +72,6 @@ openclaw-workspace-state.json
 /USER.md
 /HEARTBEAT.md
 /TOOLS.md
+
+# Stray screenshots dropped at the repo root by test sessions
+/*.png
