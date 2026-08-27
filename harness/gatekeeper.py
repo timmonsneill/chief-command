@@ -221,11 +221,11 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     # A job carrying NO requirements is not a job everyone approved — it is a job whose
     # requirements were never stamped. `0 < 0` is False, so treating zero as "nothing
     # required" would let a row created outside dispatch merge with no reviews at all.
-    need_seats = job["required_reviews"] or 0
-    need_families = job["required_review_families"] or 0
-    if need_seats < 1 or need_families < 1:
-        raise _no("that job never had any review requirements set, so there is "
-                      "nothing to have passed")
+    # Same arithmetic as the schema (migration 007): unstamped is not unrequired — a
+    # missing number means ONE, never zero. Refusing zero outright rejected jobs the
+    # record had accepted honestly.
+    need_seats = max(job["required_reviews"] or 0, 1)
+    need_families = max(job["required_review_families"] or 0, 1)
     if len(seats) < need_seats:
         raise _no(f"only {len(seats)} of the {need_seats} reviewers "
                       "have signed off on this version")

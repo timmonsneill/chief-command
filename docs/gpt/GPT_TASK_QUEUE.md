@@ -80,6 +80,21 @@ to it (`handle`'s JSON shape), refusing the review as a SKIP if the service can'
 reached; (c) a test that stops the service and proves no money is reserved and no
 provider is called. Keep `gatekeeper.spend` importable for tests only.
 
+## 8. [ ] Rename the `grok` seat to a ROLE name (rule 7)
+`harness/config/seats.toml` `[seats.grok]` is a vendor name used as a seat identity; the
+roster in `[gauntlet] reviewers` names it too. Rename to `reviewer_metered` (seat id,
+roster, live `seats` row via `sync_seats`, tests that reference "grok" as a seat id —
+NOT the `family = "grok"` value, which is correct). Nothing in orchestration may
+reference a provider by name. One task, no behaviour change; all tests green.
+
+## 9. [ ] When builders commit real code, the reviewed bundle must be the DIFF
+Today the local worker commits only `chief_output/job_<id>.txt` and the gatekeeper
+correctly refuses a branch that changes anything else — so the merge path can ship a
+text answer but not code. When a builder that changes application files lands, the
+panel must review `git diff main...tip` (not `jobs.result`), the record must store a
+hash of that diff as the reviewed bundle, and `gatekeeper.merge` must verify the
+branch's diff hashes to what was reviewed. Design this with Sol before building.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.

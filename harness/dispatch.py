@@ -372,7 +372,14 @@ def dispatch(
             set_status(conn, job_id, "failed", error=f"not started: {exc}")
             raise DispatchRefused(str(exc)) from exc
 
-    run_id = _spawn(row, request, blocking=blocking)
+    try:
+        run_id = _spawn(row, request, blocking=blocking)
+    except Exception as exc:  # noqa: BLE001 — a job nobody is coming for must say so
+        # The reservation (if any) stands: over-counting spend is the safe direction,
+        # and a failed spawn may still have cost something. But the JOB must not sit
+        # at 'todo' forever looking like it is about to start.
+        set_status(conn, job_id, "failed", error=f"the worker couldn't be started: {exc}")
+        raise DispatchRefused(f"the worker couldn't be started: {exc}") from exc
     attach_run(conn, job_id, run_id=run_id or "", branch=f"job/{job_id}")
     set_status(conn, job_id, "in_progress")
 

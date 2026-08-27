@@ -430,7 +430,10 @@ def _review_one(
         # The `decided` check above and this write are not one step: the panel can
         # decide and certify in between. A FAIL that lands after 'done' must un-certify
         # from THIS side too — the writer is the only one who knows it just happened.
-        if verdict == "fail" and decided.is_set():
+        # `decided` is THIS panel's flag. Another panel on the same job (a re-run, a
+        # second dispatch) may have certified it already — so the check is on the
+        # record, not on our own bookkeeping.
+        if verdict == "fail":
             status = conn.execute("SELECT status FROM jobs WHERE id = ?",
                                   (job_id,)).fetchone()["status"]
             if status == "done":

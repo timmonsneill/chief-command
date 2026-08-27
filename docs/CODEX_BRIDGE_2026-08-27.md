@@ -18,8 +18,8 @@ Each line: what exists, what it does, where it's reachable. Verified by driving 
 | 1 | Typing `codex` in the repo loads `AGENTS.md`, which now has a "Codex sessions" section with read-order, hard rules, verification bar, gauntlet, shipping, when-stuck | ✅ |
 | 2 | `docs/gpt/GPT_TASK_QUEUE.md` exists, is tracked by git, has ≥1 real safe task with the TAKEN/DONE protocol | ✅ |
 | 3 | `docs/gpt/GPT_WORKLOG.md` exists, is tracked by git, append-only by convention | ✅ |
-| 4 | `./scripts/gpt-gauntlet.sh` refuses to run on `main` and on a dirty tree; from a `gpt/*` branch it runs 4 `codex exec` seats read-only, each from `/dev/null`, writes `docs/gpt/gauntlet/<stamp>-<branch>/<seat>.md`, prints each seat's GO/NO-GO | ⏳ run in progress |
-| 5 | After every seat the script checks `git status`; a seat that modified files reverts them and fails the run | ⏳ run in progress |
+| 4 | `./scripts/gpt-gauntlet.sh` refuses to run on `main` and on a dirty tree; from a `gpt/*` branch it runs 4 `codex exec` seats read-only, each from `/dev/null`, writes `docs/gpt/gauntlet/<stamp>-<branch>/<seat>.md`, prints each seat's GO/NO-GO | ✅ |
+| 5 | After every seat the script checks `git status`; a seat that modified files reverts them and fails the run | ✅ |
 | 6 | `./scripts/install-hooks.sh` installs `scripts/hooks/pre-push`; `git push` is BLOCKED with a plain message when no reviewer marker exists or the marker is older than HEAD; `./scripts/mark-reviewed.sh` on HEAD unblocks it | ✅ |
 | 7 | The pre-push hook runs the harness tests and blocks a red suite | ✅ |
 | 8 | Nothing in the kit references a machine-specific path (rule 4) | ✅ |

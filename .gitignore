@@ -75,3 +75,6 @@ openclaw-workspace-state.json
 
 # Stray screenshots dropped at the repo root by test sessions
 /*.png
+
+# GPT gauntlet raw transcripts (the .md reports are the record; .err is 2-5 MB of thinking each)
+docs/gpt/gauntlet/**/*.err
