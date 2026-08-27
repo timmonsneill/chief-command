@@ -70,6 +70,16 @@ panel writers into "couldn't finish" skips. Either raise the busy timeout above 
 timeout in `harness/db/jobs.py::connect`, or restructure so git runs outside the
 transaction against a re-checked precondition. Say which and why in the worklog.
 
+## 7. [ ] Run the gatekeeper as its own process, and make the panel ASK it
+Every GPT seat flagged this: `harness/gauntlet.py::_reserve_review_budget` imports
+`gatekeeper.spend` and calls it in-process on the panel's own writable connection, so
+"gatekeeper down means irreversible things stop" is not true on the live path. Task:
+(a) start `gatekeeper.serve()` from the server's startup (same process is fine for now,
+separate thread, loopback + token); (b) replace the in-process call with an HTTP request
+to it (`handle`'s JSON shape), refusing the review as a SKIP if the service can't be
+reached; (c) a test that stops the service and proves no money is reserved and no
+provider is called. Keep `gatekeeper.spend` importable for tests only.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.

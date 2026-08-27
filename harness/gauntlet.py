@@ -164,7 +164,7 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
     """
     key = os.environ.get(XAI_KEY_VAR, "").strip()
     if not key:
-        raise ReviewerBroke(f"{XAI_KEY_VAR} is not set in this environment")
+        raise ReviewerBroke("the paid reviewer has no sign-in key on this machine")
     body = json.dumps({
         "model": model,
         "temperature": 0,
@@ -178,24 +178,27 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
         with urllib.request.urlopen(req, timeout=REVIEW_TIMEOUT_S) as resp:
             payload = json.loads(resp.read(MAX_REPLY_BYTES).decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
-        raise ReviewerBroke(
-            f"xai answered {exc.code}: {exc.read().decode(errors='replace')[:200]}"
-        ) from exc
+        # Status code only. The body is vendor text and could echo anything — it never
+        # reaches the record, which is what Neill reads.
+        why = {401: "its sign-in key was refused", 403: "it isn't allowed to do that",
+               429: "it is being rate-limited right now"}.get(exc.code,
+               f"it answered with error {exc.code}")
+        raise ReviewerBroke(f"the paid reviewer couldn't run — {why}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ReviewerBroke(f"xai unreachable: {str(exc)[:200]}") from exc
+        raise ReviewerBroke("the paid reviewer couldn't be reached") from exc
     except ValueError as exc:                       # not JSON
-        raise ReviewerBroke(f"xai reply was not readable: {str(exc)[:200]}") from exc
+        raise ReviewerBroke("the paid reviewer sent back something unreadable") from exc
     try:
         choice = payload["choices"][0]
         text = choice["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:
-        raise ReviewerBroke(f"xai reply had no message: {str(payload)[:200]}") from exc
+        raise ReviewerBroke("the paid reviewer sent back no answer") from exc
     # An empty answer, or one cut off before the verdict line, is the TOOL failing.
     # Left to _parse_verdict it would become a permanent FAIL against this version.
     if not text.strip():
-        raise ReviewerBroke("xai answered with no text")
+        raise ReviewerBroke("the paid reviewer answered with nothing")
     if choice.get("finish_reason") not in (None, "stop"):
-        raise ReviewerBroke(f"xai stopped early: {choice.get('finish_reason')}")
+        raise ReviewerBroke("the paid reviewer was cut off before it finished")
     return _parse_verdict(text)
 
 

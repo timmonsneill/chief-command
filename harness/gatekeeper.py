@@ -263,6 +263,12 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     if not _commit_holds_the_reviewed_work(tip, job_id, job["result"]):
         raise _no("what's on that branch isn't what the reviewers read, "
                       "so it can't be merged as reviewed")
+    # ...and NOTHING ELSE. A commit with the reviewed file plus one more file is a
+    # reviewed file and an unreviewed one. The panel read one thing; one thing merges.
+    extra = _unreviewed_files_in(tip, job_id)
+    if extra:
+        raise _no("that branch changes things the reviewers never saw "
+                      f"({_clean(', '.join(extra), 160)}), so it can't be merged as reviewed")
 
     if not _repo_is_ready():
         raise _no("the project folder has unfinished changes in it, so it isn't "
@@ -283,6 +289,12 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
         if tip is None or not _same_commit(tip, version):
             raise _no("the code on that branch changed while the merge was being "
                       "checked, so it needs checking again")
+        # The TARGET is re-checked under the lock too: between the check above and
+        # here, another process could have checked out a different branch.
+        if not _repo_is_ready():
+            raise _no("the project folder changed while the merge was being checked, "
+                      "so it isn't safe to merge right now")
+        before = _main_tip()
         conn.execute("BEGIN IMMEDIATE")
         try:
             try:
@@ -294,7 +306,13 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
             if commit is None:
                 conn.execute("ROLLBACK")          # the record never happened either
                 raise _no("the merge didn't go through cleanly — it needs a person")
-            conn.execute("COMMIT")
+            try:
+                conn.execute("COMMIT")
+            except sqlite3.Error:
+                # git merged, the record couldn't say so. Put main back exactly where it
+                # was, so the record and the repository never disagree about shipping.
+                _reset_main_to(before)
+                raise
         except BaseException:
             # Never leave a transaction open on a connection somebody else will reuse.
             if conn.in_transaction:
@@ -356,6 +374,20 @@ def _commit_holds_the_reviewed_work(commit: str, job_id: int, reviewed: str | No
     return out.returncode == 0 and out.stdout == reviewed
 
 
+def _unreviewed_files_in(commit: str, job_id: int) -> list[str]:
+    """Every path the branch changes relative to main, except the one reviewed file."""
+    base = subprocess.run(["git", "merge-base", MERGE_INTO, commit], cwd=REPO,
+                          capture_output=True, text=True)
+    if base.returncode != 0 or not base.stdout.strip():
+        return ["<no common history with main>"]
+    diff = subprocess.run(["git", "diff", "--name-only", f"{base.stdout.strip()}..{commit}"],
+                          cwd=REPO, capture_output=True, text=True)
+    if diff.returncode != 0:
+        return ["<could not list the branch's changes>"]
+    allowed = REVIEWED_FILE.format(job_id=job_id)
+    return sorted(p for p in diff.stdout.splitlines() if p.strip() and p.strip() != allowed)
+
+
 def _repo_is_ready() -> bool:
     """On the branch we merge into, with nothing half-done in the folder.
 
@@ -387,6 +419,19 @@ def _git_merge(commit: str) -> str | None:
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                           capture_output=True, text=True)
     return head.stdout.strip()[:12] or None
+
+
+def _main_tip() -> str | None:
+    out = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{MERGE_INTO}^{{commit}}"],
+                         cwd=REPO, capture_output=True, text=True)
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _reset_main_to(commit: str | None) -> None:
+    """Undo a merge whose record failed to commit. Only ever called with the tip that
+    was captured moments earlier under the merge lock, on a tree verified clean."""
+    if commit:
+        subprocess.run(["git", "reset", "--hard", commit], cwd=REPO, capture_output=True)
 
 
 def _abort_any_merge() -> None:
@@ -447,11 +492,17 @@ def deploy(conn, target: str, *, job_id: int | None = None,
     # racing: SQLite serializes the writes and the single-use guard refuses the loser,
     # which arrives here as a plain refusal rather than a crash.
     try:
-        conn.execute("UPDATE approvals SET used_at = datetime('now') WHERE id = ?",
-                     (approval["id"],))
+        cur = conn.execute(
+            "UPDATE approvals SET used_at = datetime('now') "
+            " WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL "
+            "   AND expires_at > datetime('now')",           # re-checked AT consumption
+            (approval["id"],))
     except sqlite3.IntegrityError as exc:
         raise _refuse(conn, job_id, "that approval has already been used",
                       verb="deploy", subject=target, asked_by=asked_by) from exc
+    if cur.rowcount != 1:
+        raise _refuse(conn, job_id, "that approval was withdrawn or ran out just now",
+                      verb="deploy", subject=target, asked_by=asked_by)
 
     try:
         reference = str(deployer(target) or "")
@@ -625,6 +676,11 @@ def serve(host: str = "127.0.0.1", port: int = 8788) -> None:
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
+            if code >= 400:
+                # A refusal may have left the request body unread; on a kept-alive
+                # connection those bytes would be parsed as the NEXT request. Close.
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(payload)
 

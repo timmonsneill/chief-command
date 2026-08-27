@@ -38,6 +38,8 @@ from db.jobs import (  # noqa: E402
 )
 
 CONFIG = Path(__file__).resolve().parent / "config" / "seats.toml"
+BUILD_ESTIMATE_CENTS = 25       # reserved for a metered build before the call (an estimate;
+                                # real usage recording is queue task 1)
 
 
 class DispatchRefused(RuntimeError):
@@ -357,6 +359,18 @@ def dispatch(
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+    # A paid builder reserves BEFORE it is called — the same rule the review panel
+    # follows. Checking the ledger without writing to it let a metered seat build all
+    # day with the ledger reading zero.
+    if row["tier"] == "metered":
+        import gatekeeper
+        try:
+            gatekeeper.spend(conn, builder_seat, BUILD_ESTIMATE_CENTS, job_id=job_id,
+                             role="build", asked_by="dispatch")
+        except gatekeeper.Refused as exc:
+            set_status(conn, job_id, "failed", error=f"not started: {exc}")
+            raise DispatchRefused(str(exc)) from exc
 
     run_id = _spawn(row, request, blocking=blocking)
     attach_run(conn, job_id, run_id=run_id or "", branch=f"job/{job_id}")

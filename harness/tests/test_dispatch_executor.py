@@ -131,3 +131,16 @@ def test_the_local_worker_actually_produces_and_parks_for_review(conn):
         set_status(conn, d.job_id, "done")
 
     executor.cleanup_worktree(d.job_id)
+
+
+def test_a_metered_builder_reserves_money_before_it_is_called(conn, monkeypatch):
+    """Checking the ledger without writing to it let a paid seat build all day at zero."""
+    import dispatch as d
+    from db.jobs import Seat, upsert_seat
+    c = conn if not isinstance(conn, tuple) else conn[0]
+    upsert_seat(c, Seat("grok", "xai", "grok-4.5", "grok", "metered", daily_cap_cents=100))
+    monkeypatch.setattr(d, "_spawn", lambda row, request, blocking: "run-1")
+    cfg = {"seats": {}, "gauntlet": {"reviewers": ["reviewer", "brain"], "min_model_families": 2}}
+    r = d.dispatch(c, "build a thing", "grok", cfg)
+    spent = c.execute("SELECT COALESCE(SUM(cost_cents),0) FROM usage WHERE seat_id='grok'").fetchone()[0]
+    assert spent == d.BUILD_ESTIMATE_CENTS and r.job_id

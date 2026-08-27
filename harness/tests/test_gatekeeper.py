@@ -482,3 +482,43 @@ def test_merge_refuses_when_the_branch_moved_after_review(conn, repo):
         gatekeeper.merge(conn, job)
     assert not (repo / "chief_output").exists()
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
+
+
+def test_merge_refuses_a_commit_that_changes_anything_else(conn, repo):
+    """The reviewed file plus one more file is a reviewed file and an unreviewed one."""
+    job = create_job(conn, "the login form", builder_seat="reviewer")
+    conn.execute("UPDATE jobs SET required_reviews=2, required_review_families=2 WHERE id=?", (job,))
+    set_status(conn, job, "in_progress")
+    _git(repo, "checkout", "-q", "-b", f"job/{job}")
+    out = repo / "chief_output"; out.mkdir()
+    (out / f"job_{job}.txt").write_text("benign\n")
+    (repo / "backdoor.py").write_text("import os\n")            # the unreviewed extra
+    _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "work")
+    sha = _git(repo, "rev-parse", "HEAD"); _git(repo, "checkout", "-q", "main")
+    conn.execute("UPDATE jobs SET branch=?, result=? WHERE id=?", (f"job/{job}", "benign\n", job))
+    set_head_version(conn, job, sha[:16]); set_status(conn, job, "review")
+    for s in ("brain", "grok"):
+        record_verdict(conn, job, s, verdict="pass", role="reviewer")
+    set_status(conn, job, "done")
+    record_artifact(conn, job, "screenshot", path="/e.png", captured_by="playwright")
+    record_verdict(conn, job, "grok", verdict="pass", role="tester")
+    with pytest.raises(gatekeeper.Refused, match="never saw.*backdoor.py"):
+        gatekeeper.merge(conn, job)
+    assert not (repo / "backdoor.py").exists()
+
+
+def test_an_approval_revoked_after_selection_is_not_consumed(conn, monkeypatch):
+    """Validity is re-checked AT consumption, not just when the approval is found."""
+    monkeypatch.setitem(gatekeeper.DEPLOYERS, "the website", lambda t: "r1")
+    rid = _approve(conn, "the website")
+    class RevokesMidway:
+        """The same connection, except the owner revokes the approval in the instant
+        between the gatekeeper finding it and the gatekeeper consuming it."""
+        def execute(self, sql, *a, **kw):
+            if sql.startswith("UPDATE approvals SET used_at"):
+                conn.execute("UPDATE approvals SET revoked_at = datetime('now') WHERE id=?", (rid,))
+            return conn.execute(sql, *a, **kw)
+        def __getattr__(self, name):
+            return getattr(conn, name)
+    with pytest.raises(gatekeeper.Refused, match="withdrawn"):
+        gatekeeper.deploy(RevokesMidway(), "the website")
