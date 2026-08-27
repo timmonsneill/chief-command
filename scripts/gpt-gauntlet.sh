@@ -25,7 +25,7 @@ fi
 if ! command -v codex >/dev/null 2>&1; then
   echo "codex CLI not found on PATH." >&2; exit 1
 fi
-if [ -n "$(git status --porcelain)" ]; then
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "Working tree is not clean. Commit first — the gauntlet reviews commits." >&2; exit 1
 fi
 OUT="docs/gpt/gauntlet/$(date +%m%d-%H%M)-${BRANCH//\//_}"
@@ -46,7 +46,7 @@ run_seat() {
   fi
   # A read-only reviewer that changed files is a broken reviewer, not a review.
   local dirty
-  dirty=$(git status --porcelain | grep -v "^?? docs/gpt/gauntlet/" || true)
+  dirty=$(git status --porcelain --untracked-files=no || true)
   if [ -n "$dirty" ]; then
     echo "   ⚠ seat '$name' MODIFIED THE WORKING TREE despite read-only sandbox:" >&2
     echo "$dirty" >&2
