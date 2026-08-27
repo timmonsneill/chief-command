@@ -56,10 +56,12 @@ def test_local_job_cannot_reach_done_without_review(conn):
     job = create_job(conn, "scaffold the auth module", builder_seat="grinder")
     set_status(conn, job, "review")
 
-    # Two guards now refuse this — the local-output rule and, since migration 007, the
-    # unconditional "somebody other than the author passed it" floor. SQLite does not
-    # promise which fires first; either answer is the right answer.
-    with pytest.raises(GuardViolation, match="subscription-tier review|fewer model families"):
+    # Satisfy the panel and family floors with a LOCAL reviewer of a different family,
+    # so the only guard left standing is the one this test is about: local-built work
+    # needs a HIGHER-TIER pass, and a second junior is not that.
+    upsert_seat(conn, Seat("grinder2", "ollama", "llama3:8b", "llama", "local"))
+    record_verdict(conn, job, "grinder2", verdict="pass")
+    with pytest.raises(GuardViolation, match="subscription-tier review"):
         set_status(conn, job, "done")
 
 

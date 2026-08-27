@@ -147,9 +147,12 @@ def test_promoting_coal_cannot_legitimize_its_old_work(conn):
     job = create_job(conn, "the overnight scaffold", builder_seat="coal")
     upsert_seat(conn, Seat("coal", "ollama", "qwen2.5-coder:7b", "qwen", "subscription"))
 
-    # Since migration 007 the unconditional "another mind passed it" floor refuses this
-    # too, and SQLite does not promise which guard speaks first. Either is the same no.
-    with pytest.raises(BLOCKED, match="subscription-tier review|fewer model families"):
+    # Satisfy the panel and family floors with a LOCAL reviewer of a different family,
+    # so the only guard left is the one under attack: the builder's tier was frozen at
+    # build time, and re-tiering the seat does not change what built this.
+    upsert_seat(conn, Seat("coal2", "ollama", "llama3:8b", "llama", "local"))
+    record_verdict(conn, job, "coal2", verdict="pass")
+    with pytest.raises(BLOCKED, match="subscription-tier review"):
         set_status(conn, job, "done")
 
 

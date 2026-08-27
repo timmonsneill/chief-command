@@ -92,7 +92,9 @@ def dispatch_local(
     cfg = load_config() if cfg is None else cfg
     roster, excluded = panel_roster(conn, cfg)
     families = int(cfg.get("gauntlet", {}).get("min_model_families", 0))
-    _refuse_a_panel_that_cannot_hold(conn, roster, families)
+    builder_row = seat(conn, builder_seat)
+    _refuse_a_panel_that_cannot_hold(conn, roster, families,
+                                     builder_row["family"] if builder_row else None)
 
     # Duplicate protection — a retry must not start the same work twice.
     if dispatch_key:
@@ -207,7 +209,7 @@ def panel_roster(conn, cfg: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     """Who can actually sit on the panel right now — and who can't, and why.
 
     A roster entry is only real if the seat exists, is switched on, and we have a way to
-    RUN it on this machine. Grok has no runner until the leaked key is rotated; the
+    RUN it on this machine. A seat whose provider has no runner, or whose key is absent, is excluded; the
     codex seat needs its login. Counting those as panel members would produce a required
     panel that can never report, which fails closed but useless — every job parked
     forever. Counting them silently would be worse: a panel that shrank without saying
@@ -233,7 +235,8 @@ def panel_roster(conn, cfg: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     return roster, excluded
 
 
-def _refuse_a_panel_that_cannot_hold(conn, roster: list[str], floor: int) -> None:
+def _refuse_a_panel_that_cannot_hold(conn, roster: list[str], floor: int,
+                                     builder_family: str | None = None) -> None:
     """Refuse to dispatch work the panel could never certify.
 
     Fail CLOSED, but say so at DISPATCH — when it is one legible refusal — rather than
@@ -244,7 +247,9 @@ def _refuse_a_panel_that_cannot_hold(conn, roster: list[str], floor: int) -> Non
             "the review panel isn't configured (it needs at least one model family) "
             "— refusing to start work that nothing would check"
         )
-    families = {seat(conn, s)["family"] for s in roster}
+    # Counted the way the database counts (migration 007): the author's own family is
+    # not a second opinion. Counting it here admitted jobs the record then parked.
+    families = {seat(conn, s)["family"] for s in roster} - {builder_family}
     if len(families) < floor:
         raise DispatchRefused(
             f"only {len(families)} model family/families can review right now and "
@@ -272,6 +277,8 @@ def sync_seats(conn, cfg: dict[str, Any]) -> None:
             family=s["family"],
             tier=s["tier"],
             daily_cap_cents=s.get("daily_cap_cents"),
+            build_cap_cents=s.get("build_cap_cents"),
+            review_cap_cents=s.get("review_cap_cents"),
             enabled=not s.get("disabled", False),
             notes=s.get("notes", ""),
         ))
@@ -323,7 +330,7 @@ def dispatch(
     roster, excluded = panel_roster(conn, cfg)
     required = len(roster)
     families = int(gauntlet.get("min_model_families", 0))
-    _refuse_a_panel_that_cannot_hold(conn, roster, families)
+    _refuse_a_panel_that_cannot_hold(conn, roster, families, row["family"])
 
     # One transaction: the job must never exist for even a moment without its review
     # requirements stamped on (autocommit would otherwise leave a floor-0 gap).

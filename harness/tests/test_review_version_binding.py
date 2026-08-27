@@ -78,9 +78,10 @@ def test_the_full_panel_must_have_reviewed_the_current_version(conn):
 
     set_head_version(conn, job, "version-B")
 
-    # Both the panel-size guard and the family floor answer "nobody reviewed B";
-    # SQLite does not promise which speaks first.
-    with pytest.raises(GuardViolation, match="panel has not reported|fewer model families"):
+    # One cross-family pass on B satisfies the family floor, so the guard left standing
+    # is the one this test is about: the PANEL of two never reported on B.
+    record_verdict(conn, job, "grok", verdict="pass")
+    with pytest.raises(GuardViolation, match="panel has not reported"):
         set_status(conn, job, "done")
 
 

@@ -24,6 +24,7 @@ architecture. sessions come and go; the job row is the durable truth.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import subprocess
 import threading
@@ -56,6 +57,33 @@ def _event(conn, job_id: int, seat_row, kind: str, detail: str = "", target: str
         (job_id, seat_row["id"], seat_row["id"], seat_row["model"],
          seat_row["family"], kind, target or None, detail or None),
     )
+
+
+def _commit_in_worktree(wt: Path, job_id: int, branch: str, summary: str) -> str | None:
+    """Commit the job's output on its own branch and return the commit id.
+
+    This is what makes the gatekeeper's merge possible at all: it refuses unless the
+    branch tip IS the reviewed version, and a version has to be a commit for that to be
+    provable. If anything here fails, the caller falls back to a content hash — the job
+    is still reviewable, it just can never be merged by the gatekeeper, which is the
+    honest outcome for work that isn't in git.
+    """
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "chief-worker", "GIT_AUTHOR_EMAIL": "worker@chief.local",
+           "GIT_COMMITTER_NAME": "chief-worker", "GIT_COMMITTER_EMAIL": "worker@chief.local"}
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True,
+                              timeout=60, env=env)
+    if git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+        return None
+    if git("checkout", "-B", branch).returncode != 0:
+        return None
+    if git("add", "-A", OUTPUT_DIRNAME).returncode != 0:
+        return None
+    if git("commit", "-q", "-m", f"job {job_id}: {summary[:60]}").returncode != 0:
+        return None
+    sha = git("rev-parse", "HEAD").stdout.strip()
+    return sha[:16] if len(sha) >= 16 else None
 
 
 def _version_of(text: str) -> str:
@@ -177,7 +205,8 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
         out_dir = wt / OUTPUT_DIRNAME
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"job_{job_id}.txt").write_text(result)
-        version = _version_of(result)
+        branch = job["branch"] or f"job/{job_id}"
+        version = _commit_in_worktree(wt, job_id, branch, job["request"]) or _version_of(result)
         set_head_version(conn, job_id, version)
         _event(conn, job_id, seat_row, "write",
                f"Wrote {len(result)} characters of work.", target=str(out_dir))

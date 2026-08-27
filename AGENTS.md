@@ -78,6 +78,41 @@ bitten this project once.
    model's head — put it in an artifact (the checklist, born from the spec) and the tester's
    job becomes "does the app match this list," which a model + a browser does reliably.
 
+## Codex sessions (the "GPT bridge")
+
+When Neill opens a terminal and runs `codex` in this repo, this file is what Codex reads.
+The setup mirrors the Arch repo's, with two fixes: the queue and worklog are tracked in
+git (Arch's vanish on a fresh clone), and the gauntlet checks the working tree after
+every seat (a "read-only" reviewer has edited files before).
+
+**Read first, every session:** (1) this file; (2) `docs/gpt/GPT_TASK_QUEUE.md` — take the
+topmost task not marked TAKEN/DONE, mark it TAKEN with the date, do it, mark it DONE with
+your branch; (3) `docs/gpt/GPT_WORKLOG.md` — read prior entries, and append one at the
+END of your session: task, branch, commits, verification run, gauntlet folder + verdicts,
+anything unfinished. Chief reads the worklog first when reviewing.
+
+**Hard rules:** branches only — `gpt/<short-task-name>` off `origin/main`; never commit
+to `main`, never merge to `main`, never push `main`. `--no-verify` is forbidden. No new
+database migrations (write `PROPOSED_MIGRATION.sql` in your branch and log it). Never
+touch `~/.chief/env`, `harness/db/chief.db` (the live record), or anything under `backend/`
+/ `frontend/` (v1, frozen). Do exactly what the task says; if a rule here seems wrong,
+log it, don't "fix" it. Everything that reaches Neill is plain English (see below).
+
+**Verification bar** (before DONE): `.venv/bin/python -m pytest harness/tests/ -q` fully
+green; working tree clean; commits with clear messages.
+
+**Gauntlet:** `./scripts/gpt-gauntlet.sh` from your branch — four GPT reviewer seats
+(bugs, security, wiring, hygiene), reports in `docs/gpt/gauntlet/`. Fix every CRITICAL and
+HIGH, commit, re-run until all four say GO, log the folder + verdicts. One family only:
+it complements, never replaces, the harness's cross-family panel.
+
+**Shipping:** push your `gpt/*` branch (the pre-push hook — `./scripts/install-hooks.sh`
+once per clone — runs the tests and checks `./scripts/mark-reviewed.sh` was run on this
+exact commit). Merging to `main` is the harness's job, after its own cross-family review.
+
+**When stuck:** do less, not more — finish what is safe, log exactly what is unfinished
+and why, and stop.
+
 ## The architecture in one paragraph
 
 A **fast head** (Talker) is what Neill talks to — non-reasoning, excellent tool-calling,

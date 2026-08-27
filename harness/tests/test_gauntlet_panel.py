@@ -43,7 +43,8 @@ CFG = {"seats": {}, "gauntlet": {"reviewers": ["reviewer", "brain"],
 
 
 @pytest.fixture()
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "test-key")     # grok's runner needs a key to count
     path = tmp_path / "t.db"
     c = connect(path)
     init_db(c)

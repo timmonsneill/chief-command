@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gatekeeper  # noqa: E402
 from db.jobs import (  # noqa: E402
-    Seat, connect, create_job, init_db, record_verdict, set_head_version,
-    set_status, upsert_seat,
+    Seat, connect, create_job, init_db, record_artifact, record_verdict,
+    set_head_version, set_status, upsert_seat,
 )
 
 SEATS = [
@@ -286,3 +286,143 @@ def test_the_old_direct_power_is_gone(conn):
     set_status(conn, job, "done")
     with pytest.raises(dispatch.DispatchRefused, match="gatekeeper"):
         dispatch.ship(conn, job)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE GATE LOG — every ask, every answer, never a draft
+# (added after the 2026-08-27 review found the table had no test and spend never
+#  logged its grants)
+# ═══════════════════════════════════════════════════════════════════════════════
+def _gate_rows(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM gate_log ORDER BY id")]
+
+
+def test_a_refusal_lands_in_the_gate_log(conn):
+    job = create_job(conn, "half a feature", builder_seat="reviewer")
+    with pytest.raises(gatekeeper.Refused):
+        gatekeeper.merge(conn, job, asked_by="riggs")
+    rows = _gate_rows(conn)
+    assert len(rows) == 1 and rows[0]["verb"] == "merge" and rows[0]["granted"] == 0
+    assert rows[0]["asked_by"] == "riggs" and rows[0]["job_id"] == job
+
+
+def test_a_granted_spend_lands_in_the_gate_log(conn):
+    gatekeeper.spend(conn, "grok", 5, role="review", asked_by="the panel")
+    rows = _gate_rows(conn)
+    assert rows and rows[-1]["verb"] == "spend" and rows[-1]["granted"] == 1
+    assert rows[-1]["asked_by"] == "the panel"
+
+
+def test_a_refusal_about_a_job_that_does_not_exist_is_still_written_down(conn):
+    """gate_log.job_id is a foreign key. Passing a made-up job id used to make the audit
+    write itself throw — and the refusal, the one thing that must never vanish, did."""
+    with pytest.raises(gatekeeper.Refused):
+        gatekeeper.spend(conn, "grok", 999_999, job_id=424242, role="review")
+    rows = _gate_rows(conn)
+    assert rows and rows[-1]["granted"] == 0 and rows[-1]["job_id"] is None
+
+
+def test_the_gate_log_is_a_record_not_a_draft(conn):
+    gatekeeper.spend(conn, "grok", 5, role="review")
+    with pytest.raises(Exception, match="record, not a draft"):
+        conn.execute("UPDATE gate_log SET granted = 0")
+    with pytest.raises(Exception, match="cannot be deleted"):
+        conn.execute("DELETE FROM gate_log")
+
+
+def test_a_job_scoped_approval_needs_that_job_named(conn):
+    """An approval given in the context of job 4 must not be spendable by a request that
+    simply leaves the job out. Omission is not a match."""
+    job = create_job(conn, "the website work", builder_seat="reviewer")
+    rid = _approve(conn, "the website")
+    conn.execute("UPDATE approvals SET job_id = ? WHERE id = ?", (job, rid))
+    with pytest.raises(gatekeeper.Refused, match="different piece of work"):
+        gatekeeper.deploy(conn, "the website")            # no job_id at all
+    # Not consumed by the refusal: the right job can still use it.
+    assert gatekeeper.deploy(conn, "the website", job_id=job).verb == "deploy"
+
+
+def test_an_empty_token_file_never_authorizes(tmp_path, monkeypatch):
+    """compare_digest('', '') is True. An empty token file used to let a header-less
+    request through — the exact CSRF the token exists to stop."""
+    path = tmp_path / "chief" / "gatekeeper.token"
+    monkeypatch.setattr(gatekeeper, "TOKEN_PATH", path)
+    first = gatekeeper.token()
+    assert len(first) >= 32
+    path.write_text("")                                     # truncated / disk-full
+    second = gatekeeper.token()
+    assert len(second) >= 32 and second != ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MERGE, FOR REAL — against an actual git repo, the check the verb exists for
+# ═══════════════════════════════════════════════════════════════════════════════
+def _git(repo, *args):
+    import subprocess
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "PATH": __import__("os").environ["PATH"],
+           "HOME": str(repo)}
+    out = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+@pytest.fixture()
+def repo(tmp_path, monkeypatch):
+    r = tmp_path / "repo"; r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    (r / "README").write_text("v0\n"); _git(r, "add", "."); _git(r, "commit", "-q", "-m", "root")
+    monkeypatch.setattr(gatekeeper, "REPO", r)
+    return r
+
+
+def _job_on_branch(conn, repo, job_id, content):
+    _git(repo, "checkout", "-q", "-b", f"job/{job_id}")
+    (repo / "work.txt").write_text(content); _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "work")
+    sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    conn.execute("UPDATE jobs SET branch = ? WHERE id = ?", (f"job/{job_id}", job_id))
+    return sha
+
+
+def test_merge_goes_through_when_the_branch_tip_is_the_reviewed_version(conn, repo):
+    job = create_job(conn, "the login form", builder_seat="reviewer")
+    conn.execute("UPDATE jobs SET required_reviews=2, required_review_families=2 WHERE id=?", (job,))
+    set_status(conn, job, "in_progress")
+    sha = _job_on_branch(conn, repo, job, "reviewed bytes\n")
+    set_head_version(conn, job, sha[:16])                   # what the worker records
+    set_status(conn, job, "review")
+    for s in ("brain", "grok"):
+        record_verdict(conn, job, s, verdict="pass", role="reviewer")
+    set_status(conn, job, "done")
+    record_artifact(conn, job, "screenshot", path="/evidence/login.png", captured_by="playwright")
+    record_verdict(conn, job, "grok", verdict="pass", role="tester")
+
+    r = gatekeeper.merge(conn, job, asked_by="the panel")
+    assert r.verb == "merge"
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "shipped"
+    assert (repo / "work.txt").read_text() == "reviewed bytes\n"      # it is on main
+    assert _gate_rows(conn)[-1]["granted"] == 1
+
+
+def test_merge_refuses_when_the_branch_moved_after_review(conn, repo):
+    """Build v1, get it approved, push v2 to the same branch, ask to merge: v2 must NOT
+    go in. This is the check the verb exists for, and it had no test that reached it."""
+    job = create_job(conn, "the login form", builder_seat="reviewer")
+    conn.execute("UPDATE jobs SET required_reviews=2, required_review_families=2 WHERE id=?", (job,))
+    set_status(conn, job, "in_progress")
+    sha1 = _job_on_branch(conn, repo, job, "v1\n")
+    set_head_version(conn, job, sha1[:16])
+    set_status(conn, job, "review")
+    for s in ("brain", "grok"):
+        record_verdict(conn, job, s, verdict="pass", role="reviewer")
+    set_status(conn, job, "done")
+    # the builder pushes v2 to the same branch, record untouched
+    _git(repo, "checkout", "-q", f"job/{job}")
+    (repo / "work.txt").write_text("v2\n"); _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "v2")
+    _git(repo, "checkout", "-q", "main")
+
+    with pytest.raises(gatekeeper.Refused, match="isn't the code that was reviewed"):
+        gatekeeper.merge(conn, job)
+    assert not (repo / "work.txt").exists()
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"

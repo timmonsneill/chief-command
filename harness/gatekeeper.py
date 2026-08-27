@@ -75,12 +75,12 @@ MERGE_INTO = "main"
 # EXPRESSIONS, not just branches — `:/some message` resolves to a commit by searching
 # commit messages. A permissive check here turns "merge the branch for job 17" into
 # "merge any commit in the repository."
-BRANCH_RE = re.compile(r"^job/\d+$")
+BRANCH_RE = re.compile(r"^job/\d+\Z")
 
 # What money can be spent ON. The daily caps in the schema are keyed by role, so a role
 # nobody validated is a cap nobody enforces — 'research' would sail past both the build
 # ration and the review ration.
-SPEND_ROLES = {"build", "review", "test", "research"}
+SPEND_ROLES = {"build", "review", "test", "research", "voice"}
 
 
 class Refused(RuntimeError):
@@ -126,8 +126,11 @@ def _log(conn, verb: str, subject: str, granted: bool, detail: str,
     )
 
 
-def _note(conn, job_id: int | None, text: str) -> None:
-    """Write a refusal (or a grant) onto the job where a person will see it."""
+def _note(conn, job_id: int | None, text: str, kind: str = "skipped") -> None:
+    """Write a refusal (or a grant) onto the job where a person will see it.
+
+    Refusals are 'skipped' events; a grant is 'done' — a merge showing up in the
+    activity stream as a skip was telling Neill the opposite of what happened."""
     if job_id is None:
         return
     row = conn.execute(
@@ -141,16 +144,27 @@ def _note(conn, job_id: int | None, text: str) -> None:
     conn.execute(
         "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
         "VALUES (?,?,?,?,?,?,?)",
-        (job_id, s["id"], "gatekeeper", s["model"], s["family"], "skipped", text),
+        (job_id, s["id"], "gatekeeper", s["model"], s["family"], kind, text),
     )
 
 
 def _refuse(conn, job_id: int | None, why: str = "", *, verb: str = "",
             subject: str = "", asked_by: str = "unknown") -> Refused:
+    # A job id the record doesn't know must not reach gate_log: its foreign key would
+    # throw, and the refusal — the one thing rule 3 says must never vanish — would.
+    job_id = _known_job(conn, job_id)
     _note(conn, job_id, f"The gatekeeper said no: {why}")
     if verb:
         _log(conn, verb, subject or str(job_id), False, why, asked_by, job_id)
     return Refused(why)
+
+
+def _known_job(conn, job_id) -> int | None:
+    try:
+        job_id = int(job_id) if job_id is not None else None
+    except (TypeError, ValueError):
+        return None
+    return job_id if job_id is not None and _job_exists(conn, job_id) else None
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +186,10 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     if job is None:
         raise _no(f"there is no job {job_id}")
 
-    if job["status"] not in ("done", "shipped"):
-        raise _no("that work hasn't finished its checks yet, so there's nothing to merge")
     if job["status"] == "shipped":
         raise _no("that work has already been merged once")
+    if job["status"] != "done":
+        raise _no("that work hasn't finished its checks yet, so there's nothing to merge")
 
     version = job["head_version"]
     if not version:
@@ -254,21 +268,33 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     # safe order is to let the schema refuse before git is touched at all.
     # ══════════════════════════════════════════════════════════════════════════
     with _MERGE_LOCK:
+        # Re-resolve under the lock and merge the SHA, never the name. Between the check
+        # above and `git merge refs/heads/<branch>`, a builder could move the branch;
+        # merging by name would then merge whatever it points at now.
+        tip = _branch_tip(branch)
+        if tip is None or not _same_commit(tip, version):
+            raise _no("the code on that branch changed while the merge was being "
+                      "checked, so it needs checking again")
         conn.execute("BEGIN IMMEDIATE")
         try:
-            set_status(conn, job_id, "shipped")
-        except (GuardViolation, sqlite3.IntegrityError) as exc:
-            conn.execute("ROLLBACK")
-            raise _no(_plain(exc)) from exc
-
-        commit = _git_merge(branch)
-        if commit is None:
-            conn.execute("ROLLBACK")          # the record never happened either
-            raise _no("the merge didn't go through cleanly — it needs a person")
-        conn.execute("COMMIT")
+            try:
+                set_status(conn, job_id, "shipped")
+            except (GuardViolation, sqlite3.IntegrityError) as exc:
+                conn.execute("ROLLBACK")
+                raise _no(_plain(exc)) from exc
+            commit = _git_merge(tip)
+            if commit is None:
+                conn.execute("ROLLBACK")          # the record never happened either
+                raise _no("the merge didn't go through cleanly — it needs a person")
+            conn.execute("COMMIT")
+        except BaseException:
+            # Never leave a transaction open on a connection somebody else will reuse.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
 
     _note(conn, job_id,
-          f"Merged into the main line of code. Asked for by {_clean(asked_by)}.")
+          f"Merged into the main line of code. Asked for by {_clean(asked_by)}.", kind="done")
     _log(conn, "merge", f"job {job_id}", True,
          f"{len(families)} model families signed off on {version}; merged {commit}",
          asked_by, job_id)
@@ -325,10 +351,10 @@ def _repo_is_ready() -> bool:
     return dirty.returncode == 0 and not dirty.stdout.strip()
 
 
-def _git_merge(branch: str) -> str | None:
+def _git_merge(commit: str) -> str | None:
+    """Merge one exact commit. Takes a SHA, not a ref, on purpose."""
     try:
-        proc = subprocess.run(["git", "merge", "--no-ff", "--no-edit",
-                               f"refs/heads/{branch}"],
+        proc = subprocess.run(["git", "merge", "--no-ff", "--no-edit", commit],
                               cwd=REPO, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         _abort_any_merge()
@@ -377,8 +403,7 @@ def deploy(conn, target: str, *, job_id: int | None = None,
                       verb="deploy", subject=target, asked_by=asked_by)
     # An approval granted about ONE job does not authorize the same words claimed under
     # another. Without this, a yes given in the context of job 4 travels to job 99.
-    if approval["job_id"] is not None and job_id is not None \
-            and approval["job_id"] != job_id:
+    if approval["job_id"] is not None and approval["job_id"] != job_id:
         raise _refuse(conn, job_id,
                       "that approval was for a different piece of work",
                       verb="deploy", subject=target, asked_by=asked_by)
@@ -454,6 +479,7 @@ def spend(conn, seat_id: str, cents: int, *, job_id: int | None = None,
                       verb="spend", subject=seat_id, asked_by=asked_by) from exc
 
     ref = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    _log(conn, "spend", seat_id, True, f"{cents}c reserved for {role}", asked_by, job_id)
     return Receipt(verb="spend", subject=seat_id, detail=f"{cents}c reserved for {role}",
                    reference=str(ref))
 
@@ -483,15 +509,17 @@ def handle(request: dict[str, Any], *, db_path: Path | None = None) -> dict[str,
                 r = merge(conn, int(request["job_id"]), asked_by=asked_by)
             elif verb == "deploy":
                 r = deploy(conn, str(request["target"]),
-                           job_id=request.get("job_id"), asked_by=asked_by)
+                           job_id=_known_job(conn, request.get("job_id")), asked_by=asked_by)
             else:
                 r = spend(conn, str(request["seat_id"]), int(request["cents"]),
-                          job_id=request.get("job_id"),
+                          job_id=_known_job(conn, request.get("job_id")),
                           role=str(request.get("role") or "build"), asked_by=asked_by)
         except Refused as exc:
             return {"ok": False, "error": str(exc)}
         except (KeyError, ValueError, TypeError) as exc:
             return {"ok": False, "error": f"that request didn't make sense: {exc}"}
+        except sqlite3.Error as exc:
+            return {"ok": False, "error": f"the record refused that: {_plain(exc)}"}
         return {"ok": True, "verb": r.verb, "subject": r.subject,
                 "detail": r.detail, "reference": r.reference}
     finally:
@@ -507,11 +535,19 @@ def token() -> str:
     three most dangerous powers in the system by fetching 127.0.0.1. A page cannot read
     this file, so it cannot present the token.
     """
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not TOKEN_PATH.exists():
-        TOKEN_PATH.write_text(secrets.token_urlsafe(32))
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not TOKEN_PATH.exists() or not TOKEN_PATH.read_text().strip():
+        # O_EXCL + 0600 from the first byte — never a world-readable instant. An empty
+        # file counts as missing: `compare_digest("", "")` is True, so an empty token
+        # would have let a header-less request through. Fail closed, always.
+        fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_urlsafe(32))
         os.chmod(TOKEN_PATH, 0o600)
-    return TOKEN_PATH.read_text().strip()
+    value = TOKEN_PATH.read_text().strip()
+    if len(value) < 32:
+        raise RuntimeError("the gatekeeper token is missing or too short — refusing to serve")
+    return value
 
 
 def serve(host: str = "127.0.0.1", port: int = 8788) -> None:
@@ -545,7 +581,7 @@ def serve(host: str = "127.0.0.1", port: int = 8788) -> None:
                 host_header = (self.headers.get("Host") or "").split(":")[0]
                 if host_header not in ("127.0.0.1", "localhost", "[::1]"):
                     return self._reply(403, {"ok": False, "error": "not for you"})
-                if not secrets.compare_digest(
+                if not expected or not secrets.compare_digest(
                         self.headers.get("X-Chief-Token") or "", expected):
                     return self._reply(403, {"ok": False, "error": "not for you"})
 

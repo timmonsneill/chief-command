@@ -76,9 +76,36 @@ def test_an_unreadable_reply_is_a_broken_tool_not_a_verdict(monkeypatch):
         gauntlet._xai_review("x", "y", "grok-4.5")
 
 
-def test_the_grok_seat_is_on_and_has_a_runner():
+def test_the_grok_seat_is_on_metered_and_has_a_runner(monkeypatch):
     cfg = load_config()
     grok = cfg["seats"]["grok"]
     assert not grok.get("disabled", False), "grok is still switched off in seats.toml"
+    # The runner calls the paid API with a key. Labelling the seat 'subscription' made
+    # every review book 0c and the $1/day ceiling could never bind.
+    assert grok["tier"] == "metered"
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
     assert gauntlet.has_runner(grok["provider"])
-    assert gauntlet.has_runner(grok["fallback"]["provider"])
+
+
+def test_without_a_key_grok_is_excluded_at_the_door_not_parked_forever(monkeypatch):
+    """A runner that exists but cannot run would be stamped onto every new job's panel
+    and then skip — 3 required, 2 reported, parked with no way out."""
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    assert not gauntlet.has_runner("xai")
+
+
+def test_an_empty_or_cut_off_answer_is_a_broken_tool_not_a_verdict(monkeypatch):
+    """A 200 with no text (reasoning models sometimes answer in a field we don't read)
+    or one cut off by a length limit must NOT become a permanent FAIL on the version."""
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen", lambda req, timeout: _Resp(
+        json.dumps({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]}).encode()))
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._xai_review("x", "y", "grok-4.5")
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen", lambda req, timeout: _Resp(
+        json.dumps({"choices": [{"message": {"content": "I think"}, "finish_reason": "length"}]}).encode()))
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._xai_review("x", "y", "grok-4.5")
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen", lambda req, timeout: _Resp(b"<html>"))
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._xai_review("x", "y", "grok-4.5")

@@ -208,13 +208,14 @@ notes = "Backend lane. Memory belongs to the LANE, not the model — swap the mo
 [seats.grok]
 provider = "xai"
 model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
-tier = "subscription"                       // $30 SuperGrok, primary
-family = "grok"
+tier = "metered"                            // the runner calls the paid API with a key;
+family = "grok"                             // the SuperGrok sub covers the app, NOT this
 
 // Was OFF while the leaked xAI key was unrotated. Key rotated 2026-07-21; the runner
 // landed 2026-08-27 and the seat came back on the same day — a third mind on the panel.
 // If it must be turned off again, turn it OFF here rather than leaving it failing: an
-// enabled seat with no working key is a panel member that can never report.
+// enabled seat with no working key is a panel member that can never report. (A missing
+// key now excludes the seat at the door instead — see gauntlet.has_runner.)
 //
 // Owner decision, 2026-07-21: GROK DOES NOT TOUCH THE ARCH MEDICAL-RECORDS REPO. That
 // repo is out of scope entirely (Decision C); this line records the standing rule.
@@ -223,15 +224,7 @@ worktree_isolated = true
 daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
 build_cap_cents  = 25                       // ~25c/day of building — a RATION
 review_cap_cents = 75                       // reviewing is cheap; let it look at everything
-notes = "Reviews freely. Builds sparingly. Sub primary, API fallback."
-
-  // Failover target. Same model, metered. This is what makes the hidden quota a
-  // speed bump instead of a dead stop.
-  [seats.grok.fallback]
-  provider = "xai-api"
-  auth = "XAI_API_KEY"
-  tier = "metered"
-  notes = "Engages when the sub 403s. Capped by daily_cap_cents above."
+notes = "Reviews freely. Builds sparingly. Metered API, capped by the record."
 
 // ---------------------------------------------------------------------------
 // FREE GRINDER — the local junior. Overnight scaffolding, boilerplate, first drafts.

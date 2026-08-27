@@ -47,7 +47,6 @@ from db.jobs import (
     GuardViolation,
     connect,
     over_budget,
-    record_usage,
     record_verdict,
     seat,
     set_status,
@@ -150,6 +149,7 @@ def _codex_review(request: str, code: str, model: str) -> tuple[str, str]:
 
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 XAI_KEY_VAR = "XAI_API_KEY"
+MAX_REPLY_BYTES = 1_000_000     # a verdict is one line; anything bigger is not a reply
 
 
 def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
@@ -176,17 +176,26 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
     )
     try:
         with urllib.request.urlopen(req, timeout=REVIEW_TIMEOUT_S) as resp:
-            payload = json.loads(resp.read().decode())
+            payload = json.loads(resp.read(MAX_REPLY_BYTES).decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         raise ReviewerBroke(
             f"xai answered {exc.code}: {exc.read().decode(errors='replace')[:200]}"
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ReviewerBroke(f"xai unreachable: {str(exc)[:200]}") from exc
+    except ValueError as exc:                       # not JSON
+        raise ReviewerBroke(f"xai reply was not readable: {str(exc)[:200]}") from exc
     try:
-        text = payload["choices"][0]["message"]["content"] or ""
+        choice = payload["choices"][0]
+        text = choice["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:
         raise ReviewerBroke(f"xai reply had no message: {str(payload)[:200]}") from exc
+    # An empty answer, or one cut off before the verdict line, is the TOOL failing.
+    # Left to _parse_verdict it would become a permanent FAIL against this version.
+    if not text.strip():
+        raise ReviewerBroke("xai answered with no text")
+    if choice.get("finish_reason") not in (None, "stop"):
+        raise ReviewerBroke(f"xai stopped early: {choice.get('finish_reason')}")
     return _parse_verdict(text)
 
 
@@ -194,12 +203,18 @@ REVIEWERS: dict[str, Callable[[str, str, str], tuple[str, str]]] = {
     "claude-cli": _claude_review,
     "codex": _codex_review,
     "xai": _xai_review,
-    "xai-api": _xai_review,     # the metered fallback seat: same wire, paid per call
+}
+
+# Can the runner actually run HERE, now? A runner that exists but has no key would be
+# counted onto every new job's panel and then skip — parking the job forever with
+# "3 required, 2 reported". Better one legible exclusion at the door.
+_READY: dict[str, Callable[[], bool]] = {
+    "xai": lambda: bool(os.environ.get(XAI_KEY_VAR, "").strip()),
 }
 
 
 def has_runner(provider: str) -> bool:
-    return provider in REVIEWERS
+    return provider in REVIEWERS and _READY.get(provider, lambda: True)()
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +247,13 @@ class PanelResult:
     certified: bool = False         # did the job actually reach 'done'
     parked_reason: str = ""         # if not, why — in plain words
 
+    builder_family: str = ""        # the author is not a second opinion (migration 007)
+
     @property
     def families_passed(self) -> set[str]:
-        return {r.family for r in self.runs if r.verdict == "pass"}
+        """Counted the way the database counts: minds OTHER than the author's."""
+        return {r.family for r in self.runs
+                if r.verdict == "pass" and r.family != self.builder_family}
 
     @property
     def failed(self) -> list[ReviewerRun]:
@@ -443,7 +462,10 @@ def run_panel(
     floor = int(gauntlet.get("min_model_families", 0))
     db_path = db_path or DB_PATH
 
-    result = PanelResult(job_id=job_id, version=version, required_families=floor)
+    built_by = conn.execute("SELECT builder_family FROM jobs WHERE id = ?",
+                            (job_id,)).fetchone()
+    result = PanelResult(job_id=job_id, version=version, required_families=floor,
+                         builder_family=(built_by["builder_family"] if built_by else "") or "")
 
     # A floor of zero is not "no requirement" — it is an UNCONFIGURED panel, and
     # `0 < 0` is False, so every later check would wave it through and certify work

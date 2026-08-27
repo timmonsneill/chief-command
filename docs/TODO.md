@@ -3,10 +3,11 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
-> ⚠️ **2026-07-21: read `docs/HANDOFF_2026-07-21.md` FIRST.** The review panel (#10) is
-> done and pushed; the gatekeeper (#11) is built but deliberately NOT pushed — 19 old
-> tests still assert the rules migration 007 changed. The live open todos now live in the
-> DATABASE (Projects tab + the terminal status line), not in this file.
+> ⚠️ **2026-08-27: read `docs/HANDOFF_2026-08-27.md` FIRST.** Gatekeeper finished, reviewed
+> by six reviewers, fixed, and pushed. Grok is the third mind on the panel. Codex sessions
+> now have their own queue/worklog/gauntlet (`docs/gpt/`, `scripts/gpt-gauntlet.sh`).
+> Next work is queued for Codex in `docs/gpt/GPT_TASK_QUEUE.md`; owner said "chill" —
+> no big builds without a conversation first.
 >
 > ⚠️ **2026-07-20: the previous consolidated state lives in
 > `docs/HANDOFF_2026-07-20.md`.** In one session the build went from
