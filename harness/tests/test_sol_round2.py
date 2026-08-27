@@ -103,6 +103,7 @@ def test_an_objection_raised_after_done_still_blocks_the_ship(conn):
     up a moment too late could be walked straight past on done -> shipped."""
     job = create_job(conn, "the migration", builder_seat="riggs")
     conn.execute("UPDATE jobs SET head_version='abc123' WHERE id=?", (job,))
+    record_verdict(conn, job, "sol", verdict="pass")   # a reviewer, so it can reach 'done' at all
     record_artifact(conn, job, kind="screenshot", path="/tmp/x.png", captured_by="playwright")
     record_verdict(conn, job, "sol", verdict="pass", role="tester")
     set_status(conn, job, "done")

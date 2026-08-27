@@ -33,8 +33,12 @@ threads).
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -144,10 +148,53 @@ def _codex_review(request: str, code: str, model: str) -> tuple[str, str]:
                      _prompt(request, code)])
 
 
+XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
+XAI_KEY_VAR = "XAI_API_KEY"
+
+
+def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
+    """The Grok-family reviewer, straight over HTTP.
+
+    No CLI here on purpose: Grok's CLI has been alleged to upload whole checkouts, and
+    the reviewer must only ever see the bundle it is handed. Plain urllib rather than an
+    SDK so the seat adds no dependency — the API is OpenAI-shaped and one POST is all a
+    review needs. The key comes from the environment the server loads (~/.chief/env),
+    never from the repo. A missing key is the TOOL failing, so it is a skip, never a
+    verdict — same rule as a CLI exiting non-zero.
+    """
+    key = os.environ.get(XAI_KEY_VAR, "").strip()
+    if not key:
+        raise ReviewerBroke(f"{XAI_KEY_VAR} is not set in this environment")
+    body = json.dumps({
+        "model": model,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": _prompt(request, code)}],
+    }).encode()
+    req = urllib.request.Request(
+        XAI_CHAT_URL, data=body, method="POST",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=REVIEW_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        raise ReviewerBroke(
+            f"xai answered {exc.code}: {exc.read().decode(errors='replace')[:200]}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ReviewerBroke(f"xai unreachable: {str(exc)[:200]}") from exc
+    try:
+        text = payload["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ReviewerBroke(f"xai reply had no message: {str(payload)[:200]}") from exc
+    return _parse_verdict(text)
+
+
 REVIEWERS: dict[str, Callable[[str, str, str], tuple[str, str]]] = {
     "claude-cli": _claude_review,
     "codex": _codex_review,
-    # xai / xai-api land here once the key is rotated — see seats.toml.
+    "xai": _xai_review,
+    "xai-api": _xai_review,     # the metered fallback seat: same wire, paid per call
 }
 
 

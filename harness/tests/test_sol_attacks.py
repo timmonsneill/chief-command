@@ -147,7 +147,9 @@ def test_promoting_coal_cannot_legitimize_its_old_work(conn):
     job = create_job(conn, "the overnight scaffold", builder_seat="coal")
     upsert_seat(conn, Seat("coal", "ollama", "qwen2.5-coder:7b", "qwen", "subscription"))
 
-    with pytest.raises(BLOCKED, match="subscription-tier review"):
+    # Since migration 007 the unconditional "another mind passed it" floor refuses this
+    # too, and SQLite does not promise which guard speaks first. Either is the same no.
+    with pytest.raises(BLOCKED, match="subscription-tier review|fewer model families"):
         set_status(conn, job, "done")
 
 

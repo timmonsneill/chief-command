@@ -38,8 +38,13 @@ def conn(tmp_path):
     return c
 
 
-def _finished_job(c, *, families=("claude", "gpt"), seats_required=2, fams_required=2):
-    """A job that has genuinely been through the panel."""
+def _finished_job(c, *, families=("gpt", "grok"), seats_required=2, fams_required=2):
+    """A job that has genuinely been through the panel.
+
+    The builder is claude, so the default panel is gpt + grok: since migration 007 the
+    author's own family is allowed to review but does not count as a second opinion,
+    and a claude pass on a claude build would leave the floor of two unmet.
+    """
     job = create_job(c, "the login form", builder_seat="reviewer")   # non-local builder
     c.execute("UPDATE jobs SET required_reviews=?, required_review_families=? WHERE id=?",
               (seats_required, fams_required, job))
@@ -83,6 +88,19 @@ def test_merge_counts_families_itself_and_does_not_assume_the_record_did(conn):
     the schema permits raising it, and the gatekeeper must re-check rather than trust
     that whatever let this job through was asking the same question it is."""
     job = _finished_job(conn, families=("gpt",), seats_required=1, fams_required=1)
+    set_status(conn, job, "done")
+    conn.execute("UPDATE jobs SET required_review_families=2 WHERE id=?", (job,))
+    with pytest.raises(gatekeeper.Refused, match="different kinds of model"):
+        gatekeeper.merge(conn, job)
+
+
+def test_merge_does_not_count_the_author_as_a_second_opinion(conn):
+    """Migration 007 for the door, not just the wall. The job completed honestly on a
+    floor of one (gpt reviewed a claude build); the floor is then raised to two and a
+    claude pass — the builder's own family — is added. The record already refuses this
+    at 'done'; the gatekeeper must reach the same answer on its own."""
+    job = _finished_job(conn, families=("gpt",), seats_required=1, fams_required=1)
+    record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")   # claude on claude
     set_status(conn, job, "done")
     conn.execute("UPDATE jobs SET required_review_families=2 WHERE id=?", (job,))
     with pytest.raises(gatekeeper.Refused, match="different kinds of model"):

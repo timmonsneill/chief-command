@@ -34,6 +34,8 @@ SEATS = [
     Seat("brain", "codex", "gpt-5.6-sol", "gpt", "subscription"),
     Seat("brain2", "codex", "gpt-5.6-terra", "gpt", "subscription"),
     Seat("grok", "xai", "grok-4.5", "grok", "metered", daily_cap_cents=100),
+    # A real seat with NO reviewer runner — the voice can't read a diff.
+    Seat("mouth", "xai-realtime", "grok-voice-think-fast-1.0", "grok", "metered"),
 ]
 
 CFG = {"seats": {}, "gauntlet": {"reviewers": ["reviewer", "brain"],
@@ -229,11 +231,13 @@ def test_a_job_with_no_version_cannot_be_reviewed(db, monkeypatch):
 # ── The roster: who can actually sit, and who is named as excluded ───────────
 def test_a_reviewer_with_no_runner_is_excluded_by_name(db):
     c, _ = db
-    cfg = {"gauntlet": {"reviewers": ["reviewer", "brain", "grok"],
+    # grok grew a runner on 2026-08-27; the mouth (a realtime voice seat) is the one
+    # that can never review, so it stands in for "named on the roster, cannot run".
+    cfg = {"gauntlet": {"reviewers": ["reviewer", "brain", "mouth"],
                         "min_model_families": 2}}
     roster, excluded = dispatch.panel_roster(c, cfg)
     assert roster == ["reviewer", "brain"]
-    assert "grok" in excluded and excluded["grok"]       # named, not silently dropped
+    assert "mouth" in excluded and excluded["mouth"]     # named, not silently dropped
 
 
 def test_dispatch_refuses_when_the_panel_cannot_reach_the_floor(db):
@@ -443,17 +447,17 @@ def test_a_failed_dispatch_leaves_no_orphan_job(db, monkeypatch):
     import dispatch as d
 
     real_seat = d.seat
-    seen = {"grok": 0}
+    seen = {"mouth": 0}
 
     def explode(conn, seat_id):
-        if seat_id == "grok":
-            seen["grok"] += 1
-            if seen["grok"] > 1:               # the lookup inside the skipped-seat notes
+        if seat_id == "mouth":
+            seen["mouth"] += 1
+            if seen["mouth"] > 1:              # the lookup inside the skipped-seat notes
                 raise RuntimeError("disk gave out")
         return real_seat(conn, seat_id)
 
     monkeypatch.setattr(d, "seat", explode)
-    cfg = {"gauntlet": {"reviewers": ["reviewer", "brain", "grok"],
+    cfg = {"gauntlet": {"reviewers": ["reviewer", "brain", "mouth"],
                         "min_model_families": 2}}
     with pytest.raises(d.DispatchRefused):
         d.dispatch_local(c, "build a thing", "grinder_local", cfg=cfg, start=False)

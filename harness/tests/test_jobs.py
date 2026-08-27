@@ -56,7 +56,10 @@ def test_local_job_cannot_reach_done_without_review(conn):
     job = create_job(conn, "scaffold the auth module", builder_seat="grinder")
     set_status(conn, job, "review")
 
-    with pytest.raises(GuardViolation, match="subscription-tier review"):
+    # Two guards now refuse this — the local-output rule and, since migration 007, the
+    # unconditional "somebody other than the author passed it" floor. SQLite does not
+    # promise which fires first; either answer is the right answer.
+    with pytest.raises(GuardViolation, match="subscription-tier review|fewer model families"):
         set_status(conn, job, "done")
 
 
@@ -90,9 +93,13 @@ def test_local_job_ships_once_a_higher_tier_seat_passes_it(conn):
 
 
 def test_subscription_built_job_needs_no_such_rescue(conn):
-    """The guard targets local output specifically; it must not block everything else."""
-    job = create_job(conn, "big refactor", builder_seat="workhorse")
+    """The LOCAL guard targets local output specifically; it must not block everything
+    else. (Migration 007 rewrote the premise this test was born with: no job at all
+    completes with zero reviews any more, so a subscription build still needs one
+    other mind to pass it — just not the higher-TIER one a local build needs.)"""
+    job = create_job(conn, "big refactor", builder_seat="workhorse")   # grok built it
     set_head_version(conn, job, "abc123")
+    record_verdict(conn, job, "orchestrator", verdict="pass")          # gpt passed it
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
 
@@ -119,8 +126,10 @@ def test_retiering_a_seat_cannot_retroactively_legitimize_a_job(conn):
 # ---------------------------------------------------------------------------
 def test_unresolved_escalation_blocks_completion(conn):
     job = create_job(conn, "tricky migration", builder_seat="workhorse")
+    set_head_version(conn, job, "abc123")
+    record_verdict(conn, job, "reviewer", verdict="pass")       # the floor is met...
     record_verdict(conn, job, "orchestrator", verdict="needs_human",
-                   summary="contested: might drop rows")
+                   summary="contested: might drop rows")        # ...and the question still blocks
 
     with pytest.raises(GuardViolation, match="needs_human"):
         set_status(conn, job, "done")
@@ -222,13 +231,20 @@ def test_a_different_family_may_test_it(conn):
 def test_the_same_family_may_still_REVIEW_its_own_build(conn):
     """The no-self-testing rule is about DRIVING THE APP, not reading a diff.
 
-    A same-family reviewer is a weaker signal, but it isn't forbidden — the gauntlet's
-    min_model_families rule handles diversity there. Only the tester seat is hard-gated.
+    A same-family reviewer is a weaker signal, but it isn't forbidden — the family
+    floor handles diversity there. Only the tester seat is hard-gated.
+
+    Since migration 007 the same-family pass is ACCEPTED but does not COUNT toward the
+    floor: the author is not its own second opinion. So the job still needs one other
+    family to pass it before it can complete.
     """
     upsert_seat(conn, Seat("claude_builder", "claude-cli", "claude-opus-4-8", "claude", "subscription"))
     job = create_job(conn, "add the login form", builder_seat="claude_builder")
     set_head_version(conn, job, "abc123")
-    record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")  # claude reviewing claude
+    record_verdict(conn, job, "reviewer", verdict="pass", role="reviewer")  # claude reviewing claude: allowed
+    with pytest.raises(GuardViolation, match="fewer model families"):
+        set_status(conn, job, "done")                                       # ...but not a second opinion
+    record_verdict(conn, job, "orchestrator", verdict="pass", role="reviewer")  # gpt: a different mind
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id = ?", (job,)).fetchone()["status"] == "done"
 
@@ -245,8 +261,9 @@ def test_a_fully_gauntleted_job_ships_itself(conn):
     upsert_seat(conn, Seat("gpt_tester", "codex", "gpt-5.6-sol", "gpt", "subscription"))
     job = create_job(conn, "add the login form", builder_seat="reviewer")  # claude built it
     set_head_version(conn, job, "abc123")
+    record_verdict(conn, job, "orchestrator", verdict="pass", role="reviewer")  # gpt read the diff
     record_artifact(conn, job, kind="screenshot", path="/tmp/login.png")
-    record_verdict(conn, job, "gpt_tester", verdict="pass", role="tester")  # different family
+    record_verdict(conn, job, "gpt_tester", verdict="pass", role="tester")  # different family drove it
     set_status(conn, job, "done")
 
     set_status(conn, job, "shipped")
@@ -335,9 +352,10 @@ def test_a_research_answer_without_sources_cannot_land(conn):
 
 
 def test_a_research_answer_with_sources_can_land(conn):
-    job = _research_job(conn)
+    job = _research_job(conn)                                       # gpt researched it
     record_artifact(conn, job, kind="source", path="https://docs.x.ai/build/overview",
                     captured_by="model")
+    record_verdict(conn, job, "reviewer", verdict="pass")           # a different mind passed it
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
 
@@ -387,6 +405,7 @@ def test_a_build_job_needs_no_sources(conn):
     """The citation guard is for research. It must not block ordinary code."""
     job = create_job(conn, "add the login form", builder_seat="orchestrator")
     set_head_version(conn, job, "abc123")
+    record_verdict(conn, job, "reviewer", verdict="pass")   # reviewed, not cited — that's enough
     set_status(conn, job, "done")
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"
 

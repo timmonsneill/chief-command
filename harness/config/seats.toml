@@ -211,15 +211,14 @@ model = "grok-4.5"                          // NOT grok-build-0.1 (legacy, weak)
 tier = "subscription"                       // $30 SuperGrok, primary
 family = "grok"
 
-// OFF UNTIL THE LEAKED xAI KEY IS ROTATED (owner task). Turned off rather than left on
-// and failing: an enabled seat with no working key is counted as a panel member that
-// can never report, which parks every job forever and looks like a bug. The panel is
-// claude + gpt today — two families, which meets the floor. Flip this back the day the
-// key is rotated and grok is a third mind again.
+// Was OFF while the leaked xAI key was unrotated. Key rotated 2026-07-21; the runner
+// landed 2026-08-27 and the seat came back on the same day — a third mind on the panel.
+// If it must be turned off again, turn it OFF here rather than leaving it failing: an
+// enabled seat with no working key is a panel member that can never report.
 //
 // Owner decision, 2026-07-21: GROK DOES NOT TOUCH THE ARCH MEDICAL-RECORDS REPO. That
 // repo is out of scope entirely (Decision C); this line records the standing rule.
-disabled = true
+disabled = false
 worktree_isolated = true
 daily_cap_cents  = 100                      // $1/day = ~$30/mo HARD CEILING
 build_cap_cents  = 25                       // ~25c/day of building — a RATION
@@ -353,11 +352,11 @@ max_spoken_seconds = 12
 // Four families available: gpt (brain), claude (reviewer), grok (grok),
 // qwen (grinder_local, the LOCAL builder — not a reviewer of its own work).
 //
-// The panel is HIGHER-TIER cross-family reviewers of a local build. Only the
-// claude-cli seat has a working runner today; brain needs the codex login and
-// grok needs the leaked xAI key rotated. Until a SECOND family can run, the
-// family-floor guard correctly PARKS jobs (it does not lower the bar) — see
-// migration 005. That is the safe failure, not a bug.
+// The panel is HIGHER-TIER cross-family reviewers of a local build. Three runners
+// exist today: claude-cli, codex (needs the codex login), and xai (needs XAI_API_KEY
+// in the environment). If fewer than two families can actually run, the family-floor
+// guard correctly PARKS jobs (it does not lower the bar) — see migration 005. That is
+// the safe failure, not a bug.
 // ---------------------------------------------------------------------------
 [gauntlet]
 reviewers = ["reviewer", "brain", "grok"]   // claude · gpt · grok — real seats, all resolve

@@ -157,6 +157,15 @@ review-to-version chain, and hidden bypasses (old paths physically unusable).
       → *"I'm struggling, nothing's started."*
 - [ ] **A realistic driving test set** — road noise, passengers, radio, weak signal,
       interruptions, self-corrections.
+- [ ] **Spec acceptance checklists, verified automatically.** When Chief specs a feature,
+      the system auto-writes a plain-English checklist of every feature and button that
+      spec promises, and where each one lives in the app — Neill never writes it himself.
+      Then the gauntlet (the review panel) and the driving tester (Forge) have to check the
+      *running app* against that checklist before anything is called done: is each thing
+      actually there, and can you actually click it? A missing button counts as a failure,
+      same as a broken one. This is the fix for the single biggest gap Neill hit on the
+      other project — features that were spec'd and agreed but never actually showed up in
+      the app, and nothing caught it. (See AGENTS.md rule 9.)
 
 ---
 

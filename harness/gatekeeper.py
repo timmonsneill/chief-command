@@ -198,7 +198,11 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
 
     passed = [v for v in current if v["verdict"] == "pass" and v["role"] == "reviewer"]
     seats = {v["reviewer_seat"] for v in passed}
-    families = {v["model_family"] for v in passed}
+    # The author is not a second opinion (migration 007): a same-family pass is a
+    # legitimate review, it just does not count toward "different minds". The schema
+    # already refuses first; this keeps the gate honest even if it ever stops.
+    families = {v["model_family"] for v in passed
+                if v["model_family"] != job["builder_family"]}
 
     # A job carrying NO requirements is not a job everyone approved — it is a job whose
     # requirements were never stamped. `0 < 0` is False, so treating zero as "nothing

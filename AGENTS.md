@@ -50,6 +50,33 @@ bitten this project once.
    seat must be swappable in config without touching orchestration logic.
 8. **Reviews before pushes.** Multi-reviewer pass on every commit before it goes up.
    Owner's standing rule across all his projects.
+9. **Every spec carries a Feature Acceptance Checklist, and the gauntlet verifies the
+   running app against it.** (Owner-locked 2026-07-23 — the #1 process gap he hit on the
+   Arch project: features get spec'd, agreed, sometimes half-built, and then never land or
+   land with no reachable button — and nothing catches it, because code review reads code
+   and *can't see an absent button*, and Forge tests "does it work" not "is every spec'd
+   feature present and clickable." The owner found ~12 UI defects in 5 minutes *after*
+   multiple audits.) The fix is structural, not more manual work by Neill:
+   - **The spec-writer (a model, never Neill) auto-generates a "Feature Acceptance
+     Checklist" from the spec conversation.** Each item is a concrete, checkable statement:
+     *what control exists, what it does, and where in the UI it's reachable from.* If a
+     behaviour is in the spec, it's a checklist line. Neill talks features; the system
+     captures them. He never hand-writes a checklist and never re-drives the app to find
+     what's missing — that is the whole point of the harness (save his time).
+   - **Forge verifies the running app against that checklist** before "done" — drives each
+     item and reports PRESENT / MISSING / BROKEN / UNREACHABLE. **An ABSENCE is a failure**,
+     same weight as a bug. This is a hard gate per surface, never skipped for machine load
+     (serialize instead).
+   - **The code gauntlet also checks the diff against the checklist for completeness** —
+     not just "is this code correct" but "is every checklist item implemented AND wired to
+     a control a user can reach." Green checks on an unreachable feature are the exact
+     "believable green checks on code nobody can use" this project exists to prevent.
+   - **"Done" = every checklist item verified present, reachable, and working.** Code with
+     no button is not done.
+   Why this is the right shape and not "give the model more common sense": product judgment
+   is a genuine weak spot for current models, so don't put the "supposed-to-be" in the
+   model's head — put it in an artifact (the checklist, born from the spec) and the tester's
+   job becomes "does the app match this list," which a model + a browser does reliably.
 
 ## The architecture in one paragraph
 

@@ -78,7 +78,9 @@ def test_the_full_panel_must_have_reviewed_the_current_version(conn):
 
     set_head_version(conn, job, "version-B")
 
-    with pytest.raises(GuardViolation, match="panel"):
+    # Both the panel-size guard and the family floor answer "nobody reviewed B";
+    # SQLite does not promise which speaks first.
+    with pytest.raises(GuardViolation, match="panel has not reported|fewer model families"):
         set_status(conn, job, "done")
 
 
@@ -159,6 +161,8 @@ def test_a_versioned_job_rejects_verdicts_that_name_no_version(conn):
 
 def test_a_build_cannot_finish_without_naming_its_version(conn):
     job = create_job(conn, "the auth module", builder_seat="riggs")
+    # A genuine cross-family pass, so the only thing missing is the version itself.
+    record_verdict(conn, job, "sol", verdict="pass")
     with pytest.raises(GuardViolation, match="naming the exact version"):
         set_status(conn, job, "done")
 
@@ -178,10 +182,11 @@ def test_what_finished_cannot_be_rewritten_afterward(conn):
 def test_shipping_requires_the_tester_to_have_driven_the_current_version(conn):
     job = create_job(conn, "the login form", builder_seat="riggs")
     set_head_version(conn, job, "version-A")
+    record_verdict(conn, job, "sol", verdict="pass")   # the current version was reviewed...
     record_artifact(conn, job, kind="screenshot", path="/tmp/a.png",
                     captured_by="playwright")
     record_verdict(conn, job, "sol", verdict="pass", role="tester",
-                   reviewed_version="version-OLD")  # drove an earlier build
+                   reviewed_version="version-OLD")  # ...but the tester drove an earlier build
     set_status(conn, job, "done")
 
     with pytest.raises(GuardViolation, match="tester"):
