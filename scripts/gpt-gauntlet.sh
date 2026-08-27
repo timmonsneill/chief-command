@@ -19,14 +19,20 @@
 set -uo pipefail
 BASE="${1:-origin/main}"
 BRANCH=$(git branch --show-current)
-if [ -z "$BRANCH" ] || [ "$BRANCH" = "main" ]; then
-  echo "Run this from your gpt/* work branch, not main." >&2; exit 1
-fi
+case "$BRANCH" in
+  gpt/*) ;;
+  *) echo "Run this from a gpt/* work branch (you are on '${BRANCH:-detached}')." >&2; exit 1 ;;
+esac
+# Pinned on purpose (rule 2): the codex default model changes under you; a review
+# from a different model than yesterday's is a different review. Bump deliberately.
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-sol}"
 if ! command -v codex >/dev/null 2>&1; then
   echo "codex CLI not found on PATH." >&2; exit 1
 fi
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-  echo "Working tree is not clean. Commit first — the gauntlet reviews commits." >&2; exit 1
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Working tree is not clean (tracked or untracked). Commit or stash first — the" >&2
+  echo "gauntlet reviews commits, and it needs a clean tree to know what a reviewer touched." >&2
+  exit 1
 fi
 OUT="docs/gpt/gauntlet/$(date +%m%d-%H%M)-${BRANCH//\//_}"
 mkdir -p "$OUT"
@@ -38,20 +44,24 @@ FAILED=0
 run_seat() {
   local name="$1" lens="$2"
   echo "── seat: $name"
-  if codex exec -c model_reasoning_effort=high --sandbox read-only "$COMMON Your lens: $lens" \
-       </dev/null >"$OUT/$name.md" 2>"$OUT/$name.err"; then
+  if codex exec -m "$CODEX_MODEL" -c model_reasoning_effort=high --sandbox read-only \
+       "$COMMON Your lens: $lens" </dev/null >"$OUT/$name.md" 2>"$OUT/$name.err"; then
     echo "   done → $OUT/$name.md  (verdict: $(grep -oE '\b(NO-GO|GO)\b' "$OUT/$name.md" | tail -1 || echo 'none found'))"
   else
     echo "   FAILED — see $OUT/$name.err"; FAILED=1
   fi
-  # A read-only reviewer that changed files is a broken reviewer, not a review.
+  # A changed tree after a read-only seat is a broken reviewer, not a review. We do
+  # NOT revert: this script cannot tell a reviewer's edit from an edit Neill made in
+  # another window while it ran, and 'git checkout -- .' would erase his. Fail loudly,
+  # leave the tree exactly as found, and let a person look. (The run's own output dir
+  # is the one expected untracked path.)
   local dirty
-  dirty=$(git status --porcelain --untracked-files=no || true)
+  dirty=$(git status --porcelain | grep -v "^?? $OUT" || true)
   if [ -n "$dirty" ]; then
-    echo "   ⚠ seat '$name' MODIFIED THE WORKING TREE despite read-only sandbox:" >&2
+    echo "   ⚠ the working tree changed while seat '$name' ran (read-only sandbox):" >&2
     echo "$dirty" >&2
-    echo "   Reverting with 'git checkout -- .' and failing the run." >&2
-    git checkout -- . ; FAILED=1
+    echo "   Nothing was reverted. Inspect with 'git diff', then decide. This run does not count." >&2
+    FAILED=1
   fi
 }
 

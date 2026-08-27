@@ -584,13 +584,21 @@ def token() -> str:
     """
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not TOKEN_PATH.exists() or not TOKEN_PATH.read_text().strip():
-        # O_EXCL + 0600 from the first byte — never a world-readable instant. An empty
-        # file counts as missing: `compare_digest("", "")` is True, so an empty token
-        # would have let a header-less request through. Fail closed, always.
-        fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(secrets.token_urlsafe(32))
-        os.chmod(TOKEN_PATH, 0o600)
+        # 0600 from the first byte — never a world-readable instant — and O_EXCL so two
+        # processes starting at once can't each write a different token (the loser
+        # simply reads the winner's). An empty file counts as missing:
+        # `compare_digest("", "")` is True, so an empty token would have let a
+        # header-less request through. Fail closed, always.
+        if TOKEN_PATH.exists():
+            TOKEN_PATH.unlink()
+        try:
+            fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            fd = None                           # someone else just created it
+        if fd is not None:
+            with os.fdopen(fd, "w") as f:
+                f.write(secrets.token_urlsafe(32))
+            os.chmod(TOKEN_PATH, 0o600)
     value = TOKEN_PATH.read_text().strip()
     if len(value) < 32:
         raise RuntimeError("the gatekeeper token is missing or too short — refusing to serve")

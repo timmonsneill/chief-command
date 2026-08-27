@@ -88,10 +88,17 @@ def test_the_family_floor_cannot_be_lowered_after_dispatch(conn):
         conn.execute("UPDATE jobs SET required_review_families=1 WHERE id=?", (job,))
 
 
-def test_a_zero_floor_is_inert_for_legacy_jobs(conn):
-    """Existing rows default to 0 — the guard must not retroactively block them."""
+def test_a_zero_floor_is_NOT_inert_it_means_one(conn):
+    """Migration 007 replaced 'zero is inert' with 'unstamped is not unrequired': a job
+    whose floor was never set still needs one mind other than the author's. This test
+    used to assert the old behaviour and would have stayed green if the floor were
+    accidentally removed — because its two passes came from one qualifying family."""
     job = _job(conn, families=0)
+    # With no passes at all, BOTH unconditional floors refuse (SQLite doesn't promise
+    # which speaks first; either is the same no).
+    with pytest.raises(BLOCKED, match="panel has not reported|fewer model families"):
+        set_status(conn, job, "done")
     record_verdict(conn, job, "sol",  verdict="pass")
     record_verdict(conn, job, "sol2", verdict="pass")
-    set_status(conn, job, "done")   # required_reviews=2 met, family floor inert at 0
+    set_status(conn, job, "done")   # required_reviews=2 met, floor of MAX(0,1)=1 met by gpt
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()[0] == "done"

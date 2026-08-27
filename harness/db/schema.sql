@@ -258,7 +258,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     head_version  TEXT,
 
     -- 'done'    = the gauntlet passed. The machine is satisfied.
-    -- 'shipped' = NEILL said it works on his device. Only he can move this.
+    -- 'shipped' = merged into the main line by the GATEKEEPER (Decision D, 2026-07-17:
+    --             the gauntlet IS the approval; Neill gates production DEPLOYS, not
+    --             merges). Guard 6 still requires a cross-family tester on the record.
+    -- (Earlier wording — "only Neill can move this" — predates Decision D.)
     -- These are NOT the same thing, and conflating them is how agents launder
     -- confidence. From Chief's memory, learned the hard way:
     --     "Chief must NEVER say 'shipped' unless Neill has confirmed it works on

@@ -433,6 +433,14 @@ def _review_one(
             if status == "done":
                 set_status(conn, job_id, "review",
                            spoken_summary="Sent back — a reviewer found a problem.")
+            elif status == "shipped":
+                # Too late to un-merge. The one thing we can still do is refuse to be
+                # quiet about it: a merged objection is Neill's to see, not a footnote.
+                set_status(conn, job_id, "shipped",
+                           spoken_summary="⚠ A reviewer objected AFTER this was merged — "
+                                          "it needs your eyes.")
+                _event(conn, job_id, row, "error",
+                       "objection recorded after merge — needs a person")
 
         out.summary = summary
         out.verdict = verdict          # set LAST: `verdict` is what marks the run as real
