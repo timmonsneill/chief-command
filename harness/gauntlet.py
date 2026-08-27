@@ -424,6 +424,16 @@ def _review_one(
             _event(conn, job_id, row, "error", str(exc)[:160])
             return
 
+        # The `decided` check above and this write are not one step: the panel can
+        # decide and certify in between. A FAIL that lands after 'done' must un-certify
+        # from THIS side too — the writer is the only one who knows it just happened.
+        if verdict == "fail" and decided.is_set():
+            status = conn.execute("SELECT status FROM jobs WHERE id = ?",
+                                  (job_id,)).fetchone()["status"]
+            if status == "done":
+                set_status(conn, job_id, "review",
+                           spoken_summary="Sent back — a reviewer found a problem.")
+
         out.summary = summary
         out.verdict = verdict          # set LAST: `verdict` is what marks the run as real
         _event(conn, job_id, row, "verdict",

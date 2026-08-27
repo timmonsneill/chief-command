@@ -342,6 +342,17 @@ def dispatch(
             "UPDATE jobs SET required_reviews = ?, required_review_families = ? WHERE id = ?",
             (required, families, job_id),
         )
+        # No silent caps here either — same note dispatch_local writes.
+        for seat_id, why in excluded.items():
+            ex = seat(conn, seat_id)
+            if ex is None:
+                continue
+            conn.execute(
+                "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (job_id, seat_id, seat_id, ex["model"], ex["family"], "skipped",
+                 f"not on the panel: {why}"),
+            )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

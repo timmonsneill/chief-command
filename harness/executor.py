@@ -74,15 +74,18 @@ def _commit_in_worktree(wt: Path, job_id: int, branch: str, summary: str) -> str
     def git(*args):
         return subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True,
                               timeout=60, env=env)
-    if git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
-        return None
-    if git("checkout", "-B", branch).returncode != 0:
-        return None
-    if git("add", "-A", OUTPUT_DIRNAME).returncode != 0:
-        return None
-    if git("commit", "-q", "-m", f"job {job_id}: {summary[:60]}").returncode != 0:
-        return None
-    sha = git("rev-parse", "HEAD").stdout.strip()
+    try:
+        if git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+            return None
+        if git("checkout", "-B", branch).returncode != 0:
+            return None
+        if git("add", "-A", OUTPUT_DIRNAME).returncode != 0:
+            return None
+        if git("commit", "-q", "-m", f"job {job_id}: {summary[:60]}").returncode != 0:
+            return None
+        sha = git("rev-parse", "HEAD").stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None          # a hung git is "not in git", not a dead worker thread
     return sha[:16] if len(sha) >= 16 else None
 
 

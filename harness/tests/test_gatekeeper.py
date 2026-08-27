@@ -183,13 +183,30 @@ def _approve(conn, action, *, reversible=1, recovery="restore the earlier versio
     return rid
 
 
-def test_deploy_goes_through_on_a_live_owner_approval(conn):
+@pytest.fixture()
+def can_deploy(monkeypatch):
+    """Register a (fake) deploy mechanism for 'the website'. Without one, the gate
+    refuses BEFORE consuming the approval — see test below."""
+    monkeypatch.setitem(gatekeeper.DEPLOYERS, "the website", lambda target: "release-1")
+
+
+def test_deploy_goes_through_on_a_live_owner_approval(conn, can_deploy):
     _approve(conn, "the website")
     r = gatekeeper.deploy(conn, "the website")
-    assert r.verb == "deploy"
+    assert r.verb == "deploy" and r.reference == "release-1"
 
 
-def test_an_approval_is_spent_once(conn):
+def test_without_a_deploy_mechanism_the_approval_is_not_used_up(conn):
+    """The old stub consumed the owner's one-time yes and then did nothing — so he'd have
+    had to approve twice for one deploy. No mechanism → refuse first, keep the slip."""
+    rid = _approve(conn, "the website")
+    with pytest.raises(gatekeeper.Refused, match="no way to deploy"):
+        gatekeeper.deploy(conn, "the website")
+    used = conn.execute("SELECT used_at FROM approvals WHERE id=?", (rid,)).fetchone()["used_at"]
+    assert used is None
+
+
+def test_an_approval_is_spent_once(conn, can_deploy):
     _approve(conn, "the website")
     gatekeeper.deploy(conn, "the website")
     with pytest.raises(gatekeeper.Refused):
@@ -235,6 +252,14 @@ def test_spend_refuses_past_the_daily_cap(conn):
     gatekeeper.spend(conn, "grok", 90, role="review")
     with pytest.raises(gatekeeper.Refused, match="spending limit"):
         gatekeeper.spend(conn, "grok", 30, role="review")
+
+
+def test_a_paid_worker_cannot_reserve_zero(conn):
+    """'Reserve 0c, then make the call' would walk every cap without moving any."""
+    with pytest.raises(gatekeeper.Refused, match="can't reserve nothing"):
+        gatekeeper.spend(conn, "grok", 0, role="review")       # grok is metered
+    # A flat-rate seat legitimately books 0 — the ledger still records the call.
+    assert gatekeeper.spend(conn, "reviewer", 0, role="review").verb == "spend"
 
 
 def test_spend_refuses_a_negative_charge(conn):
@@ -330,7 +355,7 @@ def test_the_gate_log_is_a_record_not_a_draft(conn):
         conn.execute("DELETE FROM gate_log")
 
 
-def test_a_job_scoped_approval_needs_that_job_named(conn):
+def test_a_job_scoped_approval_needs_that_job_named(conn, monkeypatch):
     """An approval given in the context of job 4 must not be spendable by a request that
     simply leaves the job out. Omission is not a match."""
     job = create_job(conn, "the website work", builder_seat="reviewer")
@@ -339,6 +364,7 @@ def test_a_job_scoped_approval_needs_that_job_named(conn):
     with pytest.raises(gatekeeper.Refused, match="different piece of work"):
         gatekeeper.deploy(conn, "the website")            # no job_id at all
     # Not consumed by the refusal: the right job can still use it.
+    monkeypatch.setitem(gatekeeper.DEPLOYERS, "the website", lambda t: "release-1")
     assert gatekeeper.deploy(conn, "the website", job_id=job).verb == "deploy"
 
 
@@ -376,13 +402,42 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _job_on_branch(conn, repo, job_id, content):
+def _job_on_branch(conn, repo, job_id, content, *, reviewed=None):
+    """Commit `content` where the worker commits its output, and record `reviewed`
+    (default: the same text) as what the panel read."""
     _git(repo, "checkout", "-q", "-b", f"job/{job_id}")
-    (repo / "work.txt").write_text(content); _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "work")
+    out = repo / "chief_output"; out.mkdir(exist_ok=True)
+    (out / f"job_{job_id}.txt").write_text(content)
+    _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "work")
     sha = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-q", "main")
-    conn.execute("UPDATE jobs SET branch = ? WHERE id = ?", (f"job/{job_id}", job_id))
+    conn.execute("UPDATE jobs SET branch = ?, result = ? WHERE id = ?",
+                 (f"job/{job_id}", content if reviewed is None else reviewed, job_id))
     return sha
+
+
+def _reviewed_and_done(conn, repo, job_id, content, *, reviewed=None):
+    conn.execute("UPDATE jobs SET required_reviews=2, required_review_families=2 WHERE id=?", (job_id,))
+    set_status(conn, job_id, "in_progress")
+    sha = _job_on_branch(conn, repo, job_id, content, reviewed=reviewed)
+    set_head_version(conn, job_id, sha[:16])
+    set_status(conn, job_id, "review")
+    for s in ("brain", "grok"):
+        record_verdict(conn, job_id, s, verdict="pass", role="reviewer")
+    set_status(conn, job_id, "done")
+    record_artifact(conn, job_id, "screenshot", path="/evidence/login.png", captured_by="playwright")
+    record_verdict(conn, job_id, "grok", verdict="pass", role="tester")
+    return sha
+
+
+def test_merge_refuses_when_the_commit_does_not_hold_what_was_reviewed(conn, repo):
+    """The panel reads jobs.result; the version check only proves the branch is the
+    named commit. A worker could commit B and hand the reviewers A. Bytes must match."""
+    job = create_job(conn, "the login form", builder_seat="reviewer")
+    _reviewed_and_done(conn, repo, job, "malicious B\n", reviewed="benign A\n")
+    with pytest.raises(gatekeeper.Refused, match="isn't what the reviewers read"):
+        gatekeeper.merge(conn, job)
+    assert not (repo / "chief_output").exists()
 
 
 def test_merge_goes_through_when_the_branch_tip_is_the_reviewed_version(conn, repo):
@@ -401,7 +456,7 @@ def test_merge_goes_through_when_the_branch_tip_is_the_reviewed_version(conn, re
     r = gatekeeper.merge(conn, job, asked_by="the panel")
     assert r.verb == "merge"
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "shipped"
-    assert (repo / "work.txt").read_text() == "reviewed bytes\n"      # it is on main
+    assert (repo / "chief_output" / f"job_{job}.txt").read_text() == "reviewed bytes\n"   # on main
     assert _gate_rows(conn)[-1]["granted"] == 1
 
 
@@ -419,10 +474,11 @@ def test_merge_refuses_when_the_branch_moved_after_review(conn, repo):
     set_status(conn, job, "done")
     # the builder pushes v2 to the same branch, record untouched
     _git(repo, "checkout", "-q", f"job/{job}")
-    (repo / "work.txt").write_text("v2\n"); _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "v2")
+    (repo / "chief_output" / f"job_{job}.txt").write_text("v2\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "v2")
     _git(repo, "checkout", "-q", "main")
 
     with pytest.raises(gatekeeper.Refused, match="isn't the code that was reviewed"):
         gatekeeper.merge(conn, job)
-    assert not (repo / "work.txt").exists()
+    assert not (repo / "chief_output").exists()
     assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()["status"] == "done"

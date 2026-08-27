@@ -93,7 +93,9 @@ anything unfinished. Chief reads the worklog first when reviewing.
 
 **Hard rules:** branches only — `gpt/<short-task-name>` off `origin/main`; never commit
 to `main`, never merge to `main`, never push `main`. `--no-verify` is forbidden. No new
-database migrations (write `PROPOSED_MIGRATION.sql` in your branch and log it). Never
+database migrations **from a Codex session** (write `PROPOSED_MIGRATION.sql` in your
+branch and log it — existing numbered migrations were applied deliberately and are not
+in scope of this rule). Never
 touch `~/.chief/env`, `harness/db/chief.db` (the live record), or anything under `backend/`
 / `frontend/` (v1, frozen). Do exactly what the task says; if a rule here seems wrong,
 log it, don't "fix" it. Everything that reaches Neill is plain English (see below).

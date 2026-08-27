@@ -482,3 +482,34 @@ def test_the_ui_says_which_wall_the_job_is_behind(db):
     line = server._waiting_on(j) if hasattr(server, "_waiting_on") else None
     if line is not None:
         assert "different" in line, f"the page doesn't explain the real blocker: {line}"
+
+
+def test_a_fail_written_in_the_gap_after_certification_uncertifies(db, monkeypatch):
+    """The straggler check and the verdict write are two steps. If the panel decides in
+    between, the FAIL lands on a job already at 'done' — and the guards only fire on the
+    way in. The writer itself must send the job back. (GPT gauntlet, 2026-08-27)"""
+    import threading
+    c, path = db
+    job = _parked_job(c, seats_required=2, families_required=2)
+    c.execute("UPDATE jobs SET required_reviews=2 WHERE id=?", (job,))
+    # Panel of two certifies...
+    from db.jobs import record_verdict
+    record_verdict(c, job, "reviewer", verdict="pass", reviewed_version="v1")
+    record_verdict(c, job, "brain", verdict="pass", reviewed_version="v1")
+    set_status(c, job, "done")
+
+    decided = threading.Event()          # NOT set: the straggler passes the check
+    real = gauntlet.record_verdict
+    def write_after_decision(*a, **kw):
+        decided.set()                    # ...and the panel decides right here
+        return real(*a, **kw)
+    monkeypatch.setattr(gauntlet, "record_verdict", write_after_decision)
+    _wire(monkeypatch, _stub({"grok-4.5": "fail"}))
+
+    out = gauntlet.ReviewerRun(seat_id="grok")
+    gauntlet._review_one(job, "grok", "the login form", "def login(): ...", "v1",
+                         {"seats": {}, "gauntlet": {}}, out, path, decided)
+
+    assert out.verdict == "fail"
+    status = c.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()[0]
+    assert status == "review", "a FAIL landed on a certified job and it stayed done"

@@ -58,7 +58,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from db.jobs import GuardViolation, connect, record_usage, seat, set_status
 
@@ -256,6 +256,14 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
         raise _no("the code on that branch isn't the code that was reviewed — "
                       "it has changed since, so it needs checking again")
 
+    # And the commit must CONTAIN what the reviewers read. The panel judges the text the
+    # worker handed in (`jobs.result`); the version check above only proves the branch
+    # is the commit the record names. A worker could commit one thing and hand the
+    # reviewers another. So: the reviewed bytes must be in the commit, byte for byte.
+    if not _commit_holds_the_reviewed_work(tip, job_id, job["result"]):
+        raise _no("what's on that branch isn't what the reviewers read, "
+                      "so it can't be merged as reviewed")
+
     if not _repo_is_ready():
         raise _no("the project folder has unfinished changes in it, so it isn't "
                       "safe to merge right now")
@@ -336,6 +344,18 @@ def _same_commit(tip: str, version: str) -> bool:
     return tip.startswith(version)
 
 
+REVIEWED_FILE = "chief_output/job_{job_id}.txt"     # where executor.py commits the work
+
+
+def _commit_holds_the_reviewed_work(commit: str, job_id: int, reviewed: str | None) -> bool:
+    """Is the text the panel reviewed present, unchanged, in this exact commit?"""
+    if reviewed is None:
+        return False
+    out = subprocess.run(["git", "show", f"{commit}:{REVIEWED_FILE.format(job_id=job_id)}"],
+                         cwd=REPO, capture_output=True, text=True)
+    return out.returncode == 0 and out.stdout == reviewed
+
+
 def _repo_is_ready() -> bool:
     """On the branch we merge into, with nothing half-done in the folder.
 
@@ -412,6 +432,16 @@ def deploy(conn, target: str, *, job_id: int | None = None,
                       "that deploy can't be undone and there's no written way back",
                       verb="deploy", subject=target, asked_by=asked_by)
 
+    # No mechanism, no deploy — and above all no CONSUMED approval. Burning the owner's
+    # one-time yes on a verb that then does nothing would make him grant it twice for
+    # one deploy. The mechanism, when built, registers here and runs BEHIND the gate.
+    deployer = DEPLOYERS.get(target)
+    if deployer is None:
+        raise _refuse(conn, job_id,
+                      f"there's no way to deploy {target} built yet — your approval "
+                      "was not used up",
+                      verb="deploy", subject=target, asked_by=asked_by)
+
     # Spend the approval FIRST. If the deploy dies halfway, the slip is still used —
     # a retry must come back for a fresh yes rather than replay an old one. Two callers
     # racing: SQLite serializes the writes and the single-use guard refuses the loser,
@@ -423,18 +453,25 @@ def deploy(conn, target: str, *, job_id: int | None = None,
         raise _refuse(conn, job_id, "that approval has already been used",
                       verb="deploy", subject=target, asked_by=asked_by) from exc
 
-    # ⚠️ HONEST RECEIPT. Nothing here deploys anything — the harness has no deploy
-    # mechanism yet, and this verb exists so that when one is built it is built BEHIND
-    # the gate rather than beside it. Saying "Deployed {target}" would have been the
-    # gatekeeper's own record lying about the one act it exists to control.
-    detail = ("cleared to deploy on your approval — note that the harness has no "
-              "deploy mechanism wired yet, so nothing was actually sent anywhere")
-    _note(conn, job_id, f"Cleared to deploy {target}, on your approval. "
-                        f"Asked for by {_clean(asked_by)}. Nothing was sent — "
-                        "there's no deploy button wired up yet.")
+    try:
+        reference = str(deployer(target) or "")
+    except Exception as exc:  # noqa: BLE001 — a failed deploy is a refusal, said aloud
+        raise _refuse(conn, job_id, f"the deploy of {target} didn't go through: "
+                      f"{_clean(str(exc), 160)} — it needs a fresh approval to retry",
+                      verb="deploy", subject=target, asked_by=asked_by) from exc
+
+    detail = f"deployed {target} on your approval"
+    _note(conn, job_id, f"Deployed {target}, on your approval. "
+                        f"Asked for by {_clean(asked_by)}.", kind="done")
     _log(conn, "deploy", target, True, detail, asked_by, job_id)
     return Receipt(verb="deploy", subject=target, detail=detail,
-                   reference=str(approval["id"]))
+                   reference=reference or str(approval["id"]))
+
+
+# What actually performs a deploy, by target. EMPTY on purpose: nothing in the harness
+# can deploy anything yet. When something can, it registers here — behind the gate, so
+# that the owner's approval is the only thing that can start it.
+DEPLOYERS: dict[str, Callable[[str], str | None]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +494,16 @@ def spend(conn, seat_id: str, cents: int, *, job_id: int | None = None,
     """
     if cents < 0:
         raise _refuse(conn, job_id, "a charge can't be negative",
+                      verb="spend", subject=seat_id, asked_by=asked_by)
+    row = seat(conn, seat_id)
+    if row is None:
+        raise _refuse(conn, job_id, f"there's no such worker as '{_clean(seat_id, 40)}'",
+                      verb="spend", subject=seat_id, asked_by=asked_by)
+    # A metered seat costs money every call. "Reserve zero, then make the call" would
+    # walk every cap — daily, role, monthly — without any of them moving.
+    if cents == 0 and row["tier"] == "metered":
+        raise _refuse(conn, job_id, "a paid worker can't reserve nothing — "
+                      "say what the call will cost",
                       verb="spend", subject=seat_id, asked_by=asked_by)
     # The caps are keyed BY ROLE, so a role nobody validated is a cap nobody enforces —
     # 'research' would sail past both the build ration and the review ration.
