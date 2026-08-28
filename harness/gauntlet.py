@@ -559,7 +559,98 @@ def run_panel(
         # reason is indistinguishable from a job nobody looked at.
         conn.execute("UPDATE jobs SET spoken_summary = ? WHERE id = ?",
                      (result.spoken(), job_id))
+    else:
+        # THE SAME ASK, FROM ONE PLACE, FOR BOTH ENTRY POINTS. A job can be certified
+        # by this worker (executor.run_job -> run_panel) or by the other path
+        # (dispatch.run_gauntlet -> run_gauntlet_for_job -> run_panel) — both funnel
+        # through here, so both get exactly the same "ask the gatekeeper" behaviour
+        # instead of one of them silently never asking.
+        _ask_to_ship(conn, job_id, cfg, db_path)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Asking to ship — the one place a certified job's fate is decided from here on.
+# ---------------------------------------------------------------------------
+# The schema's own words for "no cross-family tester yet" (guard_ship_requires_a_
+# passing_tester, schema.sql). Matched only to CHOOSE which fixed sentence to speak —
+# never echoed. A real tester doesn't exist yet, so this is the expected, common
+# refusal today, and it earns its own honest sentence rather than a generic one.
+_NO_TESTER_MARKER = "passing cross-family tester"
+
+# Every OTHER refusal reason gets this instead of the gatekeeper's own words. The
+# gatekeeper's refusals are plain English, but some legitimately NAME A FILE (see
+# gatekeeper._unreviewed_files_in) — fine for the scrollable event log (which already
+# has it, via gatekeeper.py's own `_note`/`_log`), wrong for the one-line status a
+# person reads at a glance (AGENTS.md's plain-English rule). Spoken text here is
+# always one of exactly two fixed sentences — never the gatekeeper's raw message,
+# regex-scrubbed or otherwise.
+_OTHER_REFUSAL_SENTENCE = (
+    "Checked and passed, but it couldn't be merged in right now — it needs a person "
+    "to take a look."
+)
+
+
+def _families_passed_count(conn, job) -> int:
+    """How many model families OTHER than the builder's passed review on the job's
+    CURRENT version — counted exactly the way guard_family_floor counts it. Re-derived
+    from the record rather than trusted from a caller (the gatekeeper's own rule:
+    it never believes the asker either)."""
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT model_family) AS n FROM verdicts "
+        "WHERE job_id = ? AND verdict = 'pass' AND role = 'reviewer' "
+        "  AND reviewed_version IS ? AND model_family <> ?",
+        (job["id"], job["head_version"], job["builder_family"]),
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
+def _ask_to_ship(conn, job_id: int, cfg: dict[str, Any], db_path: Path) -> None:
+    """Ask the gatekeeper to merge a job that was just certified — ALWAYS, whether or
+    not a real tester has run. `cfg` is accepted for symmetry with the rest of this
+    module's call sites and future use; today's decision doesn't depend on it.
+
+    Never raises. Whatever calls this (a background worker thread, or a synchronous
+    request handler) must not die because asking to merge went wrong — a job this
+    fails on simply stays exactly where the panel left it ('done'), same as any other
+    refusal.
+    """
+    try:
+        import gatekeeper
+        try:
+            answer = gatekeeper.handle(
+                {"verb": "merge", "job_id": job_id, "asked_by": "the panel"},
+                db_path=db_path)
+        except Exception:                      # noqa: BLE001 — the ask itself failing
+            answer = {"ok": False, "error": ""}
+
+        if answer.get("ok"):
+            # Shipped. Its private copy of the repo has done its job.
+            import executor
+            try:
+                executor.cleanup_worktree(job_id)
+            except Exception:                  # noqa: BLE001 — cleanup is best-effort
+                pass
+            return
+
+        error = str(answer.get("error") or "")
+        if _NO_TESTER_MARKER in error:
+            job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            n = _families_passed_count(conn, job) if job is not None else 0
+            spoken = (f"Checked and passed by {n} different models. It's waiting "
+                      "for someone to actually open and use it before it goes in.")
+        else:
+            spoken = _OTHER_REFUSAL_SENTENCE
+        set_status(conn, job_id, "done", spoken_summary=spoken)
+    except Exception:                          # noqa: BLE001 — asking must never crash
+        # the caller. Best-effort note; if even this fails, the job is simply left
+        # exactly where the panel left it.
+        try:
+            set_status(conn, job_id, "done",
+                       spoken_summary="Checked and passed, but something went wrong "
+                                      "asking to merge this.")
+        except Exception:                      # noqa: BLE001
+            pass
 
 
 def _reconcile(conn, result: PanelResult) -> None:

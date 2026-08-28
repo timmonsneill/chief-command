@@ -1,0 +1,318 @@
+You are building on branch gpt/merge-loop, in this worktree, for the Chief Command
+harness (Python, harness/, venv at /Users/user/code-projects/chief-command/.venv —
+NOTE: this worktree does not have its own .venv; .venv is gitignored and only exists
+in the main checkout at /Users/user/code-projects/chief-command/.venv). This is queue
+task 4 in docs/gpt/GPT_TASK_QUEUE.md ("Wire the gatekeeper's merge into the flow"),
+expanded with a minimal automated tester. Read docs/gpt/GPT_TASK_QUEUE.md item 4 and
+docs/HANDOFF_2026-08-27.md before starting, plus AGENTS.md in full (already loaded
+into your context below — the rules bind you).
+
+============================================================================
+CONVENTIONS DISTILLED FROM AGENTS.md — THESE ARE LOCKED, DO NOT ROUTE AROUND THEM
+============================================================================
+1. Text-first, GCP/local stack only where relevant (not directly load-bearing here).
+2. Version-pin everything — not relevant to this task (no model bumps here).
+3. Providers are referenced by SEAT, never by vendor name, in orchestration code.
+4. Hardware-agnostic — no machine-specific paths. Use Path(__file__).resolve() the
+   way the rest of the codebase already does (see harness/gatekeeper.py, HARNESS/REPO).
+5. Local model output NEVER ships without a higher-tier review — this is DB-enforced
+   (schema.sql). Do not weaken any trigger. Do not touch db/migrations/ at all.
+6. Reviews before pushes — not your concern; you are committing locally, never pushing.
+7. Anything a human would read (spoken_summary, event detail) must be PLAIN ENGLISH —
+   no filenames, no tool names ("pytest", "subprocess"), no jargon ("exit code",
+   "guard violation"), no code jargon. Say what happened to the actual thing (e.g.
+   "the automated tests didn't confirm it runs" not "pytest exited 1").
+8. Agents ASK the gatekeeper; nothing may import gatekeeper.merge directly and call it
+   from the worker. Only gatekeeper.handle({"verb": "merge", ...}) is allowed from
+   executor.py / a new tester module. gatekeeper.merge itself is still fine to call
+   FROM WITHIN gatekeeper.py or from tests (tests already do this directly).
+
+============================================================================
+WHAT ALREADY EXISTS (read all of these fully before writing anything)
+============================================================================
+- harness/gatekeeper.py — the gatekeeper. `merge(conn, job_id, *, asked_by=...)` and
+  the HTTP-shaped `handle(request: dict, *, db_path=None) -> dict` entry point.
+  `handle` returns {"ok": True/False, "verb":..., "error":...}. It refuses loudly
+  and writes its OWN refusal note onto the job's event trail (see `_refuse`/`_note`)
+  — you do NOT need to re-write that note. What you DO need to do (this task) is put
+  the refusal's plain-English reason into `jobs.spoken_summary` too, because that is
+  the field the voice/UI actually reads as "the current one-line status".
+- harness/gauntlet.py — the review panel. `run_panel(conn, job_id, request, code,
+  version, cfg, *, roster=None, db_path=None) -> PanelResult`. `PanelResult.certified`
+  is True only once `jobs.status` has actually moved to 'done'. `REVIEWERS: dict[str,
+  Callable[[str, str, str], tuple[str, str]]]` maps provider -> a function
+  `runner(request: str, code: str, model: str) -> (verdict, summary)` where verdict is
+  "pass" or "fail" (via `_parse_verdict`). `ReviewerBroke` is raised by a runner when
+  the TOOL failed (no key, CLI crashed, empty/cut reply) — this must become a SKIP,
+  never a verdict. `has_runner(provider) -> bool` checks a runner exists AND is ready
+  (e.g. xai needs XAI_API_KEY in the environment). Reuse `gauntlet.REVIEWERS` and
+  `gauntlet.has_runner` directly — do not reimplement CLI/HTTP plumbing.
+- harness/executor.py — the worker. `run_job(job_id, *, cfg=None)` does, in order:
+  1) make an isolated worktree (`_make_worktree`, `job["worktree"]` gets recorded),
+  2) build, 3) commit the output + version it (`_commit_in_worktree`/`_version_of`,
+  `job["head_version"]` gets recorded), 4) `set_status(conn, job_id, "review", ...)`,
+  5) `if cfg is not None: gauntlet.run_panel(...)`. Step 5 currently discards the
+  PanelResult it gets back — you need to capture it.
+- harness/db/jobs.py — `connect`, `seat`, `record_artifact`, `record_verdict`,
+  `set_status`, `over_budget`, `GuardViolation`. Read `record_artifact`'s docstring:
+  build evidence must be `captured_by="harness"` (never "model") — a model may only
+  ever cite a source/quote. `record_verdict(conn, job_id, reviewer_seat, verdict,
+  summary=None, role="reviewer", reviewed_version=None)` — pass `reviewed_version`
+  EXPLICITLY, always, matching `job["head_version"]` at the time you read the job row
+  (never let it default-read the live column, which could have moved).
+- harness/db/schema.sql — READ THESE TRIGGERS CAREFULLY, they are the real spec:
+  * `guard_tester_must_cite_artifacts` (~line 829): before ANY INSERT into `verdicts`
+    with role='tester', there MUST already exist a row in `artifacts` for the SAME
+    job_id with `kind IN ('screenshot','trace','video','dom_snapshot')` AND
+    `captured_by IN ('harness','playwright')` AND a non-empty path or value. Note
+    'logs' is NOT an accepted kind — use kind='trace' for the captured test-run
+    output (a trace of the run is exactly what this is; screenshot/video/dom_snapshot
+    don't fit a headless test run). Record this artifact BEFORE calling
+    record_verdict with role='tester', or the insert aborts.
+  * `guard_no_self_family_testing` (~line 847): a tester verdict's `model_family` may
+    not equal the job's `builder_family`. You must pick a reviewer seat whose family
+    differs from the job's builder family BEFORE running anything — don't run the
+    judge and then discover the write is refused.
+  * `guard_ship_requires_a_passing_tester` (guard 6, ~line 1000): `status -> 'shipped'`
+    requires OLD.status = 'done' AND a verdict with role='tester', verdict='pass',
+    reviewed_version = the job's CURRENT head_version. This is what `gatekeeper.merge`
+    relies on — you don't call it directly, but you must make sure a real passing
+    tester verdict lands on the record with the right version before asking to merge.
+  * `guard_evidence_cannot_be_empty`: path/value can't be blank.
+  Do NOT touch schema.sql or db/migrations/ at all. Do NOT weaken any guard.
+
+============================================================================
+BUILD THIS
+============================================================================
+
+### 1. harness/tester.py (new file) — the minimal automated tester
+
+A module-level docstring explaining what it's for (see the style of gatekeeper.py /
+gauntlet.py's docstrings — plain prose, no marketing tone, explain the constraint not
+the code).
+
+Public surface:
+
+```python
+HARNESS = Path(__file__).resolve().parent
+REPO = HARNESS.parent
+VENV_PYTHON = REPO / ".venv" / "bin" / "python"
+TEST_TIMEOUT_S = 600
+TAIL_LINES = 40          # how much of the run's output actually lands in the record
+
+TEST_CMD = [str(VENV_PYTHON), "-m", "pytest", "harness/tests/", "-q"]
+# module-level, read via `TEST_CMD` (module global) inside the function that runs it
+# — NOT captured as a default argument — so tests can `monkeypatch.setattr(tester,
+# "TEST_CMD", [...])` to something fast and deterministic.
+
+def run_tester_for_job(conn, job_id: int, cfg: dict[str, Any]) -> dict[str, Any]:
+    """..."""
+```
+
+`run_tester_for_job` behaviour, in order:
+1. Read the job row. If missing, or `job["worktree"]` is empty/None or the directory
+   doesn't exist on disk, write a skip EVENT (see below for the shape) and return
+   `{"ran": False, "passed": False, "reason": "<plain reason>"}`. Do NOT raise.
+2. Pick a tester seat: walk `cfg["gauntlet"]["reviewers"]` (same roster the panel
+   uses) in order, and take the first seat that is (a) enabled, (b) a DIFFERENT
+   `family` from `job["builder_family"]` (guard_no_self_family_testing), and (c)
+   `gauntlet.has_runner(row["provider"])`. If none qualifies, write a skip event
+   ("no available model from a different family could check whether the tests
+   actually ran" — plain English, no jargon) and return
+   `{"ran": False, "passed": False, "reason": "no eligible tester seat"}`.
+3. Optional but do it: if the chosen seat is metered, reserve money BEFORE running
+   the judge, the same pattern `gauntlet._reserve_review_budget` uses but through
+   `gatekeeper.spend(conn, seat_id, cents, job_id=job_id, role="test", asked_by="the
+   tester")` — note `role="test"` already exists in `gatekeeper.SPEND_ROLES`. Use a
+   small flat estimate (e.g. 5 cents), 0 for non-metered seats (still goes through
+   the ledger — see gauntlet.py's comment on why 0 still gets recorded). If
+   `over_budget(conn, seat_id)` first, or the reservation is refused
+   (`gatekeeper.Refused`), treat exactly like "no eligible tester seat" (a skip, try
+   no other seat — keep it simple, single attempt is fine for this minimal version).
+4. Run `TEST_CMD` with `cwd=Path(job["worktree"])` via `subprocess.run(..., cwd=...,
+   capture_output=True, text=True, timeout=TEST_TIMEOUT_S)`. Catch
+   `subprocess.TimeoutExpired` and `OSError` — both become `(exit_code=-1, output=<a
+   plain description>)`, not a crash.
+5. Write the combined stdout+stderr, the command, and the exit code to a log file
+   UNDER the worktree (e.g. `<worktree>/chief_output/tester_job_<id>.log`, creating
+   `chief_output/` if needed). Then `record_artifact(conn, job_id, "trace",
+   path=str(log_file), value=<f"exit code {code}\n" + last TAIL_LINES lines of
+   output>, flow="tester", captured_by="harness")`. This MUST happen before the next
+   step (the guard requires it to already exist).
+6. Build a request/code pair for the judge and call
+   `gauntlet.REVIEWERS[tester_row["provider"]](request_text, evidence_text,
+   tester_row["model"])`. `request_text` should describe the actual job (`job
+   ["request"]`) plus an explicit instruction: judge ONLY whether the test run
+   actually finished and shows the tests passing (non-zero exit code, or output that
+   doesn't show the suite completing, is a FAIL). `evidence_text` is the command run
+   + exit code + the captured tail. Catch `gauntlet.ReviewerBroke`,
+   `subprocess.TimeoutExpired`, and any other `Exception` from this call — ALL of
+   them are a skip (the TOOL failed, not the tests): write a skip event, return
+   `{"ran": False, "passed": False, "reason": "<plain reason>"}`. (Note: the test
+   suite genuinely FAILING, in step 4, is NOT a tool failure — that's real evidence
+   the judge should see and can rightly FAIL on. Only a broken/unreachable JUDGE is a
+   skip.)
+7. Record the verdict: `record_verdict(conn, job_id, tester_row["id"], verdict=...,
+   summary=..., role="tester", reviewed_version=job["head_version"])` (the head_version
+   read in step 1, not re-read). Wrap in `try/except GuardViolation` — if the DB
+   itself refuses it (shouldn't happen if you did steps 1-3 correctly, but defence in
+   depth), treat as a skip with the guard's plain-English text.
+8. Write an event on the job (see `_event` shape below) saying the tests were checked
+   and confirmed, or checked and something looked wrong — plain English, no verdict
+   words.
+9. Return `{"ran": True, "passed": verdict == "pass", "reason": summary, "seat":
+   tester_row["id"]}`.
+
+A small private `_event(conn, job, kind, detail)` helper mirroring the shape used in
+gatekeeper.py's `_note` / executor.py's `_event` (INSERT INTO events with job_id,
+seat_id, lane, model, family, kind, detail) — use `job["builder_seat"]`'s seat row for
+the seat/model/family columns when the event isn't clearly about a different seat (the
+skip-before-picking-a-tester case has no tester seat yet, so attribute it to the
+builder's own seat row, same as gatekeeper.py's `_note` does). Skips are kind='skipped'.
+A genuine pass/fail verdict event is kind='verdict' (pass) or kind='error' (fail) —
+match gauntlet.py's `_review_one` convention.
+
+Never raise out of `run_tester_for_job`. Every exit path returns the dict.
+
+### 2. Wire it into harness/executor.py
+
+In `run_job`, step 5 currently does:
+```python
+if cfg is not None:
+    import gauntlet
+    gauntlet.run_panel(conn, job_id, job["request"], result, version, cfg,
+                       db_path=DB_PATH)
+```
+Change to capture the result, and add a new private function `_after_certification`
+(module-level, so it's directly testable without a full build):
+
+```python
+def _after_certification(conn, job_id: int, cfg: dict[str, Any]) -> None:
+    """Once the panel certifies (result.certified), prove the work actually runs and
+    ask the one component allowed to ship it. Pulled out of run_job so it can be
+    exercised directly against a job already parked at 'done'.
+    """
+    import tester
+    outcome = tester.run_tester_for_job(conn, job_id, cfg)
+    if outcome.get("passed"):
+        import gatekeeper
+        try:
+            answer = gatekeeper.handle(
+                {"verb": "merge", "job_id": job_id, "asked_by": "the panel"},
+                db_path=DB_PATH)
+        except Exception as exc:  # noqa: BLE001 — asking must never crash the worker
+            answer = {"ok": False, "error": "something went wrong asking to merge this"}
+        if not answer.get("ok"):
+            # gatekeeper.handle already wrote its own refusal onto the job's events
+            # (gatekeeper.py rule 3) — put the same plain-English reason where the
+            # voice/UI actually reads current status.
+            set_status(conn, job_id, "done",
+                       spoken_summary=str(answer.get("error") or
+                                          "the gatekeeper said no")[:200])
+        # else: gatekeeper.merge already moved status to 'shipped'.
+    elif outcome.get("ran"):
+        set_status(conn, job_id, "done",
+                   spoken_summary="Checked and certified, but the automated tests "
+                                  f"didn't confirm it runs: "
+                                  f"{str(outcome.get('reason') or '')[:160]}")
+    # else: the tester couldn't run at all — it already left its own skip event; the
+    # job simply stays exactly where the panel left it.
+```
+
+And in `run_job` step 5:
+```python
+if cfg is not None:
+    import gauntlet
+    panel = gauntlet.run_panel(conn, job_id, job["request"], result, version, cfg,
+                               db_path=DB_PATH)
+    if panel.certified:
+        _after_certification(conn, job_id, cfg)
+```
+`set_status` is already imported at the top of executor.py — no new import needed
+there. Keep everything else in `run_job` unchanged.
+
+### 3. Tests: harness/tests/test_merge_loop.py (new file)
+
+Follow the style/fixture conventions already in harness/tests/test_gatekeeper.py and
+harness/tests/test_gauntlet_panel.py (read both fully — copy their patterns, don't
+invent new ones): a `conn`/`db` fixture that creates a tmp sqlite db + seats; a `repo`
+fixture IDENTICAL in shape to test_gatekeeper.py's `repo` fixture (inits a throwaway
+git repo, `monkeypatch.setattr(gatekeeper, "REPO", r)` — NEVER let a test touch the
+real project's git repo); a `_git`/`_job_on_branch` helper copied from
+test_gatekeeper.py (duplicate the ~15 lines locally, don't import across test files).
+
+Seats needed (mirror test_gauntlet_panel.py's SEATS list): a local builder
+(`grinder_local`, family qwen, tier local), at least two non-qwen reviewer seats in
+different families (e.g. `reviewer` = claude subscription, `brain` = gpt
+subscription) so the family floor of 2 can be met without weakening anything. CFG =
+`{"seats": {}, "gauntlet": {"reviewers": ["reviewer", "brain"], "min_model_families":
+2}}`.
+
+Monkeypatch `gauntlet.REVIEWERS` (both for the panel AND for the tester's judge — it's
+the same dict) to stub functions keyed by MODEL (exactly like test_gauntlet_panel.py's
+`_stub`/`_wire`). Monkeypatch `tester.TEST_CMD` to something fast and controllable,
+e.g. `[sys.executable, "-c", "print('2 passed'); import sys; sys.exit(0)"]` for a
+green run and `[sys.executable, "-c", "print('boom'); import sys; sys.exit(1)"]` for a
+red one.
+
+Build a helper that gets a job all the way to a genuinely certified 'done' state with
+a real branch on the throwaway repo (mirror test_gatekeeper.py's `_job_on_branch` +
+the pattern in its `_reviewed_and_done`, but WITHOUT pre-seeding the tester artifact/
+verdict — that's what your code under test produces) — then set
+`jobs.worktree` to the repo path directly (`conn.execute("UPDATE jobs SET worktree=?
+WHERE id=?", (str(repo), job))`) so `tester.run_tester_for_job`'s subprocess has a
+real directory to run in.
+
+Required scenarios (task spec, verbatim — write a test for each):
+1. Certified job + green tests + a passing cross-family tester verdict → job status
+   becomes 'shipped', AND the work is actually on the tmp repo's `main` branch
+   (assert the file content on disk after merge, the way
+   test_gatekeeper.py::test_merge_goes_through_when_the_branch_tip_is_the_reviewed_version
+   does).
+2. Tester's judge genuinely runs and returns FAIL → job stays 'done', with a plain-
+   English reason in `jobs.spoken_summary` (assert it contains no jargon: no
+   "pytest", no "exit code", no "guard").
+3. No cross-family runner available for testing (e.g. CFG's roster only contains
+   seats sharing the builder's family, or none at all) → a 'skipped' event is
+   recorded, no verdict row exists for role='tester', job stays 'done'.
+4. Gatekeeper refuses even after a passing tester (simulate "the branch moved after
+   review" exactly like test_gatekeeper.py's
+   test_merge_refuses_when_the_branch_moved_after_review) → the refusal's
+   plain-English reason lands in `jobs.spoken_summary`, job status stays 'done'
+   (never 'shipped').
+
+Also add focused unit tests directly on `tester.run_tester_for_job` (not through
+`_after_certification`) for:
+- the artifact recorded is kind='trace', captured_by='harness', non-empty path AND
+  value, and the verdict it unlocks actually has role='tester' with the right
+  `reviewed_version`.
+- a job whose `worktree` column is empty/missing directory → skip, no verdict row,
+  no crash.
+- guard_no_self_family_testing is never even attempted: assert that when the ONLY
+  configured reviewer shares the builder's family, no verdict INSERT is attempted at
+  all (spy or check no verdicts row exists — don't assert on the trigger's exception
+  text, since your code should never reach the trigger in that case).
+
+Run the FULL suite at the end (see verification below) — all existing 209 tests must
+still pass. Do not weaken, skip, or delete any existing test to make it pass.
+
+============================================================================
+DO NOT
+============================================================================
+- Do not touch db/migrations/ or schema.sql.
+- Do not import gatekeeper.merge directly into tester.py or executor.py — only
+  gatekeeper.handle(...).
+- Do not put filenames, tool names, "pytest", "exit code", "subprocess", or "guard"
+  into any spoken_summary or event detail a person would read.
+- Do not commit anything outside this worktree, do not push, do not touch main.
+- Do not run the full pytest suite against the REAL project — only ever against the
+  throwaway `repo` fixture's git repo, and only ever via `tester.TEST_CMD` monkeypatched
+  to something fast in tests.
+
+============================================================================
+WHEN DONE
+============================================================================
+Make the edits and run the tests yourself to sanity check
+(`/Users/user/code-projects/chief-command/.venv/bin/python -m pytest
+harness/tests/test_merge_loop.py -q` from this worktree's root, then the full suite).
+Commit nothing — I will verify and commit.

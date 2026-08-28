@@ -222,10 +222,23 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
         #    all bound to THIS version. The panel decides nothing the database wouldn't;
         #    it produces the verdicts the guards ask for. Without a config there is no
         #    panel, and the job simply stays parked (the safe outcome, not a shortcut).
+        #
+        #    Certification itself is what asks the gatekeeper to ship (gauntlet.py's
+        #    own `_ask_to_ship`, called from inside `run_panel`) — that lives THERE,
+        #    not here, so the same thing happens whether a job gets certified through
+        #    this worker or through `gauntlet.run_gauntlet_for_job` (dispatch.py's
+        #    other entry point). This function's only job once certified is the
+        #    harmless diagnostic below, which never gates anything.
         if cfg is not None:
             import gauntlet
-            gauntlet.run_panel(conn, job_id, job["request"], result, version, cfg,
-                               db_path=DB_PATH)
+            panel = gauntlet.run_panel(conn, job_id, job["request"], result, version,
+                                       cfg, db_path=DB_PATH)
+            if panel.certified:
+                import tester
+                try:
+                    tester.record_smoke_check(conn, job_id)
+                except Exception:  # noqa: BLE001 — purely diagnostic; never worth
+                    pass            # losing the worker thread over
 
         final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
         return {"job_id": job_id, "status": final, "version": version}

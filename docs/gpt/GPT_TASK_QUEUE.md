@@ -58,7 +58,7 @@ a test in `harness/tests/test_gauntlet_config.py` asserting no seat's `model` en
 `-latest` or `latest` (xAI's aliases auto-update, which rule 2 forbids). No other
 changes.
 
-## 4. [ ] Wire the gatekeeper's merge into the flow (the door has no doorbell)
+## 4. [TAKEN 2026-08-27] Wire the gatekeeper's merge into the flow (the door has no doorbell)
 `harness/gatekeeper.py::merge` is complete and tested (including against a real git repo)
 but NOTHING calls it — no route in `harness/server.py`, no tool in `harness/chief.py`, no
 step after the panel certifies a job. `dispatch.ship` is gone, so today nothing can move a
