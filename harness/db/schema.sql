@@ -240,6 +240,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     builder_tier   TEXT NOT NULL DEFAULT 'local'
                    CHECK (builder_tier IN ('local','subscription','metered')),
     builder_family TEXT NOT NULL DEFAULT 'unknown',
+
+    -- WHAT SHAPE the reviewed bundle is (task #9, migration 008). 'text' = one
+    -- file's content (the local model's path, unchanged). 'diff' = a code
+    -- builder's `git diff <merge-base main>..<tip>` — a different review AND
+    -- merge contract. Stamped at dispatch from the builder seat's provider,
+    -- frozen by guard_builder_identity_is_frozen below — never inferred later
+    -- from a seat's live (mutable) provider column.
+    bundle_kind   TEXT NOT NULL DEFAULT 'text' CHECK (bundle_kind IN ('text', 'diff')),
+
     run_id        TEXT,                      -- OpenClaw sessions_spawn run id
     session_key   TEXT,                      -- agent:<id>:subagent:<uuid>
 
@@ -681,6 +690,7 @@ BEFORE UPDATE ON jobs
 WHEN OLD.builder_seat <> NEW.builder_seat
   OR OLD.builder_tier <> NEW.builder_tier
   OR OLD.builder_family <> NEW.builder_family
+  OR OLD.bundle_kind <> NEW.bundle_kind
 BEGIN
     SELECT RAISE(ABORT, 'guard: who built this cannot be rewritten after the fact');
 END;

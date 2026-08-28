@@ -849,10 +849,23 @@ def _families_passed_count(conn, job) -> int:
     return int(row["n"] or 0)
 
 
+# The fixed sentence for a certified 'diff' job (task #9's GO version — candidate
+# generation, no merge). Not the gatekeeper's problem to solve and not something
+# _ask_to_ship should improvise per job: one sentence, always the same shape, N
+# filled in from the record.
+_DIFF_CANDIDATE_SENTENCE = (
+    "Checked and passed by {n} different models. The changes are ready for you "
+    "to read before anything goes in."
+)
+
+
 def _ask_to_ship(conn, job_id: int, cfg: dict[str, Any], db_path: Path) -> None:
-    """Ask the gatekeeper to merge a job that was just certified — ALWAYS, whether or
-    not a real tester has run. `cfg` is accepted for symmetry with the rest of this
-    module's call sites and future use; today's decision doesn't depend on it.
+    """Ask the gatekeeper to merge a job that was just certified — UNLESS it's a
+    'diff' job (a real code builder's candidate), which task #9's GO version stops
+    at 'done' on purpose: nothing runs the builder's own tests, nothing merges, and
+    the isolated clone that produced the candidate is left in place for Neill to
+    read. Text jobs (today's local-model path) keep asking the gatekeeper, exactly
+    as before.
 
     Never raises. Whatever calls this (a background worker thread, or a synchronous
     request handler) must not die because asking to merge went wrong — a job this
@@ -860,6 +873,13 @@ def _ask_to_ship(conn, job_id: int, cfg: dict[str, Any], db_path: Path) -> None:
     refusal.
     """
     try:
+        job_row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job_row is not None and (job_row["bundle_kind"] or "text") == "diff":
+            n = _families_passed_count(conn, job_row)
+            set_status(conn, job_id, "done",
+                       spoken_summary=_DIFF_CANDIDATE_SENTENCE.format(n=n))
+            return
+
         import gatekeeper
         try:
             answer = gatekeeper.handle(

@@ -60,6 +60,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import git_policy
+
 from db.jobs import GuardViolation, connect, record_usage, seat, set_status
 
 HARNESS = Path(__file__).resolve().parent
@@ -256,19 +258,39 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
         raise _no("the code on that branch isn't the code that was reviewed — "
                       "it has changed since, so it needs checking again")
 
-    # And the commit must CONTAIN what the reviewers read. The panel judges the text the
-    # worker handed in (`jobs.result`); the version check above only proves the branch
-    # is the commit the record names. A worker could commit one thing and hand the
-    # reviewers another. So: the reviewed bytes must be in the commit, byte for byte.
-    if not _commit_holds_the_reviewed_work(tip, job_id, job["result"]):
-        raise _no("what's on that branch isn't what the reviewers read, "
-                      "so it can't be merged as reviewed")
-    # ...and NOTHING ELSE. A commit with the reviewed file plus one more file is a
-    # reviewed file and an unreviewed one. The panel read one thing; one thing merges.
-    extra = _unreviewed_files_in(tip, job_id)
-    if extra:
-        raise _no("that branch changes things the reviewers never saw "
-                      f"({_clean(', '.join(extra), 160)}), so it can't be merged as reviewed")
+    # And the commit must CONTAIN what the reviewers read. The panel judges what
+    # the worker handed in (`jobs.result`); the version check above only proves the
+    # branch is the commit the record names. A worker could commit one thing and
+    # hand the reviewers another. What "matches" means depends on the bundle's
+    # SHAPE — a fact fixed at dispatch and frozen (migration 008), never inferred
+    # here from anything about the branch itself.
+    kind = job["bundle_kind"] or "text"
+    if kind == "diff":
+        base = subprocess.run(["git", "merge-base", MERGE_INTO, tip], cwd=REPO,
+                              capture_output=True, text=True)
+        if base.returncode != 0 or not base.stdout.strip():
+            raise _no("that branch shares no history with main, so there's nothing "
+                      "safe to compare it against")
+        base_sha = base.stdout.strip()
+        bundle = _diff_bundle(base_sha, tip)
+        if bundle is None or bundle != (job["result"] or ""):
+            raise _no("what's on that branch doesn't match what the reviewers "
+                      "actually read, so it can't be merged as reviewed")
+        bad = git_policy.disallowed_paths(*_range_diff_lines(base_sha, tip))
+        if bad:
+            raise _no("that branch changes things that can't be merged as reviewed "
+                      f"({_clean(', '.join(bad), 160)})")
+    else:
+        if not _commit_holds_the_reviewed_work(tip, job_id, job["result"]):
+            raise _no("what's on that branch isn't what the reviewers read, "
+                          "so it can't be merged as reviewed")
+        # ...and NOTHING ELSE. A commit with the reviewed file plus one more file is
+        # a reviewed file and an unreviewed one. The panel read one thing; one thing
+        # merges.
+        extra = _unreviewed_files_in(tip, job_id)
+        if extra:
+            raise _no("that branch changes things the reviewers never saw "
+                          f"({_clean(', '.join(extra), 160)}), so it can't be merged as reviewed")
 
     if not _repo_is_ready():
         raise _no("the project folder has unfinished changes in it, so it isn't "
@@ -401,6 +423,27 @@ def _unreviewed_files_in(commit: str, job_id: int) -> list[str]:
         return ["<could not list the branch's changes>"]
     allowed = REVIEWED_FILE.format(job_id=job_id)
     return sorted(p for p in diff.stdout.splitlines() if p.strip() and p.strip() != allowed)
+
+
+def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]]:
+    """`git diff --raw` and `git diff --numstat` for one COMMITTED range, split
+    into lines — the same shape git_policy.disallowed_paths() reads from
+    executor.py's staged-changes check, applied here to a committed range instead."""
+    raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=REPO,
+                         capture_output=True, text=True)
+    numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=REPO,
+                             capture_output=True, text=True)
+    return (raw.stdout.splitlines() if raw.returncode == 0 else [],
+            numstat.stdout.splitlines() if numstat.returncode == 0 else [])
+
+
+def _diff_bundle(base: str, tip: str) -> str | None:
+    """The exact text a 'diff'-kind job's panel reviewed — recomputed with the
+    SAME command used when it was stored (executor._diff_against_main), so
+    equality here means fidelity to what was actually shown, not luck."""
+    out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=REPO,
+                         capture_output=True, text=True)
+    return out.stdout if out.returncode == 0 else None
 
 
 def _repo_is_ready() -> bool:
