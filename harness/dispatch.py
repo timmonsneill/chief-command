@@ -41,6 +41,16 @@ CONFIG = Path(__file__).resolve().parent / "config" / "seats.toml"
 BUILD_ESTIMATE_CENTS = 25       # reserved for a metered build before the call (an estimate;
                                 # real usage recording is queue task 1)
 
+# Which shape a job's reviewed bundle will be, keyed by the BUILDER SEAT'S
+# PROVIDER — stamped once at dispatch and then frozen (migration 008), because the
+# `seats` table is re-upserted from config on every server start and a seat's live
+# `provider` is therefore mutable history; what a job WAS must not follow it.
+# codex is NOT mapped here on purpose: there is no in-process codex builder yet
+# (executor.py only knows ollama and claude-cli). Mapping it to 'diff' now would
+# stamp a review contract for work nothing can actually produce. Add it back the
+# day an in-process codex builder exists.
+BUNDLE_KIND_BY_PROVIDER = {"claude-cli": "diff"}   # default: 'text'
+
 
 class DispatchRefused(RuntimeError):
     """The harness declined to dispatch. Budget, disabled seat, or a guard."""
@@ -132,12 +142,16 @@ def dispatch_local(
     # instantly with a snapshot error that the busy-timeout does NOT retry.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+        bundle_kind = BUNDLE_KIND_BY_PROVIDER.get(
+            builder_row["provider"] if builder_row else "", "text")
+        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin,
+                            bundle_kind=bundle_kind)
         conn.execute(
             "UPDATE jobs SET required_reviews = ?, required_review_families = ?, "
-            "tier = ?, tier_reason = ?, dispatch_key = ?, branch = ? WHERE id = ?",
+            "tier = ?, tier_reason = ?, dispatch_key = ?, branch = ?, bundle_kind = ? "
+            "WHERE id = ?",
             (len(roster), families, call.tier, call.reason, dispatch_key,
-             f"job/{job_id}", job_id),
+             f"job/{job_id}", bundle_kind, job_id),
         )
         # No silent caps: a reviewer left out of the panel is written down on the job.
         # (A roster name that isn't a seat at all has no row to hang an event on —
@@ -339,10 +353,13 @@ def dispatch(
     # IMMEDIATE because this reads before it writes — see dispatch_local.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin)
+        bundle_kind = BUNDLE_KIND_BY_PROVIDER.get(row["provider"], "text")
+        job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin,
+                            bundle_kind=bundle_kind)
         conn.execute(
-            "UPDATE jobs SET required_reviews = ?, required_review_families = ? WHERE id = ?",
-            (required, families, job_id),
+            "UPDATE jobs SET required_reviews = ?, required_review_families = ?, "
+            "bundle_kind = ? WHERE id = ?",
+            (required, families, bundle_kind, job_id),
         )
         # No silent caps here either — same note dispatch_local writes.
         for seat_id, why in excluded.items():

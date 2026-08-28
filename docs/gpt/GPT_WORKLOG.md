@@ -42,3 +42,40 @@ was run three times as the cross-model re-review before push.
   header, DONE means the GPT gauntlet is clean and the branch is pushed. Neither has
   happened. Owner review, the gauntlet, and any later push remain unfinished.
 - Existing untracked Sol build notes were left untouched.
+
+## 2026-08-27 · real code builders, candidate generation only · branch gpt/real-builders
+- Outcome: the paid builder can now prepare a real code candidate in a fully separate
+  copy of the project. The result is checked by multiple model families and then stops
+  for Neill to read; it is not run and it is not merged automatically.
+- Safety: only ordinary text changes can become a candidate. Binary files, links,
+  executable changes, hidden project-control changes, and subprojects are refused.
+  The worker receives no sibling-provider keys, and the exact full version reviewed is
+  preserved on the record.
+- Commits: none, by the orchestrator's explicit instruction. All changes remain in the
+  working tree for independent review and commit.
+- Verification: focused candidate checks → 20 passed. Full harness checks → 281 passed,
+  1 skipped, using a temporary logged-in readiness stub because this worktree has no
+  active Claude subscription session. Without that stub, 19 pre-existing panel tests
+  stop at readiness before reaching this change; the candidate checks still pass.
+- One supplied sequence needed a safety-preserving correction: it froze the candidate
+  shape at birth and then tried to change it immediately afterward. The shape is now
+  stamped in the birth record, so the freeze remains absolute instead of being weakened.
+- Gauntlet: not run; the Claude orchestrator is the independent reviewer for this
+  uncommitted handoff. The two existing untracked Sol notes were left untouched.
+
+## 2026-08-28 · real builder security-review fixes · branch gpt/real-builders
+- Outcome: all nine required review findings were addressed. The paid builder is now
+  reachable from the Work screen, gets the sign-in identity it needs without receiving
+  sibling-provider secrets, refuses incomplete or unreadable runs, and removes failed
+  private copies so a retry is possible. Change inspection and reviewed-version checks
+  now refuse uncertainty instead of treating it as safe.
+- Commits: none, by the orchestrator's explicit instruction. The edits remain in the
+  working tree for independent verification and commit.
+- Verification: focused real-builder checks → 28 passed. Full harness checks → 289
+  passed, 1 skipped, using a temporary sign-in readiness stub that blocked real paid
+  calls; the stub was removed afterward. The worktree-local test environment was absent,
+  so the same project's shared test environment was used instead.
+- Gauntlet: not run; this session applied findings from the already-completed security
+  and bug-hunter reviews. The human-supervised real paid build remains deliberately for
+  the orchestrator, exactly as requested. The two pre-existing untracked Sol notes were
+  left untouched.

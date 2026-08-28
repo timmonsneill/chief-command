@@ -134,6 +134,7 @@ def create_job(
     origin: str = "text",
     parent_job_id: Optional[int] = None,
     task_name: Optional[str] = None,
+    bundle_kind: str = "text",
 ) -> int:
     """task_name is the 2-4 word handle the voice will use ("the rate limiter").
 
@@ -148,14 +149,16 @@ def create_job(
     # Snapshot who built this, AT BUILD TIME. Sol's cross-family review found that
     # reading the builder's tier live meant re-tiering a local seat retroactively
     # legitimized its old unreviewed work. What a seat is today cannot change what
-    # it was. The schema then freezes these columns.
+    # it was. bundle_kind travels in this SAME birth write because the schema freezes
+    # it immediately too — a later UPDATE would correctly be rejected as rewritten
+    # history. The schema then freezes these columns.
     cur = conn.execute(
         """
         INSERT INTO jobs (request, builder_seat, builder_tier, builder_family,
-                          origin, parent_job_id, task_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+                          bundle_kind, origin, parent_job_id, task_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (request, builder_seat, row["tier"], row["family"],
+        (request, builder_seat, row["tier"], row["family"], bundle_kind,
          origin, parent_job_id, task_name),
     )
     return int(cur.lastrowid)
