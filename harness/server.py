@@ -610,6 +610,26 @@ from chief import CHIEF_MODEL as _CHIEF_MODEL  # noqa: E402
 _chief_session = None
 _chief_lock = asyncio.Lock()
 
+# SSE must not be cached or buffered anywhere between us and the phone, or "streaming"
+# quietly turns back into "wait for the whole thing" behind a proxy/CDN that batches
+# chunks. Tailscale-only today, but this is cheap insurance if that ever changes.
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+# asyncio only holds a WEAK reference to a bare asyncio.create_task() result — if
+# nothing else keeps it alive, the garbage collector is free to collect it mid-run,
+# silently cancelling it (this is documented asyncio behaviour, not a hypothetical).
+# The whole point of _live_voice_producer is to survive a vanished HTTP response, so
+# it must not be that easy to kill by accident. This set is the strong reference; the
+# done-callback removes it once the turn is over, so it never grows unbounded.
+_background_voice_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_voice_tasks.add(task)
+    task.add_done_callback(_background_voice_tasks.discard)
+    return task
+
 
 def _live_session():
     """Lazily build the live Chief, seeded with the real project list.
@@ -628,6 +648,28 @@ def _live_session():
     return _chief_session
 
 
+def _is_chiefs_own_continuation(said: str) -> bool:
+    """A message that starts this way is Chief's OWN follow-up sentence, echoed back by
+    a mouth that misread it as a new question (see voice.html's '(Chief continues:)'
+    follow-ups). It is never something Neill said. The browser already refuses to send
+    this, but the browser is not the trust boundary — a stale client, or the mouth
+    somehow originating the words itself, must not be able to make Chief talk to
+    himself. So it's blocked here too, before it ever reaches Chief or the record."""
+    return said.startswith("(Chief continues:)")
+
+
+def _record_voice_event(out: dict) -> None:
+    """Everything Chief says goes on the record, so the text channel always has the
+    full version of anything Neill only half-heard in the car. One INSERT, shared by
+    every voice path, so there is exactly one place this can drift from the others."""
+    c = db()
+    c.execute(
+        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+        "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
+        (out.get("model", _CHIEF_MODEL), out["full"][:500]),
+    )
+
+
 @app.post("/api/voice/ask")
 async def voice_ask(request: Request):
     """The mouth's ONE tool. Everything Neill says arrives here and goes to Chief.
@@ -640,6 +682,11 @@ async def voice_ask(request: Request):
     said = (body.get("said") or "").strip()
     if not said:
         return {"spoken": "I didn't catch that."}
+    if _is_chiefs_own_continuation(said):
+        return JSONResponse(
+            {"spoken": "", "full": "", "model": _CHIEF_MODEL, "failed": True},
+            status_code=400,
+        )
 
     from mouth import is_pushback
     pushed_back = is_pushback(said)
@@ -675,17 +722,71 @@ async def voice_ask(request: Request):
         # per-turn continuity the streaming path keeps in session memory.
         talking_about = (body.get("context") or "").strip()
         context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
-        out = ask_chief(said, context=context, pushed_back=pushed_back)
+        # subprocess.run blocks for up to 300s (see chief.ask_chief) — run it off the
+        # event loop so one slow "are you sure" turn can't stall every other request
+        # this Mac is serving (health checks, the dashboard, another tab) for minutes.
+        from starlette.concurrency import run_in_threadpool
+        out = await run_in_threadpool(ask_chief, said, context=context, pushed_back=pushed_back)
 
-    # Everything Chief says goes on the record, so the text channel always has the full
-    # version of anything he only half-heard in the car.
-    c = db()
-    c.execute(
-        "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
-        "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
-        (out.get("model", _CHIEF_MODEL), out["full"][:500]),
-    )
+    _record_voice_event(out)
     return out
+
+
+async def _live_voice_producer(said: str, deep: bool, queue: "asyncio.Queue[tuple[str, dict]]") -> None:
+    """Runs one turn of Chief's live session to completion, independent of whoever is
+    listening on `queue`.
+
+    This is its own asyncio Task (see the caller), not something the SSE generator
+    awaits directly. That split is the fix for a real bug: when the SSE generator IS
+    the thing calling session.say(), a dropped phone connection cancels the generator —
+    and that cancellation propagates straight into session.say()'s own awaits as
+    asyncio.CancelledError. session.say() would then never reach the point where it
+    remembers what Chief said (chief_live.ChiefSession.remember() only runs after the
+    generator finishes normally), so the held conversation loses its own last turn —
+    Chief's next "yeah" would refer to nothing. Running this as a detached task means a
+    vanished phone can't touch it: nothing here is awaited by the HTTP response, so
+    nothing here gets cancelled when that response goes away. Chief always finishes the
+    thought and always remembers it; the record below is always written.
+    """
+    global _chief_session   # must be declared once, before any branch below assigns it
+    from chief import _for_speech
+
+    pieces: list[str] = []
+    cut_off = False
+    async with _chief_lock:
+        session = _live_session()
+        try:
+            async for sentence in session.say(said, deep=deep):
+                pieces.append(sentence)
+                await queue.put(("sentence", {"text": _for_speech(sentence)}))
+        except asyncio.CancelledError:
+            # Not expected in normal operation (nothing here cancels this task), but if
+            # the process itself is shutting down, still fall through and record
+            # whatever was said before re-raising, rather than losing it silently.
+            _chief_session = None
+            cut_off = True
+            raise
+        except Exception:
+            # A wedged session must not wedge the conversation. Drop it; the next
+            # utterance rebuilds a clean one.
+            _chief_session = None
+            cut_off = True
+        finally:
+            answer = " ".join(pieces).strip()
+            if answer:
+                if cut_off:
+                    # Some of this was already streamed to the phone and already spoken
+                    # before the turn broke — the record has to say what Neill actually
+                    # heard, not pretend nothing happened.
+                    answer = f"{answer} (cut off)"
+                out = {"spoken": _for_speech(answer), "full": answer,
+                       "model": _CHIEF_MODEL, "failed": cut_off}
+            else:
+                out = {"spoken": "Something went wrong on my end. Nothing's started.",
+                       "full": "Chief returned nothing. No work was dispatched.",
+                       "model": _CHIEF_MODEL, "failed": True}
+            _record_voice_event(out)
+            await queue.put(("done", out))
 
 
 @app.post("/api/voice/ask/stream")
@@ -696,61 +797,58 @@ async def voice_ask_stream(request: Request):
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-    async def _gen():
-        said = (body.get("said") or "").strip()
-        if not said:
+    said = (body.get("said") or "").strip()
+
+    if not said:
+        async def _empty():
             yield _sse("done", {
                 "full": "", "spoken": "I didn't catch that.",
                 "model": _CHIEF_MODEL, "failed": True,
             })
-            return
+        return StreamingResponse(_empty(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
-        from mouth import is_pushback
-        pushed_back = is_pushback(said)
-
-        if os.environ.get("OPENAI_API_KEY"):
-            from chief import _for_speech
-
-            async with _chief_lock:
-                session = _live_session()
-                pieces: list[str] = []
-                try:
-                    async for sentence in session.say(said, deep=pushed_back):
-                        pieces.append(sentence)
-                        yield _sse("sentence", {"text": _for_speech(sentence)})
-                except Exception:
-                    # A broken turn cannot poison the next one. Any partial answer is
-                    # abandoned because Chief did not finish the thought reliably.
-                    global _chief_session
-                    _chief_session = None
-                    pieces.clear()
-                answer = " ".join(pieces).strip()
-
-            if answer:
-                out = {"spoken": _for_speech(answer), "full": answer,
-                       "model": _CHIEF_MODEL, "failed": False}
-            else:
-                out = {"spoken": "Something went wrong on my end. Nothing's started.",
-                       "full": "Chief returned nothing. No work was dispatched.",
-                       "model": _CHIEF_MODEL, "failed": True}
-                yield _sse("sentence", {"text": out["spoken"]})
-        else:
-            # The free path still arrives as one piece, but it keeps the same wire shape
-            # so the phone does not need a second way to handle Chief's answer.
-            talking_about = (body.get("context") or "").strip()
-            context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
-            out = ask_chief(said, context=context, pushed_back=pushed_back)
-            yield _sse("sentence", {"text": out["spoken"]})
-
-        c = db()
-        c.execute(
-            "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
-            "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
-            (out.get("model", _CHIEF_MODEL), out["full"][:500]),
+    if _is_chiefs_own_continuation(said):
+        async def _blocked():
+            yield _sse("done", {"spoken": "", "full": "", "model": _CHIEF_MODEL, "failed": True})
+        return StreamingResponse(
+            _blocked(), media_type="text/event-stream", headers=_SSE_HEADERS, status_code=400,
         )
+
+    from mouth import is_pushback
+    pushed_back = is_pushback(said)
+
+    if os.environ.get("OPENAI_API_KEY"):
+        queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
+        # Fire-and-forget on purpose — see _live_voice_producer's docstring. This task
+        # is NOT awaited by the generator below, so the generator's own cancellation
+        # (a dropped phone) cannot reach it. _spawn_background is what keeps it alive
+        # long enough to finish (see that function).
+        _spawn_background(_live_voice_producer(said, pushed_back, queue))
+
+        async def _relay():
+            while True:
+                kind, payload = await queue.get()
+                if kind == "sentence":
+                    yield _sse("sentence", payload)
+                else:
+                    yield _sse("done", payload)
+                    return
+
+        return StreamingResponse(_relay(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    # No live session to carry the thread — same free fallback voice_ask uses. Wrapped
+    # in a thread so the blocking subprocess call (up to 300s for a pushed-back turn)
+    # can't stall the whole server while it runs.
+    async def _fallback_gen():
+        from starlette.concurrency import run_in_threadpool
+        talking_about = (body.get("context") or "").strip()
+        context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
+        out = await run_in_threadpool(ask_chief, said, context=context, pushed_back=pushed_back)
+        yield _sse("sentence", {"text": out["spoken"]})
+        _record_voice_event(out)
         yield _sse("done", out)
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    return StreamingResponse(_fallback_gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.get("/voice", response_class=HTMLResponse)

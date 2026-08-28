@@ -71,8 +71,91 @@
 const $ = s => document.querySelector(s);
 let pc = null, stream = null, dc = null, live = false;
 let lastSaid = "", lastAnswer = "";
-// Pace later pieces so the mouth never starts a second answer over the first one.
-let mouthBusy = false, sentenceQueue = [];
+
+// The realtime SESSION has tool_choice:"required" (see /api/voice/token) so that
+// nothing Neill says can slip past Chief. But that setting applies to every response
+// we ask the mouth to make — including the ones WE trigger to speak Chief's later
+// sentences. Left alone, that forces the mouth to call ask_chief AGAIN on its own
+// follow-up text, which re-enters Chief's own words as if Neill had said them. Every
+// response WE open below turns tool_choice off for just that one response.
+
+// Response ids WE opened (the tool's answer, and every "(Chief continues:)" follow-up).
+// When the mouth's own transcript for one of these comes back, we already showed that
+// exact text the moment it streamed in — see the "sentence" handling below — so that
+// transcript bubble is a duplicate and gets swallowed once, here.
+const ownResponseIds = new Set();
+
+// Exactly one ask_chief call is "live" at a time. If Neill talks again before Chief's
+// answer finishes, or before all of it has been spoken, the OLD invocation's queue and
+// pacing must not keep leaking sentences into the new conversation — that was a real
+// bug (two overlapping asks sharing one global queue, interleaving their sentences).
+// So every invocation gets its own queue/pacing state, and a new one always aborts
+// whatever the previous one was still doing first.
+let activeInvocation = null;
+
+function newInvocation() {
+  if (activeInvocation) activeInvocation.abort();
+  const inv = {
+    controller: new AbortController(),
+    cancelled: false,
+    mouthBusy: false,      // true while we're waiting for OUR OWN open response to finish
+    queue: [],              // later sentences, waiting their turn to be spoken
+    openResponseId: null,   // the response id mouthBusy is tied to
+    awaitingResponseId: false,
+    watchdog: null,
+    abort() {
+      this.cancelled = true;
+      this.controller.abort();
+      this.queue.length = 0;
+      if (this.watchdog) { clearTimeout(this.watchdog); this.watchdog = null; }
+    },
+  };
+  activeInvocation = inv;
+  return inv;
+}
+
+function clearOpenResponse(inv) {
+  inv.mouthBusy = false;
+  inv.openResponseId = null;
+  inv.awaitingResponseId = false;
+  if (inv.watchdog) { clearTimeout(inv.watchdog); inv.watchdog = null; }
+}
+
+function openMouthResponse(inv, extra) {
+  if (!dc || inv.cancelled) return;
+  inv.mouthBusy = true;
+  inv.awaitingResponseId = true;
+  // A watchdog: if the realtime side never tells us this response finished (a
+  // swallowed error, road noise triggering "already has an active response", a dropped
+  // event) the queue must not go silent forever — one bad turn should cost 15 seconds,
+  // not the rest of the drive.
+  inv.watchdog = setTimeout(() => {
+    clearOpenResponse(inv);
+    pumpQueue(inv);
+  }, 15000);
+  dc.send(JSON.stringify(Object.assign({ type: 'response.create' }, extra || {})));
+}
+
+function sendFunctionCallOutput(inv, callId, answerText) {
+  if (!dc || inv.cancelled) return;
+  dc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'function_call_output', call_id: callId,
+            output: JSON.stringify({ answer: answerText }) }
+  }));
+  openMouthResponse(inv);
+}
+
+function pumpQueue(inv) {
+  if (inv.cancelled || inv.mouthBusy || !inv.queue.length || !dc) return;
+  const text = inv.queue.shift();
+  dc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'message', role: 'user',
+            content: [{type: 'input_text', text: '(Chief continues:) ' + text}] }
+  }));
+  openMouthResponse(inv, { response: { tool_choice: 'none' } });
+}
 
 function setState(cls, label) {
   $('#state').className = 'state ' + cls;
@@ -135,23 +218,12 @@ async function start() {
 }
 
 function stop() {
+  activeInvocation?.abort();   // don't leave a fetch or a watchdog timer running after hangup
   pc?.close(); stream?.getTracks().forEach(t => t.stop());
   pc = stream = dc = null; live = false;
   $('#mic').textContent = 'Start talking';
   $('#mic').classList.remove('on');
   setState('', 'off');
-}
-
-function pumpSentenceQueue() {
-  if (mouthBusy || !sentenceQueue.length || !dc) return;
-  const text = sentenceQueue.shift();
-  dc.send(JSON.stringify({
-    type: 'conversation.item.create',
-    item: { type: 'message', role: 'user',
-            content: [{type: 'input_text', text: '(Chief continues:) ' + text}] }
-  }));
-  dc.send(JSON.stringify({ type: 'response.create' }));
-  mouthBusy = true;
 }
 
 async function handle(ev) {
@@ -163,15 +235,30 @@ async function handle(ev) {
 
   // The mouth is reaching for Chief. This is the ONLY thing it's allowed to do.
   if (ev.type === 'response.function_call_arguments.done' && ev.name === 'ask_chief') {
-    setState('think', 'thinking');
     const args = JSON.parse(ev.arguments || '{}');
+    const said = (args.said || lastSaid || '').trim();
+
+    if (said.startsWith('(Chief continues:)')) {
+      // Belt-and-braces: tool_choice:'none' on every follow-up response (see
+      // pumpQueue) should stop this from ever firing, but if the mouth still calls
+      // ask_chief on its OWN follow-up sentence, this stops Chief's own words from
+      // re-entering the conversation as something Neill said. Deliberately does not
+      // answer the pending tool call back — a repeat like this should be rare enough
+      // that leaving it unanswered is safer than teaching the mouth a new shape here.
+      turn('hold', 'Chief', 'skipped a repeat of its own answer');
+      return;
+    }
+
+    setState('think', 'thinking');
     const hold = turn('hold', 'Chief', 'thinking…');
     let sawSentence = false, sawDone = false;
+    const inv = newInvocation();
 
     try {
       const resp = await fetch('/api/voice/ask/stream', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer })
+        body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer }),
+        signal: inv.controller.signal,
       });
       if (!resp.ok || !resp.body) throw new Error('voice stream failed');
 
@@ -180,6 +267,7 @@ async function handle(ev) {
       let buffer = '';
 
       const takeEvent = frame => {
+        if (inv.cancelled) return;
         let name = '', data = '';
         for (const line of frame.split('\n')) {
           if (line.startsWith('event: ')) name = line.slice(7);
@@ -193,16 +281,10 @@ async function handle(ev) {
           turn('chief', 'Chief', out.text);
           if (!sawSentence) {
             sawSentence = true;
-            dc.send(JSON.stringify({
-              type: 'conversation.item.create',
-              item: { type: 'function_call_output', call_id: ev.call_id,
-                      output: JSON.stringify({ answer: out.text }) }
-            }));
-            dc.send(JSON.stringify({ type: 'response.create' }));
-            mouthBusy = true;
+            sendFunctionCallOutput(inv, ev.call_id, out.text);
           } else {
-            sentenceQueue.push(out.text);
-            pumpSentenceQueue();
+            inv.queue.push(out.text);
+            pumpQueue(inv);
           }
         }
 
@@ -211,70 +293,110 @@ async function handle(ev) {
           hold.remove();
           lastAnswer = out.full || out.spoken;
           if (out.failed && !sawSentence) {
-            dc.send(JSON.stringify({
-              type: 'conversation.item.create',
-              item: { type: 'function_call_output', call_id: ev.call_id,
-                      output: JSON.stringify({ answer: out.spoken }) }
-            }));
-            dc.send(JSON.stringify({ type: 'response.create' }));
-            mouthBusy = true;
+            turn('chief', 'Chief', out.spoken);
+            sendFunctionCallOutput(inv, ev.call_id, out.spoken);
           }
           setState('live', 'listening');
         }
       };
 
       while (true) {
+        if (inv.cancelled) return;
         const {value, done} = await reader.read();
         buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
         let cut;
         while ((cut = buffer.indexOf('\n\n')) !== -1) {
+          if (inv.cancelled) return;
           takeEvent(buffer.slice(0, cut));
           buffer = buffer.slice(cut + 2);
         }
         if (done) break;
       }
       if (buffer.trim()) takeEvent(buffer.trim());
-      if (!sawDone) throw new Error('voice stream ended early');
+      if (!sawDone && !inv.cancelled) throw new Error('voice stream ended early');
     } catch (err) {
       hold.remove();
-      sentenceQueue.length = 0;
-      const fallback = "Something went wrong on my end. Nothing's started.";
+      // Neill talked over it (barge-in aborted this invocation) — say nothing extra,
+      // the interruption itself is the answer. Same if the turn already finished
+      // normally before this error landed; re-answering an already-answered call
+      // would be a second, confusing reply to the same question.
+      if (inv.cancelled || sawDone) return;
+
       if (sawSentence) {
         // The mouth already answered the tool call once — a call_id can only be
         // answered once. Any later failure has to land as a normal follow-up,
         // paced the same as everything else, not a second function_call_output.
-        sentenceQueue.push(fallback);
-        pumpSentenceQueue();
+        const fallback = "Something went wrong on my end. Nothing's started.";
+        turn('chief', 'Chief', fallback);
+        inv.queue.push(fallback);
+        pumpQueue(inv);
       } else {
-        dc.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: { type: 'function_call_output', call_id: ev.call_id,
-                  output: JSON.stringify({ answer: fallback }) }
-        }));
-        dc.send(JSON.stringify({ type: 'response.create' }));
-        mouthBusy = true;
+        // The streaming path never got a single word out. Try the plain,
+        // non-streaming path once before giving up — slower, but slower-and-answered
+        // beats fast-and-silent.
+        let spoken = "Something went wrong on my end. Nothing's started.";
+        try {
+          const plain = await fetch('/api/voice/ask', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer }),
+          }).then(r => r.json());
+          if (plain && plain.spoken) {
+            spoken = plain.spoken;
+            lastAnswer = plain.full || plain.spoken;
+          }
+        } catch (fallbackErr) {
+          // Both paths are down — say so, plainly, and stop.
+        }
+        turn('chief', 'Chief', spoken);
+        sendFunctionCallOutput(inv, ev.call_id, spoken);
       }
       setState('live', 'listening');
     }
   }
 
-  if (ev.type === 'response.done') {
-    mouthBusy = false;
-    pumpSentenceQueue();
+  if (ev.type === 'response.created') {
+    const inv = activeInvocation;
+    if (inv && inv.awaitingResponseId) {
+      inv.openResponseId = ev.response?.id ?? null;
+      if (inv.openResponseId) ownResponseIds.add(inv.openResponseId);
+      inv.awaitingResponseId = false;
+    }
+  }
+
+  if (ev.type === 'response.done' || ev.type === 'response.cancelled') {
+    const inv = activeInvocation;
+    if (inv && ev.response?.id === inv.openResponseId) {
+      clearOpenResponse(inv);
+      pumpQueue(inv);
+    }
   }
 
   if (ev.type === 'input_audio_buffer.speech_started') {
-    sentenceQueue.length = 0;
+    // Barge-in: stop queuing more of Chief's own sentences, and stop the in-flight
+    // stream from pushing any more in behind Neill's back.
+    activeInvocation?.abort();
   }
 
-  // What Chief said back, once the mouth has finished saying it.
+  // What Chief said back, once the mouth has finished saying it. Suppressed for any
+  // response WE opened (the tool answer, or a "(Chief continues:)" follow-up) — that
+  // exact text already appeared the instant it streamed in, above. Without this the
+  // panel would show every sentence twice: once as Chief's own words, once as the
+  // mouth's transcript of speaking them.
   if (ev.type === 'response.output_audio_transcript.done') {
-    turn('chief', 'Chief', ev.transcript);
+    if (ownResponseIds.has(ev.response_id)) {
+      ownResponseIds.delete(ev.response_id);
+    } else {
+      turn('chief', 'Chief', ev.transcript);
+    }
   }
 
   if (ev.type === 'error') {
     setState('bad', 'error');
     turn('chief', 'Chief', ev.error?.message || 'Something went wrong.');
+    // A realtime error (e.g. road noise triggering "already has an active response")
+    // doesn't always come with a matching response.done, and mouthBusy latching true
+    // forever would silence every sentence after it for the rest of the drive.
+    if (activeInvocation) { clearOpenResponse(activeInvocation); pumpQueue(activeInvocation); }
   }
 }
 </script>
