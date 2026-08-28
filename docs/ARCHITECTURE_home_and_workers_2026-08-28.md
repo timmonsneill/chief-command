@@ -38,3 +38,11 @@ is plumbing on a design that already assumes it.
 - Providers by seat; the home is hardware-agnostic (rule 4) — the cloud box is "a Linux
   host with Tailscale", nothing more specific.
 - Manual fallback never goes away: Neill can open Claude Code / Codex by hand anywhere.
+
+## Where the home lives (owner, 2026-08-28)
+**Google Cloud, on the owner's existing account.** Rule 5 ("no Google/Gemini") is about
+Google's AI terms, not Google's cloud — Arch already runs on GCP. Conditions: (1) no
+public IP / all inbound closed; Tailscale on the VM is the only way in (rule 3);
+(2) a SEPARATE GCP project from Arch's (patient data — structural isolation, not
+politeness); (3) still no Gemini anywhere. Size: small (e2-small class, no GPU),
+~$15–25/mo. The wall (task 13) is built there, on Linux, once.
