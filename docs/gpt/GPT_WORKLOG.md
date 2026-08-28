@@ -97,3 +97,12 @@ before merging to main. Suite on main: 290 passed. Pushed.
   Proved with a real supervised build (edited + committed in a throwaway clone).
 - Deferred (queue 12): stored merge base + pinned diff options, commit-time size cap,
   pushing job/N when merging is enabled. Queue 10 is DONE by the rework; 11 still open.
+
+## 2026-08-28 · project switching · gpt/project-switching → main
+Jobs now open THEIR project's repo (chief, jess) on its real default branch, get that
+project's lane conventions + its CLAUDE.md/AGENTS.md in the builder prompt, and name the
+project in the record. Arch (no repo) is refused at the door with the arm's-length
+sentence. Picker on the give form follows the Projects tab. Repos outside the configured
+projects root are refused (so tests can never drive the live repo). Voice remains
+answer-only — "for Jess, …" informs Chief's answer, it does not dispatch. Wiring review
+ran a real Jess job against a clone (worked) and found 3 HIGHs, all fixed. 310 tests.
