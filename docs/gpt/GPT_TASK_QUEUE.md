@@ -135,6 +135,14 @@ test log, and never run tests in a worktree whose diff contains anything but
 ask-the-gatekeeper wiring stays; guard 6 will refuse until a real driving tester exists,
 and the job's spoken line says so plainly.
 
+## 11. [ ] Pin the tester's evidence to the version (schema, deliberate)
+`guard_tester_must_cite_artifacts` (schema.sql ~829) matches artifacts on job_id only.
+A screenshot captured for version A would satisfy a tester verdict on version B. Add a
+`reviewed_version` (or `head_version` snapshot) column on artifacts, stamped at capture,
+and make the guard require `a.reviewed_version IS NEW.reviewed_version`. Numbered
+migration + schema.sql in step; `test_live_db_matches_schema` must pass after applying.
+Design with Sol first (it's a guard change).
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.
