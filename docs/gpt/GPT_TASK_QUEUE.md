@@ -189,6 +189,16 @@ in to Claude Code + Codex as that user once. Then, in this order, each with a li
 Design with Sol first (it's the security boundary). Rule 4: no hardcoded /Users paths —
 read the agent user + work dir from seats.toml `[agent_account]`.
 
+## 14. [ ] HOME + WORKERS — Sol design pass, then the worker protocol
+Read docs/ARCHITECTURE_home_and_workers_2026-08-28.md. Design, with Sol (ask-sol.sh):
+(a) the worker protocol — a worker on another machine claims a job, receives the frozen
+bundle/clone source, reports events, artifacts, head_version and result back THROUGH the
+gatekeeper/home API (never the sqlite file); heartbeat + STALLED marking when a worker
+goes silent; per-worker seat lists (what it may build/review) and caps; (b) the home on a
+Linux box — the wall (task 13) built there once; (c) how the voice token step and the app
+move unchanged. Output: a spec with a Feature Acceptance Checklist (rule 9). No code
+until Sol says GO.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.
