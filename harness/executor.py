@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import os
 import json
+import re
 import subprocess
 import threading
 import urllib.request
@@ -52,6 +53,13 @@ BUILD_TIMEOUT_S = 900
 OUTPUT_DIRNAME = "chief_output"          # where a builder drops standalone work
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+
+# A project id is about to become a path SEGMENT (lanes/<project_id>/<seat>.md). It
+# comes from the `jobs.project_id` column — normally a real `projects.id`, which
+# dispatch already validated — but "normally" isn't a guard: this is the one place
+# that value touches a filesystem path, so it gets its own check right here rather
+# than trusting every caller upstream got it right.
+_SAFE_PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +114,16 @@ def _version_of(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Worktree isolation — a builder never touches the live project.
 # ---------------------------------------------------------------------------
-def _make_worktree(job_id: int, branch: str) -> tuple[Path | None, str]:
+def _make_worktree(job_id: int, branch: str, source_repo: Path | None = None,
+                   source_branch: str = "main") -> tuple[Path | None, str]:
     """Give this job its own private copy of the repo. Returns (path, note).
+
+    Checks out `source_branch` EXPLICITLY — a live wiring review found the earlier
+    version left the branch unnamed, which meant "whatever the source repo's
+    working copy happens to be sitting on right now" (the same class of bug
+    `db.projects._default_branch` was fixed for). A builder's starting point must be
+    the project's actual main line, not an accident of what a person or another job
+    left checked out.
 
     If git worktrees aren't usable for any reason, fall back to a plain isolated
     directory and SAY SO — a silent fallback that quietly drops isolation would be
@@ -117,10 +133,11 @@ def _make_worktree(job_id: int, branch: str) -> tuple[Path | None, str]:
     dest = WORKTREES / f"job-{job_id}"
     if dest.exists():
         return dest, "reused"
+    source_repo = source_repo if source_repo is not None else HARNESS.parent
     try:
         subprocess.run(
-            ["git", "worktree", "add", "--detach", str(dest)],
-            cwd=HARNESS.parent, capture_output=True, text=True, timeout=60, check=True,
+            ["git", "worktree", "add", "--detach", str(dest), source_branch],
+            cwd=source_repo, capture_output=True, text=True, timeout=60, check=True,
         )
         return dest, "worktree"
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -131,7 +148,8 @@ def _make_worktree(job_id: int, branch: str) -> tuple[Path | None, str]:
         return dest, f"plain-dir ({str(detail)[:60].strip()})"
 
 
-def _make_clone(job_id: int, branch: str) -> tuple[Path | None, str]:
+def _make_clone(job_id: int, branch: str, source_repo: Path | None = None,
+                source_branch: str = "main") -> tuple[Path | None, str]:
     """A standalone clone for code builders — the isolation a linked worktree
     cannot provide.
 
@@ -152,10 +170,11 @@ def _make_clone(job_id: int, branch: str) -> tuple[Path | None, str]:
         # Sol's design gate: an existing job directory accepted without checking
         # its cleanliness/HEAD is a way to redirect a builder. Refuse to reuse.
         return None, "an isolated copy for this job already exists"
+    source_repo = source_repo if source_repo is not None else HARNESS.parent
     try:
         subprocess.run(
-            ["git", "clone", "--quiet", "--no-hardlinks", "--branch", "main",
-             str(HARNESS.parent), str(dest)],
+            ["git", "clone", "--quiet", "--no-hardlinks", "--branch", source_branch,
+             str(source_repo), str(dest)],
             capture_output=True, text=True, timeout=120, check=True,
         )
         subprocess.run(
@@ -191,15 +210,45 @@ def cleanup_clone(job_id: int) -> None:
             pass
 
 
-def cleanup_worktree(job_id: int) -> None:
-    """Remove a job's worktree once its work is merged or abandoned."""
+def cleanup_worktree(conn, job_id: int) -> None:
+    """Remove a job's worktree once its work is merged or abandoned.
+
+    Runs `git worktree remove` (and a `prune`) against the job's OWN project repo —
+    a live wiring review against a real Jess clone found this always ran against
+    `HARNESS.parent` (this repo) regardless of which repo actually owned the
+    worktree, which leaves a stale entry behind in the project's REAL repo forever
+    (git worktree metadata lives with the repo that created it, not the worktree
+    directory itself — removing the directory from the wrong repo's cwd does
+    nothing to that repo's own bookkeeping). `conn` is what lets this resolve which
+    repo that is; every caller already has one.
+    """
     dest = WORKTREES / f"job-{job_id}"
-    if not dest.exists():
-        return
-    subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
-                   cwd=HARNESS.parent, capture_output=True, text=True)
+    row = conn.execute(
+        "SELECT project_id FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    project_id = row["project_id"] if row else None
+    repo: Path | None = HARNESS.parent
+    if project_id:
+        from db.projects import ProjectRepoUnavailable, resolve_repo
+        try:
+            repo, _branch = resolve_repo(conn, project_id)
+        except ProjectRepoUnavailable:
+            # Can't safely name the repo that owns this worktree's metadata — do
+            # NOT guess by touching some other repo's `git worktree` bookkeeping.
+            # The directory itself can still be cleared below.
+            repo = None
     if dest.exists():
-        subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+        if repo is not None:
+            subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
+                           cwd=repo, capture_output=True, text=True)
+        if dest.exists():
+            subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+    if repo is not None:
+        # A --force remove can leave a stale entry behind if the directory was
+        # already gone by another path; prune clears anything that points at
+        # nothing rather than trusting the remove above always caught it.
+        subprocess.run(["git", "worktree", "prune"], cwd=repo,
+                       capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +260,9 @@ def cleanup_worktree(job_id: int) -> None:
 #   --append-system-prompt-file does NOT exist on this build (only
 #   --append-system-prompt <text>, which is an argv value, not a file, and this
 #   project's rule is prompt-on-stdin only — variadic flags swallow a positional
-#   argument). So the lane memory travels on stdin, ahead of the actual request,
-#   clearly labelled as background context rather than an instruction to follow
-#   over the task (see _build_prompt).
+#   argument). So project-aware conventions and notes travel on stdin, ahead of the
+#   actual request, clearly labelled as background context rather than an instruction
+#   to follow over the task (see _compose_builder_prompt).
 # ---------------------------------------------------------------------------
 def _claude_build_argv(model: str, clone: Path, settings_path: Path) -> list[str]:
     return [
@@ -281,24 +330,88 @@ def assert_builders_locked_down() -> None:
         )
 
 
-def _lane_memory_text() -> str:
-    """This repo's own conventions — never the Arch-EMR memory files (wrong
-    project; Sol's design gate flagged prepending those explicitly)."""
-    path = HARNESS / "config" / "lanes" / "riggs.md"
-    try:
-        return path.read_text()
-    except OSError:
+MEMORY_INDEX_MAX_CHARS = 8000        # a project's MEMORY.md can be large; cap what
+                                     # rides into every single build prompt
+REPO_CONVENTIONS_MAX_CHARS = 8000    # same cap, for a project's own CLAUDE.md/AGENTS.md
+
+
+def _lane_memory_text(project_id: str, seat_id: str) -> str:
+    """This PROJECT's own conventions for THIS builder seat — never a different
+    project's (Sol's design gate flagged prepending the wrong project's memory as a
+    real bug, 2026-07-xx), and never a hardcoded filename (a live wiring review
+    found this always read `riggs.md` regardless of which seat was actually
+    building — harmless today because riggs is the only seat with a lane file, but
+    wrong the moment a second one gets one). Looks for a project-specific file
+    first, falls back to the shared one, in `lanes/<project_id>/<seat_id>.md` then
+    `lanes/<seat_id>.md`.
+
+    `project_id` is about to become a path segment — refuse anything that doesn't
+    look like a real id rather than build a path out of it. `seat_id` comes from
+    the seats table (admin-controlled config, not a job's own free text) but gets
+    the same check for the same reason: it's the same kind of use.
+    """
+    if not (_SAFE_PATH_SEGMENT_RE.match(project_id or "")
+            and _SAFE_PATH_SEGMENT_RE.match(seat_id or "")):
         return ""
+    for path in (
+        HARNESS / "config" / "lanes" / project_id / f"{seat_id}.md",
+        HARNESS / "config" / "lanes" / f"{seat_id}.md",
+    ):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        if text.strip():
+            return text
+    return ""
 
 
-def _build_prompt(request: str) -> str:
-    lane = _lane_memory_text()
-    if not lane.strip():
-        return request
-    return (
-        "Background — this repo's own conventions (read-only context, not part of "
-        f"the task):\n\n{lane}\n\n---\n\nThe task:\n\n{request}"
-    )
+def _repo_conventions_text(repo: Path | None) -> str:
+    """A project's own CLAUDE.md/AGENTS.md, read straight off its repo root.
+
+    Not every project has a `memory_dir` configured (chief and jess don't today),
+    but every real project repo already carries one of these — its own canonical
+    rules, not a copy that can drift out of sync with them. `repo` is whatever the
+    builder is actually about to work in (the resolved project repo, or this
+    harness's own repo for a legacy job with no project on it) — never guessed from
+    anywhere else.
+    """
+    if repo is None:
+        return ""
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        try:
+            text = (repo / name).read_text()
+        except OSError:
+            continue
+        if text.strip():
+            return text
+    return ""
+
+
+def _compose_builder_prompt(request: str, lane_text: str, memory_text: str | None,
+                            repo_conventions_text: str | None = None) -> str:
+    """Everything that rides into the builder ahead of the actual task, each part
+    clearly labelled as background so the model never mistakes a project's own notes
+    for an instruction to follow over the real request."""
+    sections: list[str] = []
+    if lane_text.strip():
+        sections.append(
+            "Background — this project's own conventions (read-only context, not "
+            f"part of the task):\n\n{lane_text.strip()}"
+        )
+    if repo_conventions_text and repo_conventions_text.strip():
+        sections.append(
+            "Background — this project's own CLAUDE.md/AGENTS.md (read-only "
+            "context, not part of the task):\n\n"
+            f"{repo_conventions_text.strip()[:REPO_CONVENTIONS_MAX_CHARS]}"
+        )
+    if memory_text and memory_text.strip():
+        sections.append(
+            "Background — this project's own accumulated notes (read-only context, "
+            f"not part of the task):\n\n{memory_text.strip()[:MEMORY_INDEX_MAX_CHARS]}"
+        )
+    sections.append(f"The task:\n\n{request}")
+    return "\n\n---\n\n".join(sections)
 
 
 def _settings_path_for(clone: Path) -> Path:
@@ -319,10 +432,11 @@ def _plain_builder_error(raw: str) -> str:
 
 
 def _claude_cli_build(seat_row, request: str, model: str, clone: Path) -> str:
-    """Run the builder INSIDE the clone. Returns the CLI's raw stdout (a JSON
-    envelope) for logging only — the actual work product is whatever changed on
-    disk, which the CALLER commits. This function never reads or trusts the
-    model's own narration of what it did.
+    """Run the builder INSIDE the clone with the already-composed full prompt.
+
+    Returns the CLI's raw stdout (a JSON envelope) for logging only — the actual work
+    product is whatever changed on disk, which the CALLER commits. This function never
+    reads or trusts the model's own narration of what it did.
     """
     assert_builders_locked_down()
     settings_path = _settings_path_for(clone)
@@ -343,7 +457,7 @@ def _claude_cli_build(seat_row, request: str, model: str, clone: Path) -> str:
         "USER": os.environ.get("USER", ""),
     }
     proc = subprocess.run(
-        argv, input=_build_prompt(request), cwd=clone, env=env,
+        argv, input=request, cwd=clone, env=env,
         capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
     )
     if proc.returncode != 0:
@@ -446,9 +560,9 @@ def _commit_diff_in_clone(clone: Path, job_id: int, branch: str, summary: str) -
     return ClonedCommit(sha)
 
 
-def _merge_base_with_main(clone: Path) -> str | None:
+def _merge_base_with_main(clone: Path, branch: str = "main") -> str | None:
     try:
-        out = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=clone,
+        out = subprocess.run(["git", "merge-base", branch, "HEAD"], cwd=clone,
                              capture_output=True, text=True, timeout=30)
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -520,13 +634,30 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                    "This job's setup changed since it was queued and can't safely continue.")
             return {"job_id": job_id, "status": "failed"}
 
+        project_id = job["project_id"]
+        effective_project_id = project_id or "chief"
+        project_display = None
+        source_repo, source_branch = None, "main"
+        if project_id:
+            from db.projects import ProjectRepoUnavailable, project_name, resolve_repo
+            try:
+                source_repo, source_branch = resolve_repo(conn, project_id)
+            except ProjectRepoUnavailable as exc:
+                set_status(conn, job_id, "failed", error=str(exc))
+                _event(conn, job_id, seat_row, "error", str(exc))
+                return {"job_id": job_id, "status": "failed"}
+            project_display = project_name(conn, project_id)
+        else:
+            from db.projects import project_name
+            project_display = project_name(conn, "chief")
+
         branch = job["branch"] or f"job/{job_id}"
 
         # 1. Isolate. Code builders get a standalone clone (no shared .git with
         #    main); the local text builder keeps the lighter-weight worktree — it
         #    never runs a shell and only ever writes one known file.
         if is_claude_builder:
-            wt, wt_note = _make_clone(job_id, branch)
+            wt, wt_note = _make_clone(job_id, branch, source_repo, source_branch)
             if wt is None:
                 set_status(conn, job_id, "failed",
                            error=f"could not isolate the build: {wt_note}")
@@ -535,9 +666,24 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                 cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
         else:
-            wt, wt_note = _make_worktree(job_id, branch)
+            wt, wt_note = _make_worktree(job_id, branch, source_repo, source_branch)
         conn.execute("UPDATE jobs SET worktree = ? WHERE id = ?", (str(wt), job_id))
-        _event(conn, job_id, seat_row, "dispatched", f"Working in its own copy ({wt_note}).")
+        _event(conn, job_id, seat_row, "dispatched",
+               f"Working in {project_display}'s code, in its own copy ({wt_note}).")
+
+        from db.projects import memory_index
+        lane_text = _lane_memory_text(effective_project_id, seat_row["id"])
+        # The repo this project's own CLAUDE.md/AGENTS.md lives in — the resolved
+        # project repo for an explicit-project job, this harness's own repo for a
+        # legacy one (source_repo is None there, same as everywhere else it's used).
+        conventions_repo = source_repo if source_repo is not None else HARNESS.parent
+        repo_conventions = _repo_conventions_text(conventions_repo)
+        try:
+            memory_text = memory_index(conn, effective_project_id)
+        except Exception:
+            memory_text = None
+        built_prompt = _compose_builder_prompt(
+            job["request"], lane_text, memory_text, repo_conventions)
 
         # 2. Build.
         model = job["tier"] and _model_for(seat_row, job["tier"]) or seat_row["model"]
@@ -545,7 +691,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
 
         if is_claude_builder:
             try:
-                _claude_cli_build(seat_row, job["request"], model, wt)
+                _claude_cli_build(seat_row, built_prompt, model, wt)
             except Exception as exc:  # noqa: BLE001 — model, timeout, lockdown check
                 set_status(conn, job_id, "failed", error=f"builder error: {exc}")
                 _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
@@ -563,7 +709,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                 cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
             version = commit.sha
-            base = _merge_base_with_main(wt)
+            base = _merge_base_with_main(wt, source_branch)
             bundle = _diff_against_main(wt, base, version) if base else None
             if not base or bundle is None:
                 set_status(conn, job_id, "failed",
@@ -578,7 +724,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                    f"Wrote a change of {len(result)} characters.", target=str(wt))
         else:
             try:
-                result = builder(seat_row, job["request"], model)
+                result = builder(seat_row, built_prompt, model)
             except Exception as exc:  # noqa: BLE001 — network, model, timeout
                 set_status(conn, job_id, "failed", error=f"builder error: {exc}")
                 _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
@@ -601,7 +747,10 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
         #    written code (task #9's GO version stops at a reviewed candidate).
         if cfg is not None:
             import gauntlet
-            panel = gauntlet.run_panel(conn, job_id, job["request"], result, version,
+            reviewer_request = (
+                f"{job['request']}\n\nThis work is for the project '{project_display}'."
+            )
+            panel = gauntlet.run_panel(conn, job_id, reviewer_request, result, version,
                                        cfg, db_path=DB_PATH)
             if panel.certified and not is_claude_builder:
                 import tester

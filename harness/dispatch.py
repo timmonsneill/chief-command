@@ -82,6 +82,7 @@ def dispatch_local(
     origin: str = "text",
     dispatch_key: str | None = None,
     start: bool = True,
+    project_id: str = "chief",
 ) -> LocalDispatch:
     """Record a job and start a real local worker on it. Non-blocking.
 
@@ -107,6 +108,11 @@ def dispatch_local(
     builder_row = seat(conn, builder_seat)
     _refuse_a_panel_that_cannot_hold(conn, roster, families,
                                      builder_row["family"] if builder_row else None)
+    project_row = conn.execute(
+        "SELECT 1 FROM projects WHERE id = ? AND archived = 0", (project_id,)
+    ).fetchone()
+    if project_row is None:
+        raise DispatchRefused(f"unknown project: {project_id}")
 
     # Duplicate protection — a retry must not start the same work twice.
     if dispatch_key:
@@ -145,7 +151,7 @@ def dispatch_local(
         bundle_kind = BUNDLE_KIND_BY_PROVIDER.get(
             builder_row["provider"] if builder_row else "", "text")
         job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin,
-                            bundle_kind=bundle_kind)
+                            bundle_kind=bundle_kind, project_id=project_id)
         conn.execute(
             "UPDATE jobs SET required_reviews = ?, required_review_families = ?, "
             "tier = ?, tier_reason = ?, dispatch_key = ?, branch = ?, bundle_kind = ? "
@@ -317,6 +323,7 @@ def dispatch(
     cfg: dict[str, Any],
     origin: str = "text",
     blocking: bool = False,
+    project_id: str = "chief",
 ) -> Dispatch:
     """Record the job, then spawn it on OpenClaw. In that order, always.
 
@@ -324,12 +331,22 @@ def dispatch(
     sessions_spawn returns a run id immediately, so the voice head can say "on it" and
     keep talking while the work grinds. A blocking dispatch here would reintroduce
     exactly the latency wound that killed v1.
+
+    Stamps `project_id` the same way `dispatch_local` does — this path has no
+    in-process builder today (nothing calls it; see docs/HANDOFF_2026-08-27.md), but
+    a job's project must not depend on which of the two entrances recorded it.
     """
     row = seat(conn, builder_seat)
     if row is None:
         raise DispatchRefused(f"unknown seat: {builder_seat}")
     if not row["enabled"]:
         raise DispatchRefused(f"seat '{builder_seat}' is disabled")
+
+    project_row = conn.execute(
+        "SELECT 1 FROM projects WHERE id = ? AND archived = 0", (project_id,)
+    ).fetchone()
+    if project_row is None:
+        raise DispatchRefused(f"unknown project: {project_id}")
 
     # OpenClaw core has NO per-agent budget of any kind. If we don't check here,
     # nothing does.
@@ -355,7 +372,7 @@ def dispatch(
     try:
         bundle_kind = BUNDLE_KIND_BY_PROVIDER.get(row["provider"], "text")
         job_id = create_job(conn, request, builder_seat=builder_seat, origin=origin,
-                            bundle_kind=bundle_kind)
+                            bundle_kind=bundle_kind, project_id=project_id)
         conn.execute(
             "UPDATE jobs SET required_reviews = ?, required_review_families = ?, "
             "bundle_kind = ? WHERE id = ?",

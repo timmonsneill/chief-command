@@ -130,7 +130,7 @@ def test_the_local_worker_actually_produces_and_parks_for_review(conn):
     with pytest.raises(GuardViolation):
         set_status(conn, d.job_id, "done")
 
-    executor.cleanup_worktree(d.job_id)
+    executor.cleanup_worktree(conn, d.job_id)
 
 
 def test_a_metered_builder_reserves_money_before_it_is_called(conn, monkeypatch):

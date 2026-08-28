@@ -897,7 +897,7 @@ def _ask_to_ship(conn, job_id: int, cfg: dict[str, Any], db_path: Path) -> None:
             # Shipped. Its private copy of the repo has done its job.
             import executor
             try:
-                executor.cleanup_worktree(job_id)
+                executor.cleanup_worktree(conn, job_id)
             except Exception:                  # noqa: BLE001 — cleanup is best-effort
                 pass
             return

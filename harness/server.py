@@ -434,8 +434,29 @@ async def dispatch_endpoint(request: Request):
     # The client stamps a nonce so a double-tap or a re-send can't start it twice.
     nonce = (body.get("nonce") or "").strip() or None
     requested_builder = (body.get("builder") or "").strip()
+    requested_project = (body.get("project") or "").strip() or "chief"
 
     c = db()
+    proj_row = c.execute(
+        "SELECT name, repo_path FROM projects WHERE id = ? AND archived = 0",
+        (requested_project,),
+    ).fetchone()
+    if proj_row is None:
+        return JSONResponse({"error": "That project doesn't exist."}, status_code=400)
+    # Refused HERE, at the door, never after a job sits around and fails at build
+    # time — the picker itself already hides these (web/index.html), this is the
+    # backstop for a direct API call. Only the "no repo at all" case (Arch, Decision
+    # C) is checked this early: it's a plain column read, not a filesystem/git
+    # probe, so it's cheap and safe to do before a job even exists. The deeper
+    # checks (does the folder exist, is it really git, which branch) still happen
+    # at build time in executor.run_job — they need to touch disk/git, which isn't
+    # something to redo speculatively on every dispatch call.
+    if not proj_row["repo_path"]:
+        return JSONResponse(
+            {"error": "That project is kept at arm's length — the team can read "
+                      "its notes but not touch its code."},
+            status_code=400,
+        )
     if requested_builder:
         row = c.execute(
             "SELECT id, provider, enabled FROM seats WHERE id = ?", (requested_builder,)
@@ -464,16 +485,19 @@ async def dispatch_endpoint(request: Request):
     try:
         d = dispatch_mod.dispatch_local(
             c, text, builder, origin="text", dispatch_key=nonce,
+            project_id=requested_project,
         )
     except dispatch_mod.DispatchRefused as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
     who = builder.title()
+    project_note = (f" — working in {proj_row['name']}"
+                    if requested_project != "chief" else "")
     if d.reused:
         reply = f"Already on it — {who} picked that up a moment ago."
     else:
-        reply = (f"{who} is on it. A panel of different models will check the work "
-                 "before it's called done.")
+        reply = (f"{who} is on it{project_note}. A panel of different models will "
+                 "check the work before it's called done.")
     return {"job_id": d.job_id, "reused": d.reused, "reply": reply, "builder": builder}
 
 
@@ -737,6 +761,10 @@ async def voice_ask(request: Request):
     """
     body = await request.json()
     said = (body.get("said") or "").strip()
+    # Voice cannot dispatch a job — this only informs Chief's ANSWER (see
+    # chief.ask_chief's "PROJECT HE NAMED" section), on the fallback text path
+    # below. Starting work is still only ever /api/dispatch + the give form.
+    project = (body.get("project") or "").strip()
     if not said:
         return {"spoken": "I didn't catch that."}
     if _is_chiefs_own_continuation(said):
@@ -753,6 +781,9 @@ async def voice_ask(request: Request):
     # back to the free-but-slow subprocess brain when there's no API key to think with.
     if os.environ.get("OPENAI_API_KEY"):
         async with _chief_lock:
+            # `project` (above) is NOT threaded in here — the held live session has
+            # its own memory/remember() plumbing this doesn't hook into (see the
+            # project-switching build notes). Only the fallback branch below hears it.
             session = _live_session()
             try:
                 pieces: list[str] = []
@@ -783,7 +814,10 @@ async def voice_ask(request: Request):
         # event loop so one slow "are you sure" turn can't stall every other request
         # this Mac is serving (health checks, the dashboard, another tab) for minutes.
         from starlette.concurrency import run_in_threadpool
-        out = await run_in_threadpool(ask_chief, said, context=context, pushed_back=pushed_back)
+        chief_kwargs = {"context": context, "pushed_back": pushed_back}
+        if project:
+            chief_kwargs["project"] = project
+        out = await run_in_threadpool(ask_chief, said, **chief_kwargs)
 
     _record_voice_event(out)
     return out
@@ -855,6 +889,10 @@ async def voice_ask_stream(request: Request):
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     said = (body.get("said") or "").strip()
+    # Voice cannot dispatch a job — this only informs Chief's ANSWER (see
+    # chief.ask_chief's "PROJECT HE NAMED" section), on the fallback text path
+    # below. Starting work is still only ever /api/dispatch + the give form.
+    project = (body.get("project") or "").strip()
 
     if not said:
         async def _empty():
@@ -876,6 +914,10 @@ async def voice_ask_stream(request: Request):
 
     if os.environ.get("OPENAI_API_KEY"):
         queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
+        # `project` (above) is NOT threaded into the live session here — voice
+        # cannot dispatch a job either way, and the held session's own memory/
+        # remember() plumbing has no per-turn hook for this yet; only the fallback
+        # branch further down hears it.
         # Fire-and-forget on purpose — see _live_voice_producer's docstring. This task
         # is NOT awaited by the generator below, so the generator's own cancellation
         # (a dropped phone) cannot reach it. _spawn_background is what keeps it alive
@@ -900,7 +942,10 @@ async def voice_ask_stream(request: Request):
         from starlette.concurrency import run_in_threadpool
         talking_about = (body.get("context") or "").strip()
         context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
-        out = await run_in_threadpool(ask_chief, said, context=context, pushed_back=pushed_back)
+        chief_kwargs = {"context": context, "pushed_back": pushed_back}
+        if project:
+            chief_kwargs["project"] = project
+        out = await run_in_threadpool(ask_chief, said, **chief_kwargs)
         yield _sse("sentence", {"text": out["spoken"]})
         _record_voice_event(out)
         yield _sse("done", out)
