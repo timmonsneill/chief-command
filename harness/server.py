@@ -220,7 +220,38 @@ def state():
             "SELECT COUNT(*) n FROM jobs WHERE project_id=?", (p["id"],)
         ).fetchone()["n"]
 
-    return {"seats": seats, "jobs": jobs, "projects": projects}
+    return {"seats": seats, "jobs": jobs, "projects": projects,
+            "usage_week": _usage_week()}
+
+
+# What the subscription seats have used this week, in words. Read from the tools' own
+# session logs on disk (harness/usage_local.py) — those can be gigabytes, so this is
+# computed at most once every few minutes, never on every dashboard poll.
+_USAGE_CACHE: dict = {"at": 0.0, "value": None}
+_USAGE_TTL_S = 300
+
+
+def _usage_week() -> dict:
+    import time
+    now = time.monotonic()
+    if _USAGE_CACHE["value"] is not None and now - _USAGE_CACHE["at"] < _USAGE_TTL_S:
+        return _USAGE_CACHE["value"]
+    try:
+        from usage_local import in_plain_english, local_usage
+        u = local_usage(days=7)
+        value = {
+            "summary": in_plain_english(u, 7).splitlines(),
+            "families": {
+                fam: {"sessions": x.sessions, "words_written": int(x.output_tokens * 0.75),
+                      "allowance_used_percent": x.allowance_used_percent}
+                for fam, x in u.items()
+            },
+        }
+    except Exception as exc:  # noqa: BLE001 — the dashboard must never die on this
+        value = {"summary": ["Couldn't read this week's usage right now."],
+                 "families": {}, "error": str(exc)[:120]}
+    _USAGE_CACHE.update(at=now, value=value)
+    return value
 
 
 def _why_blocked(c, j) -> str | None:

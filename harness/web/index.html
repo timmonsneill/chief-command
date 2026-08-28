@@ -337,7 +337,13 @@ async function refresh() {
       </div>
     </div>`).join('') : '<div class="empty">Nothing yet. Ask Chief to build something.</div>';
 
-  $('#seats').innerHTML = s.seats.map(x => {
+  // This week, for the flat-rate seats (Claude, Codex) — the ones the daily-cents bars
+  // below can't show, because their limit is a weekly allowance, not money.
+  const week = s.usage_week && s.usage_week.summary ? s.usage_week.summary : [];
+  $('#seats').innerHTML = (week.length ? `<div class="seat" style="display:block">
+      <div class="nm">This week</div>
+      ${week.map(line => `<div class="md" style="margin-top:4px">${line}</div>`).join('')}
+    </div>` : '') + s.seats.map(x => {
     const cap = x.daily_cap_cents;
     const pct = cap ? Math.min(100, (x.spent_today_cents / cap) * 100) : 0;
     return `<div class="seat">
