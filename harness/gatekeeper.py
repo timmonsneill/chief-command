@@ -63,6 +63,7 @@ from typing import Any, Callable
 import git_policy
 
 from db.jobs import GuardViolation, connect, record_usage, seat, set_status
+from db.projects import ProjectRepoUnavailable, resolve_repo
 
 HARNESS = Path(__file__).resolve().parent
 REPO = HARNESS.parent
@@ -71,6 +72,22 @@ DB_PATH = HARNESS / "db" / "chief.db"
 TOKEN_PATH = Path.home() / ".chief" / "gatekeeper.token"
 MAX_BODY_BYTES = 64 * 1024
 MERGE_INTO = "main"
+
+
+def _repo_and_branch_for_job(conn, project_id: str | None) -> tuple[Path, str]:
+    """Which repo + default branch a merge applies to.
+
+    A job with no project on it (every job before this feature, and every existing
+    gatekeeper test's disposable fixture) keeps using the module's OWN REPO/
+    MERGE_INTO, read live here rather than captured at import time — that's what
+    keeps `monkeypatch.setattr(gatekeeper, "REPO", tmp)` working unchanged in every
+    existing test. A job that DOES name a project resolves THAT project's repo, and
+    if it can't, the caller must refuse the merge rather than silently falling back
+    to a different repo than the one the panel actually reviewed.
+    """
+    if not project_id:
+        return REPO, MERGE_INTO
+    return resolve_repo(conn, project_id)
 
 # A branch name we are willing to merge. Deliberately narrow: `jobs.branch` is written
 # by the same code an agent controls, and `git rev-parse --verify` accepts REVISION
@@ -193,6 +210,11 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     if job["status"] != "done":
         raise _no("that work hasn't finished its checks yet, so there's nothing to merge")
 
+    try:
+        repo, merge_into = _repo_and_branch_for_job(conn, job["project_id"])
+    except ProjectRepoUnavailable as exc:
+        raise _no(str(exc))
+
     version = job["head_version"]
     if not version:
         raise _no("nothing was actually put forward — there's no finished version to merge")
@@ -239,7 +261,7 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     if not BRANCH_RE.match(branch):
         raise _no("there's no finished branch of code to merge for that job")
 
-    tip = _branch_tip(branch)
+    tip = _branch_tip(branch, repo)
     if tip is None:
         raise _no("there's no finished branch of code to merge for that job")
 
@@ -266,35 +288,35 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
     # here from anything about the branch itself.
     kind = job["bundle_kind"] or "text"
     if kind == "diff":
-        base = subprocess.run(["git", "merge-base", MERGE_INTO, tip], cwd=REPO,
+        base = subprocess.run(["git", "merge-base", merge_into, tip], cwd=repo,
                               capture_output=True, text=True)
         if base.returncode != 0 or not base.stdout.strip():
             raise _no("that branch shares no history with main, so there's nothing "
                       "safe to compare it against")
         base_sha = base.stdout.strip()
-        bundle = _diff_bundle(base_sha, tip)
+        bundle = _diff_bundle(base_sha, tip, repo)
         if bundle is None or bundle != (job["result"] or ""):
             raise _no("what's on that branch doesn't match what the reviewers "
                       "actually read, so it can't be merged as reviewed")
-        lines = _range_diff_lines(base_sha, tip)
+        lines = _range_diff_lines(base_sha, tip, repo)
         bad = (["(could not verify the branch's change is safe to merge)"]
                if lines is None else git_policy.disallowed_paths(*lines))
         if bad:
             raise _no("that branch changes things that can't be merged as reviewed "
                       f"({_clean(', '.join(bad), 160)})")
     else:
-        if not _commit_holds_the_reviewed_work(tip, job_id, job["result"]):
+        if not _commit_holds_the_reviewed_work(tip, job_id, job["result"], repo):
             raise _no("what's on that branch isn't what the reviewers read, "
                           "so it can't be merged as reviewed")
         # ...and NOTHING ELSE. A commit with the reviewed file plus one more file is
         # a reviewed file and an unreviewed one. The panel read one thing; one thing
         # merges.
-        extra = _unreviewed_files_in(tip, job_id)
+        extra = _unreviewed_files_in(tip, job_id, repo, merge_into)
         if extra:
             raise _no("that branch changes things the reviewers never saw "
                           f"({_clean(', '.join(extra), 160)}), so it can't be merged as reviewed")
 
-    if not _repo_is_ready():
+    if not _repo_is_ready(repo, merge_into):
         raise _no("the project folder has unfinished changes in it, so it isn't "
                       "safe to merge right now")
 
@@ -319,18 +341,18 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
         # Re-resolve under the lock and merge the SHA, never the name. Between the check
         # above and `git merge refs/heads/<branch>`, a builder could move the branch;
         # merging by name would then merge whatever it points at now.
-        tip = _branch_tip(branch)
+        tip = _branch_tip(branch, repo)
         if tip is None or not _same_commit(tip, version):
             raise _no("the code on that branch changed while the merge was being "
                       "checked, so it needs checking again")
         # The TARGET is re-checked under the lock too: between the check above and
         # here, another process could have checked out a different branch.
-        if not _repo_is_ready():
+        if not _repo_is_ready(repo, merge_into):
             raise _no("the project folder changed while the merge was being checked, "
                       "so it isn't safe to merge right now")
-        before = _main_tip()
+        before = _main_tip(repo, merge_into)
 
-        commit = _git_merge(tip)
+        commit = _git_merge(tip, repo)
         if commit is None:
             # Nothing committed to main and no database transaction was ever opened —
             # there is nothing to roll back on either side.
@@ -344,13 +366,13 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
                 conn.execute("ROLLBACK")
                 # git merged, the record refused it. Put main back exactly where it
                 # was, so the record and the repository never disagree about shipping.
-                _reset_main_to(before)
+                _reset_main_to(before, repo)
                 raise _no(_plain(exc)) from exc
             try:
                 conn.execute("COMMIT")
             except sqlite3.Error:
                 # git merged, the record couldn't say so. Same undo, different cause.
-                _reset_main_to(before)
+                _reset_main_to(before, repo)
                 raise
         except BaseException:
             # Never leave a transaction open on a connection somebody else will reuse.
@@ -379,10 +401,10 @@ def _plain(exc: Exception) -> str:
     return str(exc).replace("guard: ", "").strip() or "the record wouldn't accept it"
 
 
-def _branch_tip(branch: str) -> str | None:
+def _branch_tip(branch: str, repo: Path) -> str | None:
     """The commit a BRANCH points at — refs/heads/ so nothing else can be meant."""
     out = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"],
-                         cwd=REPO, capture_output=True, text=True)
+                         cwd=repo, capture_output=True, text=True)
     return out.stdout.strip() or None if out.returncode == 0 else None
 
 
@@ -410,107 +432,110 @@ def _same_commit(tip: str, version: str) -> bool:
 REVIEWED_FILE = "chief_output/job_{job_id}.txt"     # where executor.py commits the work
 
 
-def _commit_holds_the_reviewed_work(commit: str, job_id: int, reviewed: str | None) -> bool:
+def _commit_holds_the_reviewed_work(commit: str, job_id: int, reviewed: str | None,
+                                    repo: Path) -> bool:
     """Is the text the panel reviewed present, unchanged, in this exact commit?"""
     if reviewed is None:
         return False
     out = subprocess.run(["git", "show", f"{commit}:{REVIEWED_FILE.format(job_id=job_id)}"],
-                         cwd=REPO, capture_output=True, text=True)
+                         cwd=repo, capture_output=True, text=True)
     return out.returncode == 0 and out.stdout == reviewed
 
 
-def _unreviewed_files_in(commit: str, job_id: int) -> list[str]:
+def _unreviewed_files_in(commit: str, job_id: int, repo: Path,
+                         merge_into: str) -> list[str]:
     """Every path the branch changes relative to main, except the one reviewed file."""
-    base = subprocess.run(["git", "merge-base", MERGE_INTO, commit], cwd=REPO,
+    base = subprocess.run(["git", "merge-base", merge_into, commit], cwd=repo,
                           capture_output=True, text=True)
     if base.returncode != 0 or not base.stdout.strip():
         return ["<no common history with main>"]
     diff = subprocess.run(["git", "diff", "--name-only", f"{base.stdout.strip()}..{commit}"],
-                          cwd=REPO, capture_output=True, text=True)
+                          cwd=repo, capture_output=True, text=True)
     if diff.returncode != 0:
         return ["<could not list the branch's changes>"]
     allowed = REVIEWED_FILE.format(job_id=job_id)
     return sorted(p for p in diff.stdout.splitlines() if p.strip() and p.strip() != allowed)
 
 
-def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]] | None:
+def _range_diff_lines(base: str, tip: str,
+                      repo: Path) -> tuple[list[str], list[str]] | None:
     """`git diff --raw` and `git diff --numstat` for one COMMITTED range, split
     into lines — the same shape git_policy.disallowed_paths() reads from
     executor.py's staged-changes check, applied here to a committed range instead.
     Returns None if either command failed — the caller must treat that as a
     refusal, never as "nothing to flag"."""
-    raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=REPO,
+    raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=repo,
                          capture_output=True, text=True)
-    numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=REPO,
+    numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=repo,
                              capture_output=True, text=True)
     if raw.returncode != 0 or numstat.returncode != 0:
         return None
     return (raw.stdout.splitlines(), numstat.stdout.splitlines())
 
 
-def _diff_bundle(base: str, tip: str) -> str | None:
+def _diff_bundle(base: str, tip: str, repo: Path) -> str | None:
     """The exact text a 'diff'-kind job's panel reviewed — recomputed with the
     SAME command used when it was stored (executor._diff_against_main), so
     equality here means fidelity to what was actually shown, not luck."""
-    out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=REPO,
+    out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=repo,
                          capture_output=True, text=True)
     return out.stdout if out.returncode == 0 else None
 
 
-def _repo_is_ready() -> bool:
+def _repo_is_ready(repo: Path, merge_into: str) -> bool:
     """On the branch we merge into, with nothing half-done in the folder.
 
     Merging into a detached HEAD orphans the result; merging over the owner's own
     uncommitted work risks losing it when a failed merge is aborted.
     """
     head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                          cwd=REPO, capture_output=True, text=True)
-    if head.returncode != 0 or head.stdout.strip() != MERGE_INTO:
+                          cwd=repo, capture_output=True, text=True)
+    if head.returncode != 0 or head.stdout.strip() != merge_into:
         return False
     dirty = subprocess.run(["git", "status", "--porcelain"],
-                           cwd=REPO, capture_output=True, text=True)
+                           cwd=repo, capture_output=True, text=True)
     return dirty.returncode == 0 and not dirty.stdout.strip()
 
 
-def _git_merge(commit: str) -> str | None:
+def _git_merge(commit: str, repo: Path) -> str | None:
     """Merge one exact commit. Takes a SHA, not a ref, on purpose."""
     try:
         proc = subprocess.run(["git", "merge", "--no-ff", "--no-edit", commit],
-                              cwd=REPO, capture_output=True, text=True, timeout=120)
+                              cwd=repo, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        _abort_any_merge()
+        _abort_any_merge(repo)
         return None
     if proc.returncode != 0:
         # Leave nothing half-merged behind. A conflicted tree that nobody is looking at
         # is worse than a refusal.
-        _abort_any_merge()
+        _abort_any_merge(repo)
         return None
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                           capture_output=True, text=True)
     return head.stdout.strip()[:12] or None
 
 
-def _main_tip() -> str | None:
-    out = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{MERGE_INTO}^{{commit}}"],
-                         cwd=REPO, capture_output=True, text=True)
+def _main_tip(repo: Path, merge_into: str) -> str | None:
+    out = subprocess.run(["git", "rev-parse", "--verify", f"refs/heads/{merge_into}^{{commit}}"],
+                         cwd=repo, capture_output=True, text=True)
     return out.stdout.strip() or None if out.returncode == 0 else None
 
 
-def _reset_main_to(commit: str | None) -> None:
+def _reset_main_to(commit: str | None, repo: Path) -> None:
     """Undo a merge whose record failed to commit. Only ever called with the tip that
     was captured moments earlier under the merge lock, on a tree verified clean."""
     if commit:
-        subprocess.run(["git", "reset", "--hard", commit], cwd=REPO, capture_output=True)
+        subprocess.run(["git", "reset", "--hard", commit], cwd=repo, capture_output=True)
 
 
-def _abort_any_merge() -> None:
+def _abort_any_merge(repo: Path) -> None:
     """Undo a half-finished merge — and ONLY a half-finished merge.
 
     `git merge --abort` is `git reset --merge` underneath, which will discard the
     owner's uncommitted work if no merge is actually in progress. Check first.
     """
-    if (REPO / ".git" / "MERGE_HEAD").exists():
-        subprocess.run(["git", "merge", "--abort"], cwd=REPO, capture_output=True)
+    if (repo / ".git" / "MERGE_HEAD").exists():
+        subprocess.run(["git", "merge", "--abort"], cwd=repo, capture_output=True)
 
 
 # ---------------------------------------------------------------------------

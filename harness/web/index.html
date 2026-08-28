@@ -223,6 +223,7 @@
         <option value="">Local (free)</option>
         <option value="riggs">Riggs (Claude)</option>
       </select>
+      <select id="giveProject" title="Which project"></select>
       <input id="giveIn" placeholder="Give the team a job to build…" autocomplete="off">
       <button id="giveBtn">Build it</button>
     </form>
@@ -304,9 +305,10 @@ $('#give').onsubmit = async e => {
   $('#giveMsg').textContent = 'Sending it over…';
   try {
     const builder = $('#giveBuilder').value;
+    const project = $('#giveProject').value;
     const r = await fetch('/api/dispatch', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text, nonce, builder})
+      body: JSON.stringify({text, nonce, builder, project})
     }).then(r => r.json());
     $('#giveMsg').textContent = r.reply || r.error || '';
     refresh();
@@ -321,6 +323,15 @@ $('#give').onsubmit = async e => {
 
 async function refresh() {
   const s = await fetch('/api/state').then(r => r.json());
+
+  const gp = $('#giveProject');
+  if (s.projects && s.projects.length) {
+    const cur = gp.value;
+    gp.innerHTML = s.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    if (s.projects.find(p => p.id === cur)) gp.value = cur;
+    else gp.value = SELECTED_PROJECT && s.projects.find(p => p.id === SELECTED_PROJECT)
+      ? SELECTED_PROJECT : s.projects[0].id;
+  }
 
   $('#jobs').innerHTML = s.jobs.length ? s.jobs.map(j => `
     <div class="job">

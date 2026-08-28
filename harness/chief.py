@@ -148,13 +148,21 @@ ASK_CHIEF_TOOL = {
                 "type": "string",
                 "description": "What you two were just talking about, if it matters.",
             },
+            "project": {
+                "type": "string",
+                "description": (
+                    "Which project he's talking about, if he named one (e.g. "
+                    "'chief', 'jess', 'arch'). Leave blank if he didn't say."
+                ),
+            },
         },
         "required": ["said"],
     },
 }
 
 
-def ask_chief(said: str, context: str = "", pushed_back: bool = False) -> dict[str, Any]:
+def ask_chief(said: str, context: str = "", pushed_back: bool = False,
+              project: str = "") -> dict[str, Any]:
     """Everything Neill says comes through here. Chief decides.
 
     Returns both a SPOKEN answer (short, for the voice) and the full text (for the log)
@@ -167,6 +175,8 @@ def ask_chief(said: str, context: str = "", pushed_back: bool = False) -> dict[s
     prompt = CHIEF_PROMPT
     if context:
         prompt += f"\n\n## WHAT YOU WERE JUST TALKING ABOUT\n{context}"
+    if project:
+        prompt += f"\n\n## PROJECT HE NAMED\n{project}"
     prompt += f"\n\n## HE JUST SAID\n{said}"
 
     t0 = time.time()

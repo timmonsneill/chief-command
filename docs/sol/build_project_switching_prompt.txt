@@ -1,0 +1,661 @@
+You are working in a git worktree of the "chief-command" repo, on branch
+gpt/project-switching. Make the edits described below directly with your file tools.
+Do NOT commit — the orchestrating agent (Sol Riggs) will verify and commit after you
+finish. Do not touch anything outside harness/ and docs/sol/ (this prompt file itself
+needs no edits).
+
+============================================================================
+CONVENTIONS THAT ARE LOCKED — violating these is a failed build, not a style note
+============================================================================
+- Python only, this is the `harness/` v2 code. Never touch `backend/`/`frontend/` (v1,
+  frozen).
+- No Google/Gemini anywhere.
+- Providers are referenced by SEAT id in orchestration code, never by vendor name.
+- Local model output never ships without a higher-tier cross-family review — enforced
+  by DB triggers in harness/db/schema.sql. Never write code that routes around a guard.
+- SQL migrations in harness/db/migrations/ are immutable once applied, only ever add
+  the next number. FOR THIS TASK: no new migration is needed. `jobs.project_id` and the
+  `projects` table already exist in both harness/db/schema.sql and the live database
+  (verified: `PRAGMA table_info(jobs)` on harness/db/chief.db already shows
+  project_id). Do not add a migration file.
+- Comments explain WHY a check exists (often citing what it prevents), never restate
+  the next line.
+- Plain English ONLY in anything a human reads at a glance: `spoken_summary`, event
+  `detail` text, refusal messages, dispatch replies. No filenames, no tool names, no
+  jargon ("429", "the migration", "the endpoint", "cwd").
+- Tests live in harness/tests/, run with `.venv/bin/python -m pytest harness/tests/ -q`
+  (from repo root — the worktree has no .venv; the orchestrator runs this from the main
+  checkout's venv, you don't need to run it, but write tests that WILL pass under it).
+- Fail closed, name the thing that failed in plain words, never guess.
+
+============================================================================
+THE FEATURE, one paragraph
+============================================================================
+Neill has 3 projects tracked in the `projects` table: chief (this repo), jess (a
+separate repo, ~/code-projects/personal-assist), and arch (repo_path is NULL on
+purpose — Decision C: the fleet reads Arch's notes but must NEVER touch its code or
+patient data). Today every job's isolation (`executor._make_clone` /
+`_make_worktree`) always uses THIS repo (chief-command) regardless of which project a
+job is actually for, and the builder's prompt never includes the target project's own
+conventions or notes. Wire real per-project repo resolution through dispatch, the
+builder, and the merge gate.
+
+============================================================================
+DESIGN DECISION — read this before writing any code, it resolves every backward-
+compatibility question below
+============================================================================
+A job's `project_id` column is the switch:
+
+  - project_id IS NULL/empty  → LEGACY PATH. Everything behaves EXACTLY as it does
+    today: executor isolates against this repo (harness's own checkout) on branch
+    "main" via the EXISTING defaults already baked into `_make_worktree`/`_make_clone`
+    (their `HARNESS.parent` fallback); gatekeeper.merge() uses the module-level
+    `REPO`/`MERGE_INTO` exactly as it does today. This is what makes every existing
+    test in harness/tests/ keep passing unmodified — none of them ever set
+    `jobs.project_id` today, so none of them are affected by anything in this task.
+
+  - project_id IS SET (including "chief") → resolve the ACTUAL repo + default branch
+    from the `projects` table (db/projects.py), for every project uniformly, no
+    special-casing of "chief". If resolution fails, the job fails with a plain-English
+    reason before any isolation/clone/worktree is attempted.
+
+Going forward, `dispatch_local()` will ALWAYS stamp an explicit project_id (defaulting
+to "chief" when the caller doesn't say) onto every NEWLY dispatched job — so this is a
+real, live path for ordinary chief-command builds too, not just jess/arch. That's
+intentional; it's what makes "which project" a first-class fact on every job from now
+on, while every job/test that predates this feature (project_id NULL) is untouched.
+
+============================================================================
+1) harness/db/projects.py — repo resolution
+============================================================================
+Add (near the top, after the existing imports — you'll need `subprocess`):
+
+```python
+class ProjectRepoUnavailable(RuntimeError):
+    """Why a job can't get a working copy of this project's code — always plain
+    English, this string is shown to Neill and written into the job's own record."""
+
+
+def resolve_repo(conn, project_id: str) -> tuple[Path, str]:
+    """The actual git repo directory + its default branch name for a project.
+
+    Never guesses: a project with no repo_path (Arch, Decision C — the fleet reads
+    its notes but must never touch its code or patient data), a repo_path that isn't
+    on this machine, or a folder that isn't really a git repo, all raise
+    ProjectRepoUnavailable with a plain sentence rather than silently falling back to
+    some other repo. Falling back would be worse than failing: it would build the
+    wrong project's code and nobody would notice until review.
+    """
+    row = conn.execute(
+        "SELECT repo_path FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise ProjectRepoUnavailable("That project isn't set up here.")
+    if not row["repo_path"]:
+        raise ProjectRepoUnavailable(
+            "That project is kept at arm's length — the team can read its notes "
+            "but not touch its code."
+        )
+    path = Path(row["repo_path"]).expanduser()   # never a hardcoded /Users path
+    if not path.is_dir():
+        raise ProjectRepoUnavailable(
+            "That project's code isn't where it's supposed to be on this machine."
+        )
+    check = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"], cwd=path,
+        capture_output=True, text=True, timeout=10,
+    )
+    if check.returncode != 0 or check.stdout.strip() != "true":
+        raise ProjectRepoUnavailable(
+            "That project's folder isn't set up as a real copy of the code."
+        )
+    return path, _default_branch(path)
+
+
+def _default_branch(repo: Path) -> str:
+    """This repo's own main line — never assume 'main' (rule: no hardcoded machine/
+    project-specific assumptions). Tries the remote's HEAD first (works on a real
+    clone with an origin), then the current branch of a plain local repo (what a
+    disposable test fixture is), then falls back to 'main' as the last resort."""
+    out = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo,
+        capture_output=True, text=True, timeout=10,
+    )
+    if out.returncode == 0 and out.stdout.strip():
+        return out.stdout.strip().rsplit("/", 1)[-1]
+    out = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+        capture_output=True, text=True, timeout=10,
+    )
+    if out.returncode == 0 and out.stdout.strip() and out.stdout.strip() != "HEAD":
+        return out.stdout.strip()
+    return "main"
+
+
+def project_name(conn, project_id: str) -> str:
+    """Plain-English display name for a project id, falling back to the id itself
+    so a caller building a sentence never has to special-case 'not found'."""
+    row = conn.execute(
+        "SELECT name FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    return row["name"] if row and row["name"] else project_id
+```
+
+Add `import subprocess` to the top imports.
+
+============================================================================
+2) harness/executor.py — resolve the job's repo before isolating; feed the project's
+   own conventions + notes into the builder prompt
+============================================================================
+
+a) `_make_worktree` and `_make_clone` gain optional source-repo params, defaulting to
+   today's exact behavior so every existing direct call keeps working unmodified:
+
+```python
+def _make_worktree(job_id: int, branch: str, source_repo: Path | None = None) -> tuple[Path | None, str]:
+    ...
+    source_repo = source_repo if source_repo is not None else HARNESS.parent
+    ...
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(dest)],
+        cwd=source_repo, ...
+    )
+```
+
+```python
+def _make_clone(job_id: int, branch: str, source_repo: Path | None = None,
+                source_branch: str = "main") -> tuple[Path | None, str]:
+    ...
+    source_repo = source_repo if source_repo is not None else HARNESS.parent
+    ...
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", "--branch", source_branch,
+         str(source_repo), str(dest)],
+        ...
+    )
+```
+
+Keep every other line of these two functions as-is (the WORKTREES/CLONES layout, the
+refuse-to-reuse behavior, the plain-dir fallback, the docstrings — just widen the
+signature and swap the hardcoded `HARNESS.parent` / `"main"` for the new params with
+that same value as the default).
+
+b) `_merge_base_with_main` gains a `branch` param, default `"main"` (unchanged
+   behavior when not passed):
+
+```python
+def _merge_base_with_main(clone: Path, branch: str = "main") -> str | None:
+    ...
+    out = subprocess.run(["git", "merge-base", branch, "HEAD"], cwd=clone, ...)
+```
+
+c) Replace `_lane_memory_text()` (no args) with a project-aware version, and add a
+   prompt composer. Delete the old `_build_prompt(request)` — nothing else calls it
+   (grep to confirm before deleting).
+
+```python
+MEMORY_INDEX_MAX_CHARS = 8000   # a project's MEMORY.md can be large; cap what rides
+                                 # into every single build prompt
+
+
+def _lane_memory_text(project_id: str) -> str:
+    """This PROJECT's own conventions — never a different project's (Sol's design
+    gate flagged prepending the wrong project's memory as a real bug, 2026-07-xx).
+    Looks for a project-specific file first, falls back to the shared one."""
+    for path in (
+        HARNESS / "config" / "lanes" / project_id / "riggs.md",
+        HARNESS / "config" / "lanes" / "riggs.md",
+    ):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        if text.strip():
+            return text
+    return ""
+
+
+def _compose_builder_prompt(request: str, lane_text: str, memory_text: str | None) -> str:
+    """Everything that rides into the builder ahead of the actual task, each part
+    clearly labelled as background so the model never mistakes a project's own notes
+    for an instruction to follow over the real request."""
+    sections: list[str] = []
+    if lane_text.strip():
+        sections.append(
+            "Background — this project's own conventions (read-only context, not "
+            f"part of the task):\n\n{lane_text.strip()}"
+        )
+    if memory_text and memory_text.strip():
+        sections.append(
+            "Background — this project's own accumulated notes (read-only context, "
+            f"not part of the task):\n\n{memory_text.strip()[:MEMORY_INDEX_MAX_CHARS]}"
+        )
+    sections.append(f"The task:\n\n{request}")
+    return "\n\n---\n\n".join(sections)
+```
+
+d) `_claude_cli_build` currently calls `_build_prompt(request)` internally on the raw
+   request — change it to just use `request` AS THE ALREADY-COMPOSED PROMPT (stop
+   calling `_build_prompt`/`_lane_memory_text` inside this function — composition now
+   happens once, in `run_job`, before either builder is called). Update its docstring
+   accordingly (it now receives the full prompt, not the bare request).
+
+e) In `run_job`, right after the existing bundle-kind drift check and BEFORE the
+   isolation step ("1. Isolate."), resolve the job's project:
+
+```python
+        project_id = job["project_id"]   # None = legacy job, see docstring at top of file
+        effective_project_id = project_id or "chief"   # for prompt/notes only, never
+                                                         # for repo resolution below —
+                                                         # a legacy job keeps using
+                                                         # THIS repo via the existing
+                                                         # HARNESS.parent default
+        project_display = None
+        source_repo, source_branch = None, "main"
+        if project_id:
+            from db.projects import ProjectRepoUnavailable, resolve_repo, project_name
+            try:
+                source_repo, source_branch = resolve_repo(conn, project_id)
+            except ProjectRepoUnavailable as exc:
+                set_status(conn, job_id, "failed", error=str(exc))
+                _event(conn, job_id, seat_row, "error", str(exc))
+                return {"job_id": job_id, "status": "failed"}
+            project_display = project_name(conn, project_id)
+        else:
+            from db.projects import project_name
+            project_display = project_name(conn, "chief")
+```
+
+  Then change the isolation calls:
+
+```python
+        if is_claude_builder:
+            wt, wt_note = _make_clone(job_id, branch, source_repo, source_branch)
+            ...
+        else:
+            wt, wt_note = _make_worktree(job_id, branch, source_repo)
+```
+
+  Update the "dispatched" event to name the project (this is the "truth in the
+  record" requirement — spoken_summary/events must say which project in plain
+  English):
+
+```python
+        _event(conn, job_id, seat_row, "dispatched",
+               f"Working in {project_display}'s code, in its own copy ({wt_note}).")
+```
+
+  Build the composed prompt once, using `effective_project_id`:
+
+```python
+        from db.projects import memory_index
+        lane_text = _lane_memory_text(effective_project_id)
+        try:
+            memory_text = memory_index(conn, effective_project_id)
+        except Exception:
+            memory_text = None
+        built_prompt = _compose_builder_prompt(job["request"], lane_text, memory_text)
+```
+
+  Pass `built_prompt` (not `job["request"]`) into BOTH builder call sites:
+  `_claude_cli_build(seat_row, built_prompt, model, wt)` and
+  `builder(seat_row, built_prompt, model)`. Do NOT change any other use of
+  `job["request"]` in this function (commit messages, task naming, etc. must keep
+  using the plain original request — only the text that actually reaches the model
+  gets the background sections prepended).
+
+  Where `_merge_base_with_main(wt)` is called for the diff-kind path, pass the
+  resolved branch: `_merge_base_with_main(wt, source_branch)`.
+
+f) The call into the review panel currently reads:
+   `gauntlet.run_panel(conn, job_id, job["request"], result, version, cfg, db_path=DB_PATH)`
+   Change the THIRD argument only — build a reviewer-facing request that names the
+   project, WITHOUT touching `job["request"]` itself (nothing else may see this
+   altered string — it's for this one call only):
+
+```python
+        reviewer_request = (
+            f"{job['request']}\n\nThis work is for the project '{project_display}'."
+        )
+```
+   and pass `reviewer_request` as the third argument to `gauntlet.run_panel`.
+
+g) Update the module docstring comment near the top that currently says the lane
+   memory is "This repo's own conventions — never the Arch-EMR memory files" — it's
+   now project-aware; adjust the wording to match (still true that Arch's memory is
+   never used as a BUILDER's own conventions, since Arch never reaches the build step
+   at all — repo_path is NULL so resolve_repo always refuses it first).
+
+============================================================================
+3) harness/config/lanes/ — move + add lane files
+============================================================================
+`git mv harness/config/lanes/riggs.md harness/config/lanes/chief/riggs.md` (create the
+`chief/` directory; content unchanged — this becomes the fallback AND chief's own
+file, since `_lane_memory_text` checks `<project_id>/riggs.md` first then falls back
+to the bare `lanes/riggs.md`, which will no longer exist after the move, so make sure
+`chief/riggs.md` is what actually gets found for project_id="chief").
+
+Add `harness/config/lanes/jess/riggs.md`:
+```
+# Lane memory — Riggs, for the Jess project
+
+No conventions recorded yet — follow the repo's own README/CLAUDE.md.
+```
+
+============================================================================
+4) harness/gatekeeper.py — merge() resolves the job's repo, not a module constant
+============================================================================
+Add near the top (after the `from db.jobs import ...` line):
+```python
+from db.projects import ProjectRepoUnavailable, resolve_repo
+```
+
+Add a resolver (place it right after the `REPO`/`MERGE_INTO`/other module constants,
+before `merge()`):
+```python
+def _repo_and_branch_for_job(conn, project_id: str | None) -> tuple[Path, str]:
+    """Which repo + default branch a merge applies to.
+
+    A job with no project on it (every job before this feature, and every existing
+    gatekeeper test's disposable fixture) keeps using the module's OWN REPO/
+    MERGE_INTO, read live here rather than captured at import time — that's what
+    keeps `monkeypatch.setattr(gatekeeper, "REPO", tmp)` working unchanged in every
+    existing test. A job that DOES name a project resolves THAT project's repo, and
+    if it can't, the caller must refuse the merge rather than silently falling back
+    to a different repo than the one the panel actually reviewed.
+    """
+    if not project_id:
+        return REPO, MERGE_INTO
+    return resolve_repo(conn, project_id)
+```
+
+In `merge()`, immediately after the existing checks for `job is None` / already
+shipped / not done (i.e. once you know there IS a real job to merge), resolve the
+repo and branch:
+```python
+    try:
+        repo, merge_into = _repo_and_branch_for_job(conn, job["project_id"])
+    except ProjectRepoUnavailable as exc:
+        raise _no(str(exc))
+```
+
+Then thread `repo`/`merge_into` through the REST of `merge()` and every private
+helper it calls, REPLACING every reference to the module-level `REPO`/`MERGE_INTO`
+WITHIN THIS CALL CHAIN with the resolved local values. Concretely:
+
+- The inline diff-kind base check:
+  `subprocess.run(["git", "merge-base", MERGE_INTO, tip], cwd=REPO, ...)`
+  becomes `subprocess.run(["git", "merge-base", merge_into, tip], cwd=repo, ...)`.
+
+- `_branch_tip(branch)` → add a `repo: Path` param, use it for `cwd=`. Update BOTH
+  call sites in `merge()` (the first check, and the re-check under `_MERGE_LOCK`) to
+  pass `repo`.
+
+- `_repo_is_ready()` → add `repo: Path, merge_into: str` params, use them instead of
+  the module names. Update both call sites (before the lock, and re-checked under the
+  lock) to pass `repo, merge_into`.
+
+- `_git_merge(commit)` → add a `repo: Path` param, use it for `cwd=` in both
+  subprocess calls, and pass it through to `_abort_any_merge(repo)` in its except/
+  failure branches.
+
+- `_main_tip()` → add `repo: Path, merge_into: str` params.
+
+- `_reset_main_to(commit)` → add a `repo: Path` param, use it for `cwd=`.
+
+- `_abort_any_merge()` → add a `repo: Path` param, use it for both the `.git /
+  MERGE_HEAD` existence check and the `cwd=` of the abort subprocess call.
+
+- `_commit_holds_the_reviewed_work(commit, job_id, reviewed)` → add a `repo: Path`
+  param, use it for `cwd=`.
+
+- `_unreviewed_files_in(commit, job_id)` → add `repo: Path, merge_into: str` params,
+  use them for both subprocess calls (merge-base uses `merge_into`, both use
+  `cwd=repo`).
+
+- `_range_diff_lines(base, tip)` → add a `repo: Path` param, use it for `cwd=` on
+  both subprocess calls.
+
+- `_diff_bundle(base, tip)` → add a `repo: Path` param, use it for `cwd=`.
+
+Update every call site inside `merge()` to pass the resolved `repo`/`merge_into`
+(not the module globals). None of these helpers are called from anywhere else in the
+codebase or from any test directly (only `_same_commit` is called directly by tests —
+leave that one exactly as-is, it takes no repo). Grep for each helper's name before
+changing its signature, to be certain.
+
+============================================================================
+5) harness/db/jobs.py — create_job accepts project_id
+============================================================================
+Add an optional `project_id: Optional[str] = None` parameter to `create_job`, include
+it in the INSERT column list and values tuple. Nothing else about the function
+changes; every existing caller that doesn't pass it keeps writing NULL, which is the
+legacy path by design.
+
+============================================================================
+6) harness/dispatch.py — dispatch_local stamps the project
+============================================================================
+Add a keyword-only `project_id: str = "chief"` parameter to `dispatch_local`.
+Immediately after the existing seat lookups (before the `BEGIN IMMEDIATE` block),
+validate it:
+```python
+    project_row = conn.execute(
+        "SELECT 1 FROM projects WHERE id = ? AND archived = 0", (project_id,)
+    ).fetchone()
+    if project_row is None:
+        raise DispatchRefused(f"unknown project: {project_id}")
+```
+Pass `project_id=project_id` into the existing `create_job(...)` call inside the
+transaction. Do NOT touch `dispatch()` (the OpenClaw path) — it has no in-process
+builder and no callers today (confirmed in docs/HANDOFF_2026-08-27.md: "dispatch.
+dispatch() (the OpenClaw path) has no callers"); wiring it is out of scope.
+
+============================================================================
+7) harness/server.py — /api/dispatch takes a project
+============================================================================
+In `dispatch_endpoint` (`@app.post("/api/dispatch")`), read the project from the
+body, default "chief", validate it exists and isn't archived (a friendly 400, not a
+500 — the DispatchRefused from dispatch_local already covers the "not found" case,
+but check it here too so the error text is specific and doesn't get confused with a
+different refusal reason):
+```python
+    requested_project = (body.get("project") or "").strip() or "chief"
+    proj_row = c.execute(
+        "SELECT name FROM projects WHERE id = ? AND archived = 0", (requested_project,)
+    ).fetchone()
+    if proj_row is None:
+        return JSONResponse({"error": "That project doesn't exist."}, status_code=400)
+```
+Pass `project_id=requested_project` into the `dispatch_mod.dispatch_local(...)` call.
+Mention the project in the reply when it isn't chief, plain English, e.g.:
+```python
+    who = builder.title()
+    project_note = f" — working in {proj_row['name']}" if requested_project != "chief" else ""
+    if d.reused:
+        reply = f"Already on it — {who} picked that up a moment ago."
+    else:
+        reply = (f"{who} is on it{project_note}. A panel of different models will "
+                 "check the work before it's called done.")
+```
+
+============================================================================
+8) harness/web/index.html — the give form gets a project picker
+============================================================================
+Add a `<select id="giveProject">` to the `#give` form, right after `#giveBuilder`:
+```html
+      <select id="giveProject" title="Which project"></select>
+```
+In `refresh()`, after `s` is fetched (it already has `s.projects`), populate/refresh
+the options WITHOUT clobbering the user's current in-progress selection while typing
+— rebuild the option list from `s.projects` (value=id, text=name) each refresh, but
+only reset `.value` if it's currently empty/invalid (not present in the new list):
+```js
+  const gp = $('#giveProject');
+  if (s.projects && s.projects.length) {
+    const cur = gp.value;
+    gp.innerHTML = s.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    if (s.projects.find(p => p.id === cur)) gp.value = cur;
+    else gp.value = SELECTED_PROJECT && s.projects.find(p => p.id === SELECTED_PROJECT)
+      ? SELECTED_PROJECT : s.projects[0].id;
+  }
+```
+(`SELECTED_PROJECT` is the existing global the Projects tab already uses — it's
+declared with `let SELECTED_PROJECT = null;` further down in the file; since it's
+`let` at top-level script scope this reference works regardless of declaration order
+within the same `<script>` block due to hoisting being irrelevant here — CONFIRM by
+checking where `refresh()` and the `let SELECTED_PROJECT` declaration actually sit; if
+`refresh()` is defined and CALLED before `SELECTED_PROJECT` is declared in source
+order this still works in JS as long as `refresh()` itself only ever RUNS after the
+full script has parsed, which it does — it is called from event handlers/intervals,
+never at the top of the script. Do not reorder unrelated code.)
+
+In the `$('#give').onsubmit` handler, read the picker's value and include it in the
+POST body:
+```js
+    const builder = $('#giveBuilder').value;
+    const project = $('#giveProject').value;
+    const r = await fetch('/api/dispatch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, nonce, builder, project})
+    }).then(r => r.json());
+```
+
+============================================================================
+9) harness/chief.py + harness/server.py + harness/web/voice.html — thread an
+   optional project hint through the voice path (partial wiring — read this
+   carefully, it explains exactly how far to go and where to STOP)
+============================================================================
+IMPORTANT CONTEXT: `ask_chief()` in chief.py is ADVISORY ONLY in this codebase today
+— it calls a model and returns TEXT for the mouth to speak. It does not itself call
+`dispatch_local` anywhere (confirmed by grep: chief.py never imports dispatch). The
+real job-starting path is `/api/dispatch` + the give form (sections 7-8 above). So
+"carries project into dispatch" cannot mean an automatic job dispatch from voice —
+there isn't one to hook. What you CAN and SHOULD do: let Chief (the text/voice
+brain) know which project Neill named, so its ANSWER is accurate, and thread the
+value through the plumbing that already exists for `said`/`context`/`pushed_back` so
+nothing is silently dropped.
+
+a) In `ASK_CHIEF_TOOL`'s `parameters.properties`, add:
+```python
+            "project": {
+                "type": "string",
+                "description": (
+                    "Which project he's talking about, if he named one (e.g. "
+                    "'chief', 'jess', 'arch'). Leave blank if he didn't say."
+                ),
+            },
+```
+(not in `required` — it's optional.)
+
+b) `ask_chief(said, context="", pushed_back=False, project="")` — add the parameter,
+   and if it's non-empty, append one line to the prompt right after the "WHAT YOU
+   WERE JUST TALKING ABOUT" section (or on its own if there's no context):
+```python
+    if project:
+        prompt += f"\n\n## PROJECT HE NAMED\n{project}"
+```
+
+c) In harness/server.py, thread `project` from the request body into the THREE call
+   sites of `ask_chief(...)` (the two `run_in_threadpool(ask_chief, said, context=...,
+   pushed_back=...)` calls — one in `/api/say`'s fallback branch, one in
+   `/api/voice/ask/stream`'s fallback branch). Read it the same way `context`/`said`
+   are already read: `project = (body.get("project") or "").strip()`, pass
+   `project=project` into the call.
+
+d) In harness/web/voice.html, the tool-call handler already does
+   `const args = JSON.parse(ev.arguments || '{}');` — add `project: args.project` to
+   BOTH `fetch('/api/voice/ask/stream', ...)` body and the fallback
+   `fetch('/api/voice/ask', ...)` body inside the catch block (mirroring how `said`/
+   `context` are already sent).
+
+e) DO NOT touch `chief_live.py` or the live-streaming session path (`_live_session()`,
+   `ChiefSession.say()`, used when `OPENAI_API_KEY` is set — the "fast lane"). That is
+   a separate, stateful implementation with its own memory/remember() mechanism; there
+   is no clean single-line place to thread a per-turn project hint through it without
+   changing session state handling, and it is out of scope for a backend dispatch
+   task. Leave a one-line comment where `_live_session()`/`session.say(...)` is called
+   from `/api/say` and `/api/voice/ask/stream` noting that the live-session path does
+   not yet receive the project hint (fallback path only) — do NOT invent new
+   session-memory plumbing to fix this.
+
+f) DO NOT modify `MOUTH_INSTRUCTIONS` (kept deliberately tiny) or `CHIEF_PROMPT`
+   beyond what's already covered by (b)'s runtime-appended section — the mouth's job
+   is still "relay verbatim", not "decide the project"; the browser-side realtime
+   model reaching for the `project` tool argument (when it can tell from what Neill
+   said) is the OpenAI Realtime API's own tool-calling behavior given the schema in
+   (a), nothing here needs to teach it explicitly.
+
+============================================================================
+10) TESTS — harness/tests/test_project_switching.py
+============================================================================
+Write a new test file covering (mirror this repo's existing test style: real
+disposable git repos in tmp_path, real sqlite dbs via `init_db`, no mocking of the
+functions under test — see harness/tests/test_gatekeeper.py and
+harness/tests/test_real_builders.py for the conventions, e.g. the `_git()` helper
+pattern for building tiny disposable repos with a controlled default branch).
+
+Required coverage:
+
+a) `db.projects.resolve_repo` — chief and jess: create two tmp git repos with
+   DIFFERENT default branches (e.g. one "main", one "trunk" — `git init -b trunk`),
+   `UPDATE projects SET repo_path = ? WHERE id = 'chief'` / `'jess'` to point at them,
+   assert `resolve_repo` returns the right path AND the right branch for each.
+b) Arch: `resolve_repo(conn, 'arch')` raises `ProjectRepoUnavailable` with the EXACT
+   message "That project is kept at arm's length — the team can read its notes but
+   not touch its code." (repo_path is NULL from the schema seed — don't touch it).
+c) A repo_path pointing at a directory that doesn't exist on disk → raises
+   `ProjectRepoUnavailable` (some plain reason, don't need to match exact text).
+d) A repo_path pointing at a real directory that ISN'T a git repo → raises
+   `ProjectRepoUnavailable`.
+e) `executor.run_job` end-to-end with an explicit project: dispatch (or `create_job`
+   + set_status) a job with `project_id` set to a project whose repo_path is a tmp
+   repo (use the ollama/text-builder path so no real model call is needed — stub
+   `executor._BUILDERS`/monkeypatch the builder function the way
+   test_dispatch_executor.py or test_real_builders.py already do, or use
+   `monkeypatch.setattr(executor, "_ollama_build", ...)` — check which is cleanest
+   given the actual `_BUILDERS` dict shape), confirm the worktree it creates is
+   rooted in THAT tmp repo (not harness's own repo) and the resulting event trail
+   names the project in plain English.
+f) A job whose project has no repo_path (arch) fails BEFORE any worktree/clone
+   directory is created (assert the job's status is 'failed', its error is the exact
+   arm's-length sentence, and no `.worktrees`/clones dir was created for that job id).
+g) A job with `project_id` left NULL still isolates against THIS repo exactly as
+   before (regression guard for the legacy path — reuse the pattern from
+   test_real_builders.py's HARNESS-monkeypatch tests, or simply assert it does NOT
+   raise ProjectRepoUnavailable and proceeds).
+h) Lane file resolution order: with a tmp `HARNESS`/`config/lanes/` layout (monkeypatch
+   `executor.HARNESS`), confirm a project-specific `<project_id>/riggs.md` wins over
+   the shared `lanes/riggs.md` fallback when both exist, and the fallback is used when
+   only it exists.
+i) `_compose_builder_prompt` includes the lane text, the memory index (call
+   `db.projects.memory_index` against a tmp memory_dir with a MEMORY.md, or just pass
+   a string directly to `_compose_builder_prompt`), and the original request, in that
+   order; confirm a memory string longer than `MEMORY_INDEX_MAX_CHARS` is capped.
+j) `/api/dispatch` (test via the same pattern other server.py tests use — check
+   harness/tests/ for an existing FastAPI TestClient-based test of this endpoint and
+   follow its pattern; if none exists, call `dispatch_endpoint`'s underlying pieces —
+   `dispatch.dispatch_local` — directly instead of standing up the ASGI app, since
+   that's the part actually under test here) validates the `project` field: an
+   unknown project id is refused (400 / DispatchRefused), a valid one stamps
+   `jobs.project_id`.
+k) `gatekeeper.merge` uses the project's repo/branch: build a tmp repo for a test
+   project (or reuse the jess row with a tmp repo, non-"main" default branch), create
+   a job with that `project_id`, go through the same certified-and-shippable setup
+   test_gatekeeper.py's `_reviewed_and_done`-style helper already builds (copy/adapt
+   the pattern, don't import private test helpers across files), call
+   `gatekeeper.merge`, and confirm it merged into THAT repo on THAT branch — not
+   `gatekeeper.REPO`/`"main"`.
+l) All existing tests in harness/tests/ must still pass unmodified — if your changes
+   force ANY edit to an existing test file, STOP, re-read section 2's design decision
+   above (the None-project-id legacy path), and fix your implementation instead
+   (unless the existing test is asserting on something this task is explicitly
+   supposed to change, which none of them are for this task).
+
+============================================================================
+WHEN YOU'RE DONE
+============================================================================
+Do not run `git commit`. Do not run the test suite with more than default pytest
+workers (single process is fine — this is a small suite). Leave the working tree as
+your final edits; the orchestrator will run `.venv/bin/python -m pytest
+harness/tests/ -q` and `git diff`/`git status` from the main checkout's venv against
+this worktree, verify, and commit.

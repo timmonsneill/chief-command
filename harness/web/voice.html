@@ -257,7 +257,9 @@ async function handle(ev) {
     try {
       const resp = await fetch('/api/voice/ask/stream', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer }),
+        body: JSON.stringify({
+          said: args.said || lastSaid, context: lastAnswer, project: args.project
+        }),
         signal: inv.controller.signal,
       });
       if (!resp.ok || !resp.body) throw new Error('voice stream failed');
@@ -338,7 +340,9 @@ async function handle(ev) {
         try {
           const plain = await fetch('/api/voice/ask', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ said: args.said || lastSaid, context: lastAnswer }),
+            body: JSON.stringify({
+              said: args.said || lastSaid, context: lastAnswer, project: args.project
+            }),
           }).then(r => r.json());
           if (plain && plain.spoken) {
             spoken = plain.spoken;

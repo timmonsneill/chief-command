@@ -135,6 +135,7 @@ def create_job(
     parent_job_id: Optional[int] = None,
     task_name: Optional[str] = None,
     bundle_kind: str = "text",
+    project_id: Optional[str] = None,
 ) -> int:
     """task_name is the 2-4 word handle the voice will use ("the rate limiter").
 
@@ -155,11 +156,11 @@ def create_job(
     cur = conn.execute(
         """
         INSERT INTO jobs (request, builder_seat, builder_tier, builder_family,
-                          bundle_kind, origin, parent_job_id, task_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                          bundle_kind, origin, parent_job_id, task_name, project_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (request, builder_seat, row["tier"], row["family"], bundle_kind,
-         origin, parent_job_id, task_name),
+         origin, parent_job_id, task_name, project_id),
     )
     return int(cur.lastrowid)
 
