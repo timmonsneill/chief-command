@@ -1,0 +1,353 @@
+You are working in a git worktree of the "chief-command" repo, on branch gpt/voice-fast-lane.
+Make the edits described below directly with your file tools. Do NOT git commit — the calling
+harness commits after verifying. Do not touch files outside the ones named below.
+
+============================================================
+PROJECT CONVENTIONS YOU MUST FOLLOW (condensed from AGENTS.md — read the full file at
+repo root if anything here is ambiguous)
+============================================================
+- This is a voice-first agent harness. Neill (the owner) CANNOT READ OR WRITE CODE — he
+  knows zero jargon. ANY text that could be spoken aloud to him, or shown in the voice
+  transcript, must never contain filenames, tool names, code jargon (e.g. "SSE", "the
+  endpoint", "the generator"), stack traces, or raw API errors. Say what happened to
+  the THING, in plain English.
+- Text-first: the existing non-streaming voice path must keep working unchanged, as the
+  fallback.
+- "Do not put a reasoning model in the conversational path" — you are not changing model
+  choice logic; leave CHIEF_MODEL / CHIEF_DEEP selection exactly as it is today.
+- Business logic must be implemented EXACTLY as specified below — do not "improve" it,
+  do not add extra features, do not change unrelated code.
+- Comments should explain WHY / a constraint, not restate the next line. Match the
+  existing style in this file (there are long block comments explaining design reasoning
+  — keep that voice, don't strip it, and write new comments in the same voice when you
+  add non-obvious logic).
+
+============================================================
+BACKGROUND — READ THIS FIRST
+============================================================
+`harness/server.py::voice_ask` (POST /api/voice/ask) already uses the streaming
+`ChiefSession` from `harness/chief_live.py`. `ChiefSession.say(said, deep=...)` is an
+async generator that yields whole SENTENCES as Chief's answer streams in from the model.
+Right now `voice_ask` collects every yielded sentence into a list and only returns once
+the WHOLE answer is done — so the phone hears nothing until Chief has finished thinking.
+That defeats the entire point of streaming. Your job is to add a second endpoint that
+streams sentences out to the browser as they arrive, and to update the voice page
+(`harness/web/voice.html`) to speak the first sentence almost immediately and queue the
+rest instead of waiting for everything.
+
+Relevant files, read them in full before editing:
+- harness/server.py — read lines ~600-690 (the `_chief_lock`, `_live_session()`,
+  `voice_ask`, `_CHIEF_MODEL` import) plus the top of the file for `db()`, `app`, imports.
+- harness/chief_live.py — `ChiefSession.say()`, `_sentence_end()`.
+- harness/chief.py — `_for_speech()`, `MOUTH_INSTRUCTIONS`, `ask_chief()`.
+- harness/web/voice.html — the whole file (it's short). Focus on `handle()` and the
+  `response.function_call_arguments.done` / `ask_chief` branch, and the WebRTC data
+  channel `dc`.
+
+============================================================
+TASK 1 — new streaming endpoint: harness/server.py
+============================================================
+Add `POST /api/voice/ask/stream` immediately after the existing `voice_ask` function
+(do not modify `voice_ask` itself — it must keep working byte-for-byte as it does today,
+the text-first fallback depends on it). It returns a Server-Sent Events stream
+(`text/event-stream`, via FastAPI's `StreamingResponse` — import it from
+`fastapi.responses` alongside the existing imports).
+
+Behaviour, mirroring `voice_ask` as closely as possible so nothing about recording or
+recovery changes:
+
+1. Parse `said` from the JSON body exactly like `voice_ask` does. If empty, stream a
+   single `done` event: `{"full": "", "spoken": "I didn't catch that.", "model":
+   _CHIEF_MODEL, "failed": true}` and stop (no `events` row for this case, matching
+   today's behaviour where an empty `said` short-circuits before any Chief call).
+
+2. Compute `pushed_back = is_pushback(said)` exactly like `voice_ask` (same import from
+   `mouth`).
+
+3. If `os.environ.get("OPENAI_API_KEY")` is set (the live streaming path):
+   - Acquire `_chief_lock` exactly like `voice_ask` does (`async with _chief_lock:`),
+     get the session via `_live_session()`, and iterate `session.say(said,
+     deep=pushed_back)`.
+   - For EACH sentence yielded, immediately emit an SSE event named `sentence` with
+     JSON payload `{"text": <sentence cleaned through chief._for_speech>}`, and also
+     keep collecting the raw (uncleaned) sentences into a list, exactly the way
+     `voice_ask` collects `pieces`.
+   - If the generator raises, catch it exactly like `voice_ask` does: drop the module
+     global `_chief_session` (set it to `None` so the next turn rebuilds a clean
+     session), and treat this turn as producing no answer — do NOT re-raise, do NOT let
+     an unhandled exception surface as a raw error to the browser.
+   - After the loop (success or the caught-exception case), build `answer = "
+     ".join(pieces).strip()` (empty string if the exception path ran). If `answer` is
+     non-empty: `out = {"spoken": _for_speech(answer), "full": answer, "model":
+     _CHIEF_MODEL, "failed": False}` — same fields as `voice_ask`'s success branch,
+     do NOT emit an extra `sentence` event for this case (every sentence was already
+     streamed as it arrived).
+   - If `answer` is empty (nothing yielded, or the exception path ran): `out =
+     {"spoken": "Something went wrong on my end. Nothing's started.", "full": "Chief
+     returned nothing. No work was dispatched.", "model": _CHIEF_MODEL, "failed": True}`
+     — same text as `voice_ask`'s failure branch, word for word. In this case ALSO emit
+     one `sentence` event carrying that same spoken failure text, so the mouth actually
+     says something (in the success case sentences were already streamed, so no extra
+     event is needed there).
+
+4. If `OPENAI_API_KEY` is NOT set (the free fallback path): reuse the same fallback
+   `voice_ask` uses — `talking_about = (body.get("context") or "").strip()`, `context =
+   "\n\n".join(p for p in (_project_context(), talking_about) if p)`, `out =
+   ask_chief(said, context=context, pushed_back=pushed_back)` — then emit ONE `sentence`
+   event with `{"text": out["spoken"]}` before the `done` event (this path never streams
+   incrementally; the existing subprocess-based `ask_chief` returns all at once).
+
+5. Whichever path ran, write the SAME `events` INSERT that `voice_ask` writes today
+   (same SQL, same params: `out.get("model", _CHIEF_MODEL)`, `out["full"][:500]`) —
+   except for the empty-`said` short-circuit in step 1, which never reaches Chief at all
+   and writes nothing, matching current behaviour (an empty `said` returns before
+   `voice_ask` does its INSERT too — check this by reading `voice_ask` again: it returns
+   `{"spoken": "I didn't catch that."}` before the `db()`/INSERT lines, so replicate
+   that: no INSERT for empty `said`).
+
+6. Finally emit one `done` SSE event carrying `out` (the full dict: `full`, `spoken`,
+   `model`, `failed`).
+
+Implementation notes:
+   - Write a tiny local helper to format one SSE event, e.g.
+     `def _sse(event: str, data: dict) -> str: return f"event: {event}\ndata:
+     {json.dumps(data)}\n\n"` (module already imports `json`). Reuse it for every event
+     you emit.
+   - The endpoint function itself should be an `async def` that returns
+     `StreamingResponse(_gen(), media_type="text/event-stream")` where `_gen` is an
+     inner `async def` generator implementing steps 1-6. Keep the whole thing inside one
+     function (nested generator is fine) so it reads top-to-bottom like `voice_ask` does.
+   - Do not change `_CHIEF_MODEL`, `_chief_lock`, `_live_session`, or `voice_ask`.
+   - Do not add response headers beyond `media_type` unless something in local testing
+     shows FastAPI/Starlette needs them to stream — StreamingResponse over an async
+     generator streams each yielded chunk as produced, no extra config should be needed.
+
+============================================================
+TASK 2 — mouth instructions clarification: harness/chief.py
+============================================================
+`MOUTH_INSTRUCTIONS` (the system prompt for the realtime voice model) currently tells
+the mouth "for every single thing he says" call `ask_chief`. Task 3 below will make the
+browser inject Chief's LATER sentences as a synthetic `conversation.item.create` message
+with `role: "user"` and text starting `"(Chief continues:) "` — that is NOT something
+Neill said, it's more of Chief's own answer arriving in a second piece, and the mouth
+must not mistake it for a new request and call `ask_chief` on it again (which would
+loop/misbehave).
+
+Add a short new paragraph to `MOUTH_INSTRUCTIONS`, right after the existing "NEVER
+answer anything yourself..." paragraph, in the same plain, short style as the rest of
+that string:
+
+    "Sometimes you'll see a message that starts with "(Chief continues:)" — that isn't
+    Neill talking. It's the rest of Chief's answer arriving in a second piece. Just say
+    it naturally, like you're still mid-sentence from before. Don't call ask_chief on
+    it, and don't treat it like a new question."
+
+Keep it to one short paragraph. Do not touch `CHIEF_PROMPT` or `ASK_CHIEF_TOOL` or
+anything else in this file.
+
+============================================================
+TASK 3 — harness/web/voice.html
+============================================================
+In the `handle()` function's `response.function_call_arguments.done` / `ask_chief`
+branch (currently does one `fetch('/api/voice/ask', ...)` and waits for the full JSON):
+
+Replace the single fetch-and-wait with a call to `fetch('/api/voice/ask/stream', {
+method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+said: args.said || lastSaid, context: lastAnswer }) })` and consume the response body as
+an SSE stream using `resp.body.getReader()` + `TextDecoder`, splitting on blank lines
+(`\n\n`) into individual `event: <name>\ndata: <json>` records, same way the backend
+formats them. Do this with plain code (no new library — none is available in this
+static HTML file; keep it dependency-free like the rest of the file).
+
+Required behaviour:
+
+1. FIRST `sentence` event received: remove the "thinking…" holding bubble (`hold`, as
+   today), send it back to the mouth exactly like today's code does — a
+   `conversation.item.create` of `{type: 'function_call_output', call_id: ev.call_id,
+   output: JSON.stringify({ answer: <that sentence's text> })}` followed by
+   `dc.send(JSON.stringify({ type: 'response.create' }))`. This is what makes the mouth
+   start speaking almost immediately instead of waiting for the whole answer. Track that
+   a `response.create` was just sent (see point 4, the busy flag) so later sentences
+   know to wait.
+   Also call `turn('chief', 'Chief', <that sentence's text>)` so the transcript panel
+   shows it right away (do this for every sentence event, first or later).
+
+2. EACH LATER `sentence` event (second onward, before `done` arrives): push the
+   sentence's text onto a queue instead of sending it immediately. Still call
+   `turn('chief', 'Chief', <text>)` immediately so the transcript is live and complete
+   even before the mouth catches up — the transcript is not gated on speech pacing, only
+   the actual voice injection is.
+
+3. A small queue-pump function drains the queue ONE ITEM AT A TIME, only when the mouth
+   isn't currently mid-response. Track "mouth busy" with a module-level (top-level
+   `let`, alongside the existing `pc`/`stream`/`dc`/`live` declarations) boolean flag:
+   set it `true` right after every `dc.send(JSON.stringify({ type: 'response.create'
+   }))` you issue for this feature (both the first-sentence one and each queued one),
+   and set it `false` in `handle()` when a `response.done` event arrives (add a new `if
+   (ev.type === 'response.done')` branch — there isn't one today), then immediately try
+   to drain the next queued item. When draining an item, send: `conversation.item.create`
+   with `{type: 'message', role: 'user', content: [{type: 'input_text', text: '(Chief
+   continues:) ' + <sentence text>}]}`, then `response.create` (set the busy flag before
+   or as part of this send).
+
+4. `done` event: record `out.full || out.spoken` into `lastAnswer` (same variable /
+   same purpose as the old code's `lastAnswer = out.full || out.spoken`). No mouth
+   message needs to be sent for `done` itself — the sentences already carried
+   everything spoken. Set `setState('live', 'listening')` here (moving it from
+   immediately after the old single fetch, to here, since now there's an in-flight
+   stream + queue instead of one blocking call). If `done.failed` is true AND no
+   `sentence` event was ever received for this turn (i.e., the very first thing that
+   arrived was `done` with nothing before it — this happens on a hard failure before
+   any text streamed), still speak the fallback exactly as before: send the
+   `function_call_output` with `{answer: done.spoken}` and a `response.create`, since in
+   that edge case nothing was said aloud yet. (If at least one `sentence` event already
+   fired, the failure text was already streamed as a `sentence` event per the backend
+   contract in Task 1, so don't double-send.)
+
+5. If the network request itself fails (fetch throws, or a non-OK status, or the stream
+   ends with no `done` event ever received): remove the holding bubble if still present,
+   clear the queue, and send the exact same fallback the current failure path implies:
+   `function_call_output` with `{answer: "Something went wrong on my end. Nothing's
+   started."}` followed by `response.create`. This text must appear byte-for-byte
+   identical to the backend's own failure string (already used in Task 1) — do not
+   paraphrase it, this is what Neill hears, and it must never contain any technical
+   detail about WHY it failed (no status codes, no error messages — those are for
+   nobody, this file has no console/log surface Neill would see, but keep the
+   convention anyway since this is the one file that talks to him).
+
+6. Barge-in: add a new `if (ev.type === 'input_audio_buffer.speech_started')` branch in
+   `handle()` that empties the queue array (`queue.length = 0`, or reassign to `[]` —
+   either is fine) if Neill starts talking again while sentences are still queued. Do
+   NOT try to cancel a response that's already mid-speech (no API call for that is in
+   scope here) — just stop QUEUING further follow-ups so the mouth won't keep talking
+   over him once the current utterance finishes.
+
+7. Keep everything else in the file exactly as it is — the mic button, `start()`,
+   `stop()`, the transcription-completed handler, the `response.output_audio_
+   transcript.done` handler (still fires per mouth utterance, still calls `turn('chief',
+   ...)` — note this means a given sentence's TEXT now typically appears twice in the
+   transcript panel: once immediately from the `sentence` event per point 1/2, and once
+   again when the mouth's own transcript of what it said comes back. That's an accepted
+   minor duplication for this task — do not try to dedupe it, do not remove either call,
+   it is out of scope and dedup risks losing the "even before the mouth catches up"
+   liveness this task wants).
+   Existing `error` handler stays as-is too.
+
+Write clear, short comments in this file's existing plain style (it currently has none,
+which is fine, but if you add non-obvious state like the busy flag / queue, one short
+comment near the declaration explaining WHY (pacing so the mouth doesn't talk over
+itself) is appropriate and matches this project's commenting convention).
+
+============================================================
+TASK 4 — tests: harness/tests/test_voice_stream.py (new file)
+============================================================
+Use FastAPI's `TestClient` (from `fastapi.testclient`) against the app in
+`harness/server.py`. Do NOT call the real OpenAI API. There is no existing test file for
+the voice endpoints to copy from, so set this up carefully:
+
+- Add `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` at the top like the
+  other test files in `harness/tests/` do (see `harness/tests/test_jobs.py` for the
+  pattern), so `import server` works.
+- The app's `db()` function reads/writes a real sqlite file at
+  `harness/db/chief.db` by default (see `DB = Path(__file__).resolve().parent /
+  "db" / "chief.db"` near the top of `harness/server.py`). For this test, monkeypatch
+  `server.DB` to a `tmp_path / "test.db"` (pytest's `tmp_path` fixture) BEFORE creating
+  the `TestClient`, so the test never touches the real database. Also monkeypatch
+  `server._SEATS_SYNCED = True` if needed to skip the seats.toml sync path cleanly, or
+  let it run once against the temp DB — check `_sync_seats_once` for what it needs
+  (`dispatch.load_config()` / `dispatch.sync_seats`) and use whichever avoids touching
+  real config files outside the repo; if `dispatch.load_config()` reads a real repo
+  config file that's fine (it's read-only), just don't let it write anywhere but the
+  temp DB.
+- The `events` INSERT that both `voice_ask` and the new stream endpoint use does `SELECT
+  id, ... FROM jobs ORDER BY id DESC LIMIT 1` — meaning it needs at least one row in
+  `jobs` to attach to, or the INSERT will silently insert zero rows (a `SELECT` with no
+  matching row makes an `INSERT ... SELECT` a no-op, not an error). Before asserting on
+  the `events` row, either (a) create one job first via whatever the `db.jobs` module
+  exposes (see `harness/tests/test_jobs.py` for `create_job`), or (b) confirm this
+  assumption by checking `db.jobs` and adjust the test setup accordingly — do NOT assume
+  without checking; read `harness/db/jobs.py`'s schema before writing the assertion so
+  the test is actually correct and not accidentally-passing on a because-nothing-was-
+  written technicality.
+- Set `os.environ["OPENAI_API_KEY"] = "test-key-not-real"` (monkeypatch) so the endpoint
+  takes the live-streaming branch, not the fallback subprocess branch (`ask_chief` shells
+  out to a real `codex` CLI — must not run in tests).
+- Monkeypatch `server._live_session` (or the module-level pieces it depends on) so that
+  whatever `ChiefSession` machinery the endpoint reaches for is a FAKE: a minimal stand-in
+  object exposing an async generator method `say(said, deep=False)` that `yield`s three
+  short plain strings ("One thing.", "Another thing.", "Last thing.") with a tiny
+  `await asyncio.sleep(0.05)` between each yield (to simulate real streaming timing and
+  give the test something to assert ordering against). The simplest correct approach: monkeypatch
+  the module-level `server._live_session` function to return this fake session instead
+  of constructing a real `ChiefSession`, since `voice_ask`/the new endpoint call
+  `_live_session()` to get their session object — check the real code to confirm this is
+  the right seam before relying on it.
+- Also monkeypatch `server.is_pushback`-equivalent path if needed — actually `is_pushback`
+  is imported locally inside the endpoint function bodies (`from mouth import
+  is_pushback`), so you likely don't need to patch it; a real, harmless call to the real
+  `is_pushback()` on a short test string is fine and simpler than patching an inline
+  import. Confirm by reading `harness/mouth.py`'s `is_pushback` — it must not have side
+  effects or reach the network.
+
+Write at least these cases:
+
+1. `test_first_sentence_arrives_before_stream_finishes` — POST to
+   `/api/voice/ask/stream` with `{"said": "what's the status"}`, read the raw SSE
+   response body incrementally (TestClient's streaming response supports iterating
+   `response.iter_lines()` or reading `.text` after using `client.stream(...)` — use
+   `with client.stream("POST", "/api/voice/ask/stream", json={...}) as response:` and
+   iterate `response.iter_lines()`), and assert that a `sentence` event containing
+   "One thing." is observed BEFORE all three fake sentences have been yielded — the
+   simplest reliable way to prove this without flaky timing assertions is: have the fake
+   `say()` sleep between yields as described above, and assert that by the time you've
+   read only the FIRST SSE event out of the stream, less real time has elapsed than the
+   fake generator's total sleep budget would need to fully finish (e.g. capture
+   `time.monotonic()` before the request, read one event, assert elapsed <
+   0.1s while the full 3-yield sequence would take >=0.1s) — OR, simpler and less timing-
+   fragile: assert the events arrive in the correct order (`sentence` "One thing." before
+   `sentence` "Another thing." before `sentence` "Last thing." before `done`) by parsing
+   each SSE frame off `response.iter_lines()` as it's yielded and checking you can read
+   the first `sentence` frame while there are still un-read frames left in the stream
+   (i.e. don't buffer the whole response first) — pick whichever of these you can make
+   deterministic and not flaky; prefer the ordering-based assertion over the timing-based
+   one if forced to choose, since timing assertions in CI are a known flake risk.
+2. `test_done_event_carries_full_text` — same setup, assert the final `done` event's
+   JSON has `full == "One thing. Another thing. Last thing."` (sentences joined with a
+   single space, matching the join logic in Task 1), `spoken` is the same text cleaned
+   through `_for_speech` (should be unchanged here since these fake sentences have no
+   markdown), `failed is False`, and `model` present.
+3. `test_events_row_written` — after the stream completes, query the temp sqlite DB
+   directly (or via whatever `db.jobs`/`db` helpers exist) and assert exactly one row
+   landed in `events` with the full text from case 2, `seat_id == 'chief'`, `lane ==
+   'chief'`.
+4. `test_empty_said_short_circuits` — POST `{"said": ""}` (or omit `said`), assert the
+   only SSE event is a `done` event with `failed: true` and `spoken == "I didn't catch
+   that."`, and assert NO row was added to `events` (re-use the row-count-before /
+   row-count-after pattern, or assert the table is still empty if that's the first
+   request in the test).
+
+Run the WHOLE suite when you're done editing (not just your new file) with:
+`.venv/bin/python -m pytest harness/tests/ -q`
+from the repo root of THIS worktree, and fix anything you broke before finishing. If a
+test outside your new file was already failing before your change (check `git stash`
+then rerun if you're unsure whether you caused it), leave it — do not fix pre-existing
+unrelated failures, just don't introduce new ones.
+
+============================================================
+DO NOT
+============================================================
+- Do not modify anything under `backend/` or `frontend/` (v1, reference-only per
+  AGENTS.md).
+- Do not touch `harness/db/schema.sql`, `harness/dispatch.py`, `harness/gauntlet*`, or
+  any file not named above.
+- Do not add new pip dependencies. Everything needed (`fastapi`, `httpx`, `pytest`) is
+  already installed in `.venv`.
+- Do not `git commit` — leave the working tree with your edits unstaged/uncommitted; the
+  calling process verifies and commits.
+- Do not change CHIEF_MODEL, CHIEF_DEEP, or any tiering/model-selection logic.
+- Do not weaken or remove the `_chief_lock` discipline, the wedged-session recovery
+  (`_chief_session = None` on exception), or the plain-English fallback strings anywhere
+  they're used today.
+
+When done, print a short plain-text summary of exactly which functions/sections you
+added or changed in each of the four files, so the calling process can verify quickly.
