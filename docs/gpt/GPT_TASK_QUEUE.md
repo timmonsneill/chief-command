@@ -164,6 +164,31 @@ same lock, with the same "refuse and say so" discipline as every other step in
 that function. Design each of these with Sol before building, same as task #9
 itself was.
 
+## 13. [ ] Run builders and reviewers as the `chiefagent` account (the wall, harness side)
+BLOCKED until the owner creates a standard (non-admin) macOS user `chiefagent` and signs
+in to Claude Code + Codex as that user once. Then, in this order, each with a live check:
+1. Keys: `~/.chief/env` stays owned by the owner, mode 600. Builders/reviewers receive NO
+   vendor keys. The xai reviewer runs in the harness process (owner), not as the agent.
+2. Layout: `/Users/chiefagent/work/job-<id>/` owned by chiefagent for clones; the record
+   (`harness/db/chief.db`), the real repos and `~/.chief` unreadable to chiefagent
+   (`chmod 700` on the owner's home is the simplest — verify Jess/Chief repos too).
+3. Launch-as-agent: ONE sudoers rule scoped to exactly one wrapper script
+   (`scripts/run-as-agent.sh <job-dir> <argv…>`), no password, nothing else. The wrapper
+   sets a minimal env (PATH, HOME=/Users/chiefagent, USER=chiefagent) and cds into the
+   job dir. Never `sudo -u chiefagent bash`.
+4. Executor: clone into the agent's work dir as the OWNER, `chown -R chiefagent`, run the
+   builder through the wrapper; read the result back as the owner. Reviewers (claude-cli,
+   codex) likewise through the wrapper — they read untrusted text too.
+5. Give builders back `Bash` + `--max-turns`, and run the project's tests inside the
+   clone through the wrapper, recording exit_code/stdout artifacts (still NOT a tester
+   verdict — guard 6 stays; a real driving tester is separate).
+6. Gatekeeper: stays owner-only; that's the bridge. Add the loopback service (task 7).
+7. Verification (LIVE, as chiefagent): `ls ~<owner>/.chief` denied; `security find-generic-
+   password` finds nothing; opening chief.db refused; `git push` to the real repo refused;
+   builder can edit/test/commit in its own dir. Record the outputs in the worklog.
+Design with Sol first (it's the security boundary). Rule 4: no hardcoded /Users paths —
+read the agent user + work dir from seats.toml `[agent_account]`.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.
