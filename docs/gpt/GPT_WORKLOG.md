@@ -26,3 +26,19 @@ was run three times as the cross-model re-review before push.
   it predates the rule and the rule is scoped to Codex sessions (AGENTS.md).
 - The remaining NO-GOs are on the queued/owner items above. Pushed on that basis, with
   the six-reviewer cross-family pass (5 Claude + Glass) as the rule-8 review.
+
+## 2026-08-27 · merge loop + automated tester · branch gpt/merge-loop
+- Outcome: certified work now gets an automated run checked by a different model
+  family. A passing check asks the gatekeeper to merge; a failed check or refusal leaves
+  the work safely parked with a plain-English status. Missing or unavailable checking
+  is recorded as skipped and never becomes an approval.
+- Driven by Sol (Claude) this session, in a worktree, with Codex writing the code —
+  Sol verified independently rather than trusting Codex's own report.
+- Verification (re-run by Sol, not just Codex's self-report): focused merge-loop
+  checks → 8 passed; full harness checks → 218 passed, 4 skipped (222 collected
+  either way — the skip count moves with whether the local Ollama model happens to
+  be serving).
+- Gauntlet: not run. The queue item stays TAKEN rather than DONE — per this file's own
+  header, DONE means the GPT gauntlet is clean and the branch is pushed. Neither has
+  happened. Owner review, the gauntlet, and any later push remain unfinished.
+- Existing untracked Sol build notes were left untouched.
