@@ -36,7 +36,7 @@ can report zero). Tests: a stubbed response with usage → a usage row with the 
 cents; a stubbed response with no usage block → a row with zeros, never a crash. Do
 NOT touch the schema triggers or migrations.
 
-## 2. [ ] A "what have we used" reader for the subscription seats (read-only script)
+## 2. [x] DONE 2026-08-27 (harness/usage_local.py + dashboard block) — A "what have we used" reader for the subscription seats (read-only script)
 The binding constraint on Claude and Codex is rate limits, not money, and neither seat
 writes to `usage`. Both leave records on disk: Codex writes
 `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl` with `total_token_usage` and a
@@ -58,7 +58,7 @@ a test in `harness/tests/test_gauntlet_config.py` asserting no seat's `model` en
 `-latest` or `latest` (xAI's aliases auto-update, which rule 2 forbids). No other
 changes.
 
-## 4. [TAKEN 2026-08-27] Wire the gatekeeper's merge into the flow (the door has no doorbell)
+## 4. [x] DONE 2026-08-28 — Wire the gatekeeper's merge into the flow (the door has no doorbell)
 `harness/gatekeeper.py::merge` is complete and tested (including against a real git repo)
 but NOTHING calls it — no route in `harness/server.py`, no tool in `harness/chief.py`, no
 step after the panel certifies a job. `dispatch.ship` is gone, so today nothing can move a
@@ -70,7 +70,7 @@ a certified job without a tester verdict will be refused — log that refusal pl
 job, don't work around it. Tests: certified job + tester → shipped; certified job, no
 tester → refused with a plain-English note, job stays `done`. Do NOT weaken any guard.
 
-## 5. [ ] Gatekeeper HTTP surface: drain the body on early refusals
+## 5. [x] DONE 2026-08-27 (Connection: close on refusals) — Gatekeeper HTTP surface: drain the body on early refusals
 `harness/gatekeeper.py` `serve()`: the 403 and 413 paths return without reading the
 request body, so on a keep-alive connection the leftover bytes are parsed as the next
 request line. Read and discard `Content-Length` bytes (bounded) or send
