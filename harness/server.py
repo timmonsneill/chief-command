@@ -438,10 +438,25 @@ async def dispatch_endpoint(request: Request):
 
     c = db()
     proj_row = c.execute(
-        "SELECT name FROM projects WHERE id = ? AND archived = 0", (requested_project,)
+        "SELECT name, repo_path FROM projects WHERE id = ? AND archived = 0",
+        (requested_project,),
     ).fetchone()
     if proj_row is None:
         return JSONResponse({"error": "That project doesn't exist."}, status_code=400)
+    # Refused HERE, at the door, never after a job sits around and fails at build
+    # time — the picker itself already hides these (web/index.html), this is the
+    # backstop for a direct API call. Only the "no repo at all" case (Arch, Decision
+    # C) is checked this early: it's a plain column read, not a filesystem/git
+    # probe, so it's cheap and safe to do before a job even exists. The deeper
+    # checks (does the folder exist, is it really git, which branch) still happen
+    # at build time in executor.run_job — they need to touch disk/git, which isn't
+    # something to redo speculatively on every dispatch call.
+    if not proj_row["repo_path"]:
+        return JSONResponse(
+            {"error": "That project is kept at arm's length — the team can read "
+                      "its notes but not touch its code."},
+            status_code=400,
+        )
     if requested_builder:
         row = c.execute(
             "SELECT id, provider, enabled FROM seats WHERE id = ?", (requested_builder,)
@@ -746,6 +761,9 @@ async def voice_ask(request: Request):
     """
     body = await request.json()
     said = (body.get("said") or "").strip()
+    # Voice cannot dispatch a job — this only informs Chief's ANSWER (see
+    # chief.ask_chief's "PROJECT HE NAMED" section), on the fallback text path
+    # below. Starting work is still only ever /api/dispatch + the give form.
     project = (body.get("project") or "").strip()
     if not said:
         return {"spoken": "I didn't catch that."}
@@ -763,7 +781,9 @@ async def voice_ask(request: Request):
     # back to the free-but-slow subprocess brain when there's no API key to think with.
     if os.environ.get("OPENAI_API_KEY"):
         async with _chief_lock:
-            # The held live conversation does not yet receive this per-turn project hint.
+            # `project` (above) is NOT threaded in here — the held live session has
+            # its own memory/remember() plumbing this doesn't hook into (see the
+            # project-switching build notes). Only the fallback branch below hears it.
             session = _live_session()
             try:
                 pieces: list[str] = []
@@ -869,6 +889,9 @@ async def voice_ask_stream(request: Request):
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     said = (body.get("said") or "").strip()
+    # Voice cannot dispatch a job — this only informs Chief's ANSWER (see
+    # chief.ask_chief's "PROJECT HE NAMED" section), on the fallback text path
+    # below. Starting work is still only ever /api/dispatch + the give form.
     project = (body.get("project") or "").strip()
 
     if not said:
@@ -891,7 +914,10 @@ async def voice_ask_stream(request: Request):
 
     if os.environ.get("OPENAI_API_KEY"):
         queue: "asyncio.Queue[tuple[str, dict]]" = asyncio.Queue()
-        # The held live conversation does not yet receive this per-turn project hint.
+        # `project` (above) is NOT threaded into the live session here — voice
+        # cannot dispatch a job either way, and the held session's own memory/
+        # remember() plumbing has no per-turn hook for this yet; only the fallback
+        # branch further down hears it.
         # Fire-and-forget on purpose — see _live_voice_producer's docstring. This task
         # is NOT awaited by the generator below, so the generator's own cancellation
         # (a dropped phone) cannot reach it. _spawn_background is what keeps it alive

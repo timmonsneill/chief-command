@@ -260,7 +260,9 @@ function bubble(cls, who, text, t) {
   d.scrollIntoView({behavior:'smooth', block:'end'});
   return d;
 }
-const esc = s => (s||'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+// Escapes quotes too (not just <>&) — this also has to be safe to drop straight
+// into a double-quoted HTML attribute (an <option value="...">), not only text.
+const esc = s => (s||'').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 
 $('#ask').onsubmit = async e => {
   e.preventDefault();
@@ -295,6 +297,13 @@ $('#ask').onsubmit = async e => {
   $('#send').disabled = false; $('#in').focus();
 };
 
+// The give-form project picker follows whichever project the Projects tab is on,
+// UNTIL the person touches the picker itself — then their own pick sticks until
+// they switch projects on the Projects tab again (selectProject() below clears
+// this flag). Starts false: on first load nothing has been touched yet.
+let GIVE_PROJECT_TOUCHED = false;
+$('#giveProject').onchange = () => { GIVE_PROJECT_TOUCHED = true; };
+
 // Give the team a real job. Generates a one-time nonce so a double-tap can't start
 // the same work twice — the server dedupes on it.
 $('#give').onsubmit = async e => {
@@ -325,12 +334,28 @@ async function refresh() {
   const s = await fetch('/api/state').then(r => r.json());
 
   const gp = $('#giveProject');
-  if (s.projects && s.projects.length) {
+  // Arch (and anything else with no repo_path) can't take a build at all — never
+  // offer it in the first place, rather than let someone pick it and get refused
+  // after the fact. /api/dispatch refuses it too (the actual guard); this is just
+  // not showing a control that could only ever fail.
+  const eligible = (s.projects || []).filter(p => p.repo_path);
+  if (eligible.length) {
     const cur = gp.value;
-    gp.innerHTML = s.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
-    if (s.projects.find(p => p.id === cur)) gp.value = cur;
-    else gp.value = SELECTED_PROJECT && s.projects.find(p => p.id === SELECTED_PROJECT)
-      ? SELECTED_PROJECT : s.projects[0].id;
+    gp.innerHTML = eligible.map(
+      p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`
+    ).join('');
+    const onTab = SELECTED_PROJECT && eligible.find(p => p.id === SELECTED_PROJECT);
+    if (!GIVE_PROJECT_TOUCHED && onTab) {
+      // Follow the Projects tab until the person picks something themselves.
+      gp.value = SELECTED_PROJECT;
+    } else if (eligible.find(p => p.id === cur)) {
+      // Keep whatever they'd already picked here.
+      gp.value = cur;
+    } else {
+      gp.value = onTab ? SELECTED_PROJECT : eligible[0].id;
+    }
+  } else {
+    gp.innerHTML = '';
   }
 
   $('#jobs').innerHTML = s.jobs.length ? s.jobs.map(j => `
@@ -513,7 +538,11 @@ async function openMemory(pid, name) {
 }
 window.closeMemory = () => document.querySelector('#memov').classList.remove('on');
 
-window.selectProject = id => { MEM_SHOWN_FOR = null; SELECTED_PROJECT = id; renderProjects(window.STATE); };
+window.selectProject = id => {
+  MEM_SHOWN_FOR = null; SELECTED_PROJECT = id;
+  GIVE_PROJECT_TOUCHED = false;   // an explicit tab switch wins over an earlier pick
+  renderProjects(window.STATE);
+};
 window.toggleTodo = async id => { await fetch('/api/todos/'+id+'/toggle',{method:'POST'}); refresh(); };
 window.deleteTodo = async id => { await fetch('/api/todos/'+id+'/delete',{method:'POST'}); refresh(); };
 window.addTodo = async (e, pid) => {

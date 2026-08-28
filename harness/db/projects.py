@@ -34,15 +34,38 @@ class ProjectRepoUnavailable(RuntimeError):
     English, this string is shown to Neill and written into the job's own record."""
 
 
+def _projects_root() -> Path:
+    """The one folder real project code is allowed to live under (seats.toml
+    `[projects].root`) — a live wiring review found nothing stopped `resolve_repo`
+    from happily returning a path OUTSIDE it (a mistyped `repo_path`, or a test that
+    forgot to repoint a project row before pointing it at a real one). This is a
+    plain function, not a constant, so tests can `monkeypatch.setattr` it straight
+    at the tmp directory they're using and get the SAME guard production relies on —
+    which is what makes forgetting to repoint a loud refusal instead of a silent
+    build against the wrong repo.
+    """
+    try:
+        import dispatch   # deferred: dispatch never imports this module, so this
+                          # is one-directional and safe, but importing it at our
+                          # own module level would still be a needless coupling
+        cfg = dispatch.load_config()
+        root = cfg.get("projects", {}).get("root") or "~/code-projects"
+    except Exception:
+        root = "~/code-projects"
+    return Path(root).expanduser()
+
+
 def resolve_repo(conn, project_id: str) -> tuple[Path, str]:
     """The actual git repo directory + its default branch name for a project.
 
     Never guesses: a project with no repo_path (Arch, Decision C — the fleet reads
     its notes but must never touch its code or patient data), a repo_path that isn't
-    on this machine, or a folder that isn't really a git repo, all raise
-    ProjectRepoUnavailable with a plain sentence rather than silently falling back to
-    some other repo. Falling back would be worse than failing: it would build the
-    wrong project's code and nobody would notice until review.
+    on this machine, a repo_path OUTSIDE the configured projects root, a folder
+    that isn't really a git repo, or a repo whose default branch can't be pinned
+    down — all raise ProjectRepoUnavailable with a plain sentence rather than
+    silently falling back to some other repo or branch. Falling back would be worse
+    than failing: it would build the wrong project's code and nobody would notice
+    until review.
     """
     row = conn.execute(
         "SELECT repo_path FROM projects WHERE id = ?", (project_id,)
@@ -59,6 +82,13 @@ def resolve_repo(conn, project_id: str) -> tuple[Path, str]:
         raise ProjectRepoUnavailable(
             "That project's code isn't where it's supposed to be on this machine."
         )
+    root = _projects_root().resolve()
+    resolved = path.resolve()
+    if root != resolved and root not in resolved.parents:
+        raise ProjectRepoUnavailable(
+            "That project's code isn't kept where projects are supposed to live "
+            "on this machine."
+        )
     check = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"], cwd=path,
         capture_output=True, text=True, timeout=10,
@@ -71,23 +101,33 @@ def resolve_repo(conn, project_id: str) -> tuple[Path, str]:
 
 
 def _default_branch(repo: Path) -> str:
-    """This repo's own main line — never assume 'main' (rule: no hardcoded machine/
-    project-specific assumptions). Tries the remote's HEAD first (works on a real
-    clone with an origin), then the current branch of a plain local repo (what a
-    disposable test fixture is), then falls back to 'main' as the last resort."""
+    """This repo's own main line — NEVER 'whatever happens to be checked out'.
+
+    A real wiring review caught the earlier version doing exactly that (falling
+    back to `rev-parse --abbrev-ref HEAD`): if the source repo's working copy
+    happened to be sitting on a feature branch at the moment this ran, THAT became
+    every job's 'main line' — silently. The only signals trusted now are ones that
+    mean something regardless of what's currently checked out: the remote's own
+    HEAD pointer (what a real clone of a real project has), then an actual local
+    branch literally named 'main' or 'master'. Anything else is a repo we can't
+    honestly name a default branch for, so we refuse rather than guess.
+    """
     out = subprocess.run(
         ["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo,
         capture_output=True, text=True, timeout=10,
     )
     if out.returncode == 0 and out.stdout.strip():
         return out.stdout.strip().rsplit("/", 1)[-1]
-    out = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
-        capture_output=True, text=True, timeout=10,
+    for candidate in ("main", "master"):
+        check = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{candidate}"],
+            cwd=repo, capture_output=True, text=True, timeout=10,
+        )
+        if check.returncode == 0:
+            return candidate
+    raise ProjectRepoUnavailable(
+        "couldn't tell which branch is the main line of that project"
     )
-    if out.returncode == 0 and out.stdout.strip() and out.stdout.strip() != "HEAD":
-        return out.stdout.strip()
-    return "main"
 
 
 def project_name(conn, project_id: str) -> str:

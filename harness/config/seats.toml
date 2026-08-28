@@ -359,3 +359,15 @@ reviewers = ["reviewer", "brain", "grok"]   // claude · gpt · grok — real se
 min_model_families = 2                      // §6 floor; we can reach 4
 escalate_to = "reviewer"                    // needs_human resolution seat
 escalate_to_human_on = ["needs_human"]      // ...or Neill's queue
+
+// ---------------------------------------------------------------------------
+// PROJECTS — the one folder real project code is allowed to live under.
+//
+// `db.projects.resolve_repo` refuses any project whose repo_path resolves OUTSIDE
+// this root, even if the path itself looks legitimate. This is what stops a job
+// (or a test that forgot to repoint a project row) from silently driving some
+// other repo on this machine — a missed guard here is a wrong-repo build nobody
+// would notice until review, not a crash you'd catch immediately.
+// ---------------------------------------------------------------------------
+[projects]
+root = "~/code-projects"
