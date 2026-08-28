@@ -48,7 +48,7 @@ def _load_chief_env() -> None:
 _load_chief_env()
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from db.jobs import connect, init_db, month_spend
 
@@ -686,6 +686,71 @@ async def voice_ask(request: Request):
         (out.get("model", _CHIEF_MODEL), out["full"][:500]),
     )
     return out
+
+
+@app.post("/api/voice/ask/stream")
+async def voice_ask_stream(request: Request):
+    """Let the mouth start speaking while Chief is still forming the full answer."""
+    body = await request.json()
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def _gen():
+        said = (body.get("said") or "").strip()
+        if not said:
+            yield _sse("done", {
+                "full": "", "spoken": "I didn't catch that.",
+                "model": _CHIEF_MODEL, "failed": True,
+            })
+            return
+
+        from mouth import is_pushback
+        pushed_back = is_pushback(said)
+
+        if os.environ.get("OPENAI_API_KEY"):
+            from chief import _for_speech
+
+            async with _chief_lock:
+                session = _live_session()
+                pieces: list[str] = []
+                try:
+                    async for sentence in session.say(said, deep=pushed_back):
+                        pieces.append(sentence)
+                        yield _sse("sentence", {"text": _for_speech(sentence)})
+                except Exception:
+                    # A broken turn cannot poison the next one. Any partial answer is
+                    # abandoned because Chief did not finish the thought reliably.
+                    global _chief_session
+                    _chief_session = None
+                    pieces.clear()
+                answer = " ".join(pieces).strip()
+
+            if answer:
+                out = {"spoken": _for_speech(answer), "full": answer,
+                       "model": _CHIEF_MODEL, "failed": False}
+            else:
+                out = {"spoken": "Something went wrong on my end. Nothing's started.",
+                       "full": "Chief returned nothing. No work was dispatched.",
+                       "model": _CHIEF_MODEL, "failed": True}
+                yield _sse("sentence", {"text": out["spoken"]})
+        else:
+            # The free path still arrives as one piece, but it keeps the same wire shape
+            # so the phone does not need a second way to handle Chief's answer.
+            talking_about = (body.get("context") or "").strip()
+            context = "\n\n".join(p for p in (_project_context(), talking_about) if p)
+            out = ask_chief(said, context=context, pushed_back=pushed_back)
+            yield _sse("sentence", {"text": out["spoken"]})
+
+        c = db()
+        c.execute(
+            "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
+            "SELECT id, 'chief', 'chief', ?, 'gpt', 'thinking', ? FROM jobs ORDER BY id DESC LIMIT 1",
+            (out.get("model", _CHIEF_MODEL), out["full"][:500]),
+        )
+        yield _sse("done", out)
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 @app.get("/voice", response_class=HTMLResponse)
