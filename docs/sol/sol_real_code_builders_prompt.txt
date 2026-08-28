@@ -1,0 +1,133 @@
+You are GPT-5.6-sol acting as an adversarial ARCHITECTURE REVIEWER for the Chief Command
+harness (repo root = your cwd, read-only). Another reviewer (Claude) has already grounded
+this in the code; your job is to find what he MISSED and to disagree where he is wrong.
+Be concrete, cite file:line. No code, no diffs. Attack the design.
+
+## Read these first (they are the ground truth)
+- AGENTS.md
+- harness/executor.py            (the in-process worker; _make_worktree, _commit_in_worktree, run_job)
+- harness/gatekeeper.py          (merge: _same_commit, _commit_holds_the_reviewed_work,
+                                  _unreviewed_files_in, _repo_is_ready, _git_merge, _MERGE_LOCK)
+- harness/gauntlet.py            (run_panel, _review_one, _parse_verdict, MAX_CODE_CHARS,
+                                  _claude_review/_codex_review/_xai_review)
+- harness/dispatch.py            (dispatch_local, panel_roster, _refuse_a_panel_that_cannot_hold,
+                                  load_config + _strip_slash_comment)
+- harness/db/schema.sql          (guards 1-12; especially guard_family_floor,
+                                  guard_no_self_family_testing, guard_ship_requires_a_passing_tester,
+                                  guard_a_build_finishes_a_version, guard_builder_identity_is_frozen)
+- harness/config/seats.toml      ([seats.riggs] provider claude-cli family claude;
+                                  [seats.reviewer] provider claude-cli family claude;
+                                  [gauntlet] reviewers = reviewer/brain/grok, min_model_families = 2)
+- docs/gpt/GPT_TASK_QUEUE.md     (tasks 4 and 9 — this plan IS task 9)
+
+## THE PLAN UNDER REVIEW ("REAL CODE BUILDERS") — owner wants it built tonight, testable tomorrow
+Today the only in-process builder is a local ollama model that writes a text answer into
+ONE file (chief_output/job_<id>.txt). Proposed:
+
+1. Add a `claude-cli` builder function in executor.py that runs `claude -p` non-interactively
+   INSIDE the job's git worktree (harness/.worktrees/job-<id>, branch job/<id>), with the
+   seat's agent prompt + memory file prepended to the request, a permission mode that allows
+   file edits within the worktree only, and then commits whatever it changed.
+   head_version = that commit sha (as today).
+2. The REVIEWED BUNDLE becomes the diff `git diff <merge-base with main>..<tip>` instead of
+   jobs.result's text. jobs.result stores that diff text. The panel reviews the diff.
+3. gatekeeper.merge verifies the branch's diff (same git command) hashes/equals what was
+   reviewed, REPLACING the single-file rule (_commit_holds_the_reviewed_work +
+   _unreviewed_files_in) for diff-reviewed jobs. The single-file rule stays for text jobs.
+4. Tester = run the test suite in the worktree (task 4 is building the tester on another branch).
+5. Local-model output still never ships without a higher-tier review (schema guard 1).
+
+## FACTS ALREADY ESTABLISHED EMPIRICALLY BY THE OTHER REVIEWER (do not re-derive, build on them)
+- Installed CLI is Claude Code 2.1.250. Relevant flags exist: --permission-mode
+  (acceptEdits|auto|bypassPermissions|manual|dontAsk|plan), --allowedTools/--disallowedTools,
+  --tools, --add-dir, --setting-sources, --settings, --strict-mcp-config, --restricted,
+  --safe-mode, --bare, --max-budget-usd, --output-format json, --session-id,
+  --no-session-persistence, --fallback-model.
+- MEASURED: `claude -p` with DEFAULT settings, cwd = a scratch dir, read a file OUTSIDE cwd
+  and ran arbitrary shell (`whoami`, `ls $HOME/.chief/`) with NO prompt and NO confinement.
+- MEASURED: `claude -p --setting-sources "" --strict-mcp-config --restricted` confined file
+  tools to cwd, removed Bash entirely, and denied both an absolute-path read and a
+  relative-path (`../outside/...`) traversal when Bash was re-enabled via --tools.
+  NOTE: this block is a heuristic permission ANALYZER, not a kernel sandbox.
+- The owner's ~/.claude/settings.json contains: permissions.allow = ["Bash","Read","Write",
+  "Edit","Glob","Grep","WebFetch","WebSearch", ...], defaultMode "auto",
+  additionalDirectories = ["/Users/user/.claude", "/Users/user/Desktop",
+  "/Users/user/Documents/GitHub/arch-to-freedom-emr"], skipDangerousModePermissionPrompt true,
+  a SessionStart hook, and MCP servers (Todoist, Google Drive). A builder inheriting user
+  settings therefore gets unrestricted Bash+Write anywhere, the owner's ~/.claude (agent
+  definitions + memory), and the Arch EMR medical-records repo — which the owner's standing
+  Decision C forbids the fleet from touching (schema.sql:110-113, seats.toml:223-224).
+- ~/.claude/agents/riggs.md, finn.md, nova.md DO NOT EXIST. Only ~/.claude/agents/memory/
+  {riggs,finn,nova}.md exist, and their content is Arch-EMR-specific (Express/Node/React,
+  vitest, numbered SQL migrations, a /tmp/arch-verify.lock rule) — wrong conventions for
+  this Python repo.
+- seats.toml is NOT valid TOML (it uses // comments); dispatch.load_config strips them with a
+  hand-rolled string-aware scanner (_strip_slash_comment).
+- The repo has no .gitmodules and no .gitattributes today.
+- ~/.chief/env holds the XAI key and is readable by anything running as the owner. The
+  gatekeeper's auth token is ~/.chief/gatekeeper.token, same user, same readability.
+- git worktrees here are LINKED worktrees: they share $GIT_COMMON_DIR (.git) — so they share
+  .git/config, hooks, and the object store with the main checkout.
+
+## ANSWER THESE, HARDEST FIRST. Where the other reviewer may be wrong, say so.
+
+Q1. THE REVIEWED-DIFF BINDING. head_version is already the tip COMMIT SHA, and a commit sha
+    binds the whole tree exactly. So is the proposed "hash the diff and compare at merge"
+    check adding any real security, or is it redundant with the sha check and merely adding
+    a new way to fail? What is the ACTUAL residual risk — is it binding, or is it the
+    FIDELITY of the diff as a rendering of the commit? Enumerate every way `git diff base..tip`
+    can under-represent what a merge will actually bring in: binary files, submodules,
+    symlinks (mode 120000), file mode/exec-bit changes, .gitattributes diff drivers /
+    textconv / `-diff`, `.git/config` written from inside a linked worktree, renames with
+    -M, CRLF/`core.autocrlf`, empty-tree/no-common-history, merge commits on the branch,
+    a branch that itself merges main, `git diff` two-dot vs three-dot semantics.
+
+Q2. MERGE-BASE DRIFT. If main advances between review and merge, `git merge-base main tip`
+    changes, so recomputing the same command at merge time yields a DIFFERENT diff than the
+    panel reviewed — even though tip never moved. Does this make the proposed equality check
+    fail-closed-but-useless (every merge refused whenever main moves)? What should be
+    recorded and re-verified instead?
+
+Q3. MODE SELECTION. The gatekeeper must know whether a job is "single-file text" or
+    "diff-reviewed" to pick the right rule. Where must that fact live so it cannot be flipped
+    AFTER review to launder extra files into main? Note guard_builder_identity_is_frozen
+    freezes builder_seat/tier/family but the `seats` table itself is re-upserted from config
+    on every server start (dispatch.sync_seats), so a seat's PROVIDER is mutable history.
+
+Q4. FAMILY ARITHMETIC. [seats.riggs] family = "claude". migration 007 excludes the builder's
+    own family from the diversity count, so a Claude-built job's panel counts only {gpt, grok}
+    against min_model_families = 2 — zero slack. Grok is metered with daily_cap_cents=100 /
+    review_cap_cents=75. Walk through what happens operationally when Grok is capped out or
+    its key is missing. Also: guard_no_self_family_testing forbids a claude TESTER on a
+    claude-built job — what does that do to task 4's tester and to
+    guard_ship_requires_a_passing_tester? Is "Claude builds" actually compatible with this
+    seat roster tonight, or does it need a roster change first?
+
+Q5. PROMPT INJECTION INTO THE PANEL. The diff is builder-authored text passed as a CLI
+    ARGUMENT to `claude -p` and `codex exec` (gauntlet.py::_claude_review/_codex_review) and
+    as a message body to xAI. _parse_verdict reads from the END of stdout and matches any
+    line starting with PASS/FAIL. A code builder can now put arbitrary text in the reviewed
+    bundle. How exploitable is this in practice, and what is the minimal structural fix
+    (out-of-band verdict channel? --output-format json? --json-schema? a nonce?).
+
+Q6. ENVIRONMENT / CREDENTIALS. What is the genuinely minimal env for `claude -p` on a
+    subscription (OAuth/keychain) seat, and — given the builder needs HOME to authenticate,
+    and HOME grants ~/.chief/env, ~/.chief/gatekeeper.token, harness/db/chief.db and
+    ~/.claude — is env stripping meaningful defence at all, or theatre? If theatre, say so
+    and name what would actually be a boundary.
+
+Q7. SCALE / TRUNCATION. gauntlet MAX_CODE_CHARS = 200_000 truncates the bundle and instructs
+    the reviewer to answer FAIL. With diffs as bundles, what is the failure mode for a large
+    but legitimate change, and what should the design do instead of a permanent unfixable FAIL?
+
+Q8. ORDERING AND SCOPE. The owner wants this TONIGHT, testable TOMORROW. Task 4 (wire merge
+    into the flow) is in flight on another branch and depends on the same gatekeeper code.
+    What is the smallest version of this that is genuinely safe to run unattended overnight,
+    what must be deferred, and what should be built BEFORE this (if anything)? Is there
+    anything here that should be a hard STOP rather than an ADJUST?
+
+Q9. Anything else dangerous the other reviewer did not ask about. Be specific.
+
+Finish with: your own VERDICT (GO / ADJUST / STOP) and a numbered list of REQUIRED changes,
+ordered by how much risk each removes. Mark any point where you are UNSURE rather than
+asserting it.

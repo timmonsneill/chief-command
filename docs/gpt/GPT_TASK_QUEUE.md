@@ -100,13 +100,40 @@ roster, live `seats` row via `sync_seats`, tests that reference "grok" as a seat
 NOT the `family = "grok"` value, which is correct). Nothing in orchestration may
 reference a provider by name. One task, no behaviour change; all tests green.
 
-## 9. [ ] When builders commit real code, the reviewed bundle must be the DIFF
-Today the local worker commits only `chief_output/job_<id>.txt` and the gatekeeper
-correctly refuses a branch that changes anything else — so the merge path can ship a
-text answer but not code. When a builder that changes application files lands, the
-panel must review `git diff main...tip` (not `jobs.result`), the record must store a
-hash of that diff as the reviewed bundle, and `gatekeeper.merge` must verify the
-branch's diff hashes to what was reviewed. Design this with Sol before building.
+## 9. [ ] Real code builders — Sol's GO version ONLY (STOP on the full plan, 2026-08-27)
+Sol's gate: docs/sol/sol_real_code_builders.out. The full plan (builder edits, tests run,
+auto-merge) is STOPPED until a real OS boundary exists (the wall). What is GO tonight —
+"candidate generation, no merge":
+- a `claude-cli` builder in executor.py that runs `claude -p` with the LOCKDOWN on every
+  call: `--setting-sources "" --strict-mcp-config --restricted --safe-mode`, a per-job
+  `--settings` file, `--max-budget-usd`, prompt on stdin (variadic flags swallow a
+  positional prompt). A startup test fails if any flag is missing.
+- in a STANDALONE CLONE per job (not a `git worktree` — worktrees share .git, hooks,
+  refs and config with the live repo, so a builder with a shell can move main or poison
+  what the gatekeeper later reads). Precedent: ~/code-projects/chief-command-worktrees/.
+- the harness commits; FULL 40-char sha as head_version; `bundle_kind` column ('text' |
+  'diff') stamped at dispatch and frozen by trigger (numbered migration — a deliberate
+  Claude-session change, reviewed).
+- commit-time AND merge-time allowlist for diff jobs: plain text files only; refuse
+  binaries, symlinks, submodules (mode 160000), exec-bit changes, .gitattributes,
+  .git/hooks, merge commits. Refuse, don't render.
+- the panel reviews `git diff <merge-base main>..<tip>` for diff jobs (fidelity check:
+  reviewers saw a faithful, complete picture of THAT commit) — with the hardened,
+  structured-verdict reviewers (branch gpt/harden-reviewers).
+- a lane memory for THIS repo per builder seat (the ~/.claude/agents/memory files are
+  Arch-EMR conventions — wrong project; do not prepend them).
+- **It stops at `done`. Nothing runs builder-written tests; nothing merges.** Neill reads
+  the diff in the morning. Executing and merging come after the wall, in that order.
+
+## 10. [ ] Merge loop (task 4) — fix Sol's finding before it merges
+`harness/tester.py` records a pytest log as artifact kind `trace` to satisfy
+`guard_tester_must_cite_artifacts` — that launders "the tests passed" into "someone
+drove the app", making a green suite sufficient to ship. Record test runs as `exit_code`
++ `stdout` artifacts (kinds already in the schema), record NO tester verdict from a unit
+test log, and never run tests in a worktree whose diff contains anything but
+`chief_output/*.txt` (that is executing model-written code as the owner). The
+ask-the-gatekeeper wiring stays; guard 6 will refuse until a real driving tester exists,
+and the job's spoken line says so plainly.
 
 ---
 
