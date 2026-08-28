@@ -261,3 +261,15 @@ def test_a_ready_check_that_raises_excludes_rather_than_crashes(monkeypatch, tmp
     monkeypatch.setattr(gauntlet.subprocess, "run", boom)
     assert gauntlet._codex_ready() is False
     assert gauntlet._claude_ready() is False
+
+
+def test_codex_has_no_web_tool_and_ignores_the_users_config():
+    """GPT's own cross-model review proved --sandbox read-only leaves codex's built-in
+    web tool live (it fetched an outside URL from an instruction inside the reviewed
+    code) and still loads ~/.codex/config.toml. These are the switches that closed it."""
+    argv = gauntlet._codex_cmd("m", Path("/tmp/x/schema.json"))
+    assert "--ignore-user-config" in argv
+    assert 'web_search="disabled"' in argv
+    for feat in gauntlet.CODEX_FEATURES_OFF:
+        assert feat in argv
+    assert "browser_use" in gauntlet.CODEX_FEATURES_OFF and "multi_agent" in gauntlet.CODEX_FEATURES_OFF

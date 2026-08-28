@@ -236,10 +236,25 @@ def _codex_cmd(model: str, schema_path: Path) -> list[str]:
         "codex", "exec",
         "--sandbox", "read-only",       # reads the bundle it was handed; writes nothing
         "--skip-git-repo-check",        # it is not operating on a checkout
+        # The GPT cross-model review (2026-08-27) proved the two lines above are NOT
+        # "no tools": codex's built-in web tool talks to OpenAI's backend, outside the
+        # sandbox, and fetched an outside URL when told to from INSIDE the reviewed
+        # code. And ~/.codex/config.toml (a trusted-project grant for the medical repo
+        # among it) was still being loaded. Verified live: with all of the below, the
+        # same instruction answers NO_WEB_TOOL.
+        "--ignore-user-config",         # no trusted-project grants, no MCP servers
+        "-c", 'web_search="disabled"',  # the built-in web tool
+        *[f for feat in CODEX_FEATURES_OFF for f in ("--disable", feat)],
         "--model", model,
         "--output-schema", str(schema_path),
         "-",                            # read the prompt from stdin, never argv
     ]
+
+
+# codex features a reviewer must not have. Names from `codex features list` on this
+# machine (stable ones only — a removed/unknown name makes codex exit with usage).
+CODEX_FEATURES_OFF = ("browser_use", "browser_use_external", "in_app_browser",
+                      "computer_use", "multi_agent", "image_generation", "plugins", "apps")
 
 
 def _codex_review(request: str, code: str, model: str) -> tuple[str, str]:
@@ -409,6 +424,13 @@ def assert_reviewers_locked_down() -> None:
         failures.append("claude: --json-schema is missing")
     if _flag_value(claude_argv, "--output-format") != "json":
         failures.append("claude: --output-format json is missing")
+    if "--ignore-user-config" not in codex_argv:
+        failures.append("codex: --ignore-user-config is missing")
+    if 'web_search="disabled"' not in codex_argv:
+        failures.append("codex: web_search is not disabled")
+    for feat in CODEX_FEATURES_OFF:
+        if feat not in codex_argv:
+            failures.append(f"codex: feature '{feat}' is not disabled")
 
     if _flag_value(codex_argv, "--sandbox") != "read-only":
         failures.append("codex: --sandbox read-only is missing")
