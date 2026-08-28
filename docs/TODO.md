@@ -3,11 +3,10 @@
 **Persistent across sessions. Read at the start of every session. Update as things are
 done — don't let this rot.**
 
-> ⚠️ **2026-08-27: read `docs/HANDOFF_2026-08-27.md` FIRST.** Gatekeeper finished, reviewed
-> by six reviewers, fixed, and pushed. Grok is the third mind on the panel. Codex sessions
-> now have their own queue/worklog/gauntlet (`docs/gpt/`, `scripts/gpt-gauntlet.sh`).
-> Next work is queued for Codex in `docs/gpt/GPT_TASK_QUEUE.md`; owner said "chill" —
-> no big builds without a conversation first.
+> ⚠️ **2026-08-28: read `docs/HANDOFF_2026-08-28.md` FIRST.** App is live on the tailnet
+> and always-on; jobs run for Chief/Jess with a real Claude builder, stop at "ready to
+> read"; direction of record is ONE HOME (Google Cloud) + WORKERS, gated by Sol (STOP as
+> written / GO on direction). Work order lives in `docs/gpt/GPT_TASK_QUEUE.md`.
 >
 > ⚠️ **2026-07-20: the previous consolidated state lives in
 > `docs/HANDOFF_2026-07-20.md`.** In one session the build went from
