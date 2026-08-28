@@ -10,6 +10,19 @@ folder and vanishes on a fresh clone).
 
 ---
 
+## 0. [ ] Move the voice to Grok voice 2.0 (owner decision 2026-08-27) — needs Sol design first
+What runs today: `harness/server.py::voice_token` mints an OpenAI client secret and
+`harness/web/voice.html` connects to OpenAI over WebRTC. xAI's realtime API is
+WebSocket-only (`wss://api.x.ai/v1/realtime?model=...`) with its own ephemeral-token
+endpoint. Task: (a) confirm from docs.x.ai the exact model id for voice 2.0, the
+ephemeral-token endpoint, function-tool support and a `tool_choice`-equivalent (the mouth
+MUST hand every utterance to `ask_chief`; if xAI can't force that, STOP and report);
+(b) a `/api/voice/token` that reads the mouth seat from `seats.toml` (provider →
+vendor, never hardcoded) and mints the right token; (c) a WebSocket audio path in
+voice.html (mic → PCM16 chunks → ws; audio deltas → playback; barge-in), keeping the
+existing `ask_chief` round-trip; (d) pin the exact model id, never `grok-voice-latest`.
+Owner tests from the phone at the end. Nothing else in the harness changes.
+
 ## 1. [ ] Record what the Grok reviewer actually spent (harness only)
 `harness/gauntlet.py::_xai_review` makes a paid HTTP call and throws the response's
 `usage` block away. The `usage` table (`harness/db/schema.sql`) and `record_usage()`

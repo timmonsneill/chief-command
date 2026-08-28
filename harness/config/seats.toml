@@ -32,33 +32,36 @@
 // So: build against the OpenAI Realtime event schema, keep base_url in config, and
 // the other becomes a ONE-LINE swap. Do not marry either one.
 //
-// Price is a WASH — do not choose on it:
-//   grok-voice-think-fast-1.0  $3.00/hr flat  (~$0.05/min)
-//   gpt-realtime-2.1-mini      ~$0.04/min real-world once prompt caching kicks in
-//                              (and it will — a voice head resends the same system
-//                              prompt + tool defs every single turn)
-// The "Grok is 6x cheaper" claim compares against the FLAGSHIP gpt-realtime, not mini.
-//
-// Choose on tool-calling reliability instead. Grok wins on native MCP + session
-// resumption; OpenAI wins on configurable reasoning effort + a longer tool-calling
-// track record. Settle it with Spike C (bake-off), not with a blog post.
+// DECIDED 2026-08-27 (owner), on current measured numbers, not a blog post:
+//   grok-voice-think-fast-2.0  $0.08/min ($4.80/hr)  0.70s to first sound  S2S 82.9
+//   grok-voice-think-fast-1.0  $0.05/min ($3.00/hr)  1.25s                 S2S 75.7
+//   gpt-realtime-2.1 (high)    ~$10.75/hr measured   1.21s                 S2S 79.1
+// Grok 2.0 is faster, better and less than half OpenAI's cost. Google is out (rule 5).
+// The voice FEELING dumb is the design (the mouth never answers; everything waits on
+// the 13s Chief) — the fix is the fast lane (#12), not a vendor swap. OpenAI stays a
+// one-line fallback (same wire protocol). Pinned by exact id; never a -latest alias.
 // ---------------------------------------------------------------------------
 [seats.mouth]
-provider = "xai-realtime"
-model = "grok-voice-think-fast-1.0"
-base_url = "wss://api.x.ai/v1/realtime"     // swap to OpenAI's and it still works
-family = "grok"
+// ⚠️ WHAT ACTUALLY RUNS (found 2026-08-27): the voice page and its token endpoint in
+// harness/server.py + harness/web/voice.html are hardwired to OpenAI's realtime API
+// over WebRTC. For weeks this block said "grok" while the code ignored it — a config
+// that lies. It now says what runs. The DECIDED target is Grok voice 2.0 (above);
+// getting there is a BUILD (xAI's realtime is WebSocket-only, so the browser audio
+// path must be rewritten, plus its own token step) — queued as the top voice task.
+provider = "openai-realtime"
+model = "gpt-realtime-2.1"                  // the FULL model: mini won't reliably call the tool
+base_url = "https://api.openai.com/v1/realtime"
+family = "gpt"
 tier = "metered"
 turn_detection = "semantic_vad"             // NOT push-to-talk. Owner override.
 eagerness = "low"                           // a driver pauses mid-sentence to merge
 interrupt_response = true                   // barge-in
 
-// VOICE HAS ITS OWN BUDGET, separate from Grok-the-builder. Owner: "we need to do
-// more than $30 cap. that was for when we go over with grok stuff."
-// $3/hr, so 300c/day = ~1 hour of talking a day = ~$90/mo worst case.
-// Start here and tune once we see real usage — the meter only runs while you talk.
-daily_cap_cents = 300
-notes = "Fast + dumb BY DESIGN. Never blocks. Separate budget from [seats.grok]."
+// VOICE HAS ITS OWN BUDGET, separate from the builders. OpenAI realtime measures
+// ~$10.75/hr with reasoning up (~$0.06-0.11/min with caching). 480c/day ≈ 45 min-1 hr.
+// The Grok 2.0 target is $4.80/hr for the same hour.
+daily_cap_cents = 480
+notes = "Fast + dumb BY DESIGN. Never blocks. Target: Grok voice 2.0 (build queued)."
 
 // ---------------------------------------------------------------------------
 // BRAIN — deep reasoning, planning, decomposition, judging the gauntlet.
