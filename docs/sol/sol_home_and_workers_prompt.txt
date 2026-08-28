@@ -1,0 +1,108 @@
+You are GPT-5.6-sol acting as an adversarial ARCHITECTURE REVIEWER for the "Chief Command"
+harness (repo root is your cwd, read-only). I am Claude acting as the design gate. I have
+already read the code; do NOT trust my summary — verify against the files and cite file:line.
+Your job is to find what is WRONG or DANGEROUS in the proposed design, not to praise it.
+
+=== THE PROPOSED DESIGN (owner-set direction, docs/ARCHITECTURE_home_and_workers_2026-08-28.md) ===
+ONE HOME: a small Linux VM on Google Cloud (separate GCP project from the owner's medical
+records project "Arch"; no public IP; Tailscale-only). The home holds: the RECORD (sqlite
+chief.db), the GATEKEEPER (the only writer of merge/deploy/spend), the web APP the owner's
+phone opens, and the VOICE token endpoint + streaming.
+MANY WORKERS: the owner's MacBook (local ollama model, small jobs), a Mac Studio arriving
+~late Sept 2026 (heavy local models + claude-cli/codex builders), and a cloud worker on the
+home box as a backup. Workers connect over the tailnet, CLAIM jobs they are suited for, run
+the builder and the reviewer panel locally, and report events/artifacts/head_version/result
+back THROUGH a home HTTP API — never by touching the sqlite file.
+A worker that is off is off: unclaimed jobs wait or go to another worker; in-flight jobs are
+marked STALLED on heartbeat loss and picked up when it returns.
+The wall (separate OS user for agents, keys never reach builders — docs/THE_WALL_owner_steps.md,
+queue task 13) is to be built "on the home, once", for Linux.
+Arch (the medical repo) stays off-limits to every worker.
+
+=== WHAT I FOUND IN THE CODE (verify each of these; correct me where I'm wrong) ===
+1. THERE IS NO PULL LOOP TODAY. db/jobs.py::claim_next_job exists and is atomic, but grep
+   shows it is called ONLY from harness/tests/test_jobs.py and harness/scripts/smoke_dispatch.py.
+   The live path is PUSH, IN-PROCESS: dispatch.py::dispatch_local (line ~181-184) sets status
+   'in_progress' and then calls executor.start_in_background(job_id) — a thread in the same
+   process as the record. So the architecture doc's claim "workers ask the record for work;
+   moving workers to other machines is plumbing on a design that already assumes it" looks
+   false to me. Also claim_next_job filters on status='todo', which dispatch_local never
+   leaves a job in.
+2. claim_next_job claims BY builder_seat, has NO worker identity, NO lease, NO expiry, NO
+   heartbeat. jobs has no worker column. 'stalled' is not in the jobs.status CHECK constraint
+   (schema.sql ~279). attempts increments per claim with no ceiling.
+3. THE PANEL AND ALL RECORDING ARE IN-PROCESS TODAY. executor.run_job calls
+   gauntlet.run_panel; each reviewer thread opens its OWN sqlite connection (gauntlet.py
+   _review_one) and calls db.jobs.record_verdict / record_artifact / set_status directly.
+   The schema triggers verify a verdict's tier/family against the seats table but CANNOT
+   verify that a review actually happened. artifacts.captured_by ('harness'|'playwright'|
+   'model') is enforced by a trigger that only reads the value in the row — trust today comes
+   from the writer being in-process, not from anything checkable.
+4. SPEND: gauntlet._reserve_review_budget imports gatekeeper and calls gatekeeper.spend
+   in-process on the panel's own writable connection. Caps are DB triggers on INSERT INTO
+   usage (guard_daily_cap_is_hard / build / review / monthly).
+5. GATEKEEPER: gatekeeper.serve() is LOOPBACK-ONLY by explicit design ("the tailnet is other
+   devices, and the whole point of this process is that reaching it is harder than reaching
+   the agents") + a shared token in ~/.chief/gatekeeper.token. gatekeeper.merge does REAL GIT
+   WORK in a repo on the machine it runs on: _branch_tip, _diff_bundle, _commit_holds_the_
+   reviewed_work, _repo_is_ready, _git_merge, and it compares the branch tip against
+   jobs.head_version and the committed diff against jobs.result byte-for-byte.
+6. Nothing ever pushes job/<id> anywhere (queue task 12 says so). So if the builder runs on a
+   worker, the home has no git objects to verify or merge.
+7. DISPATCH STAMPS THE PANEL SIZE FROM LOCAL PROBING: dispatch.panel_roster ->
+   gauntlet.has_runner probes THIS MACHINE (is `claude` logged in, is `codex` logged in, is
+   XAI_API_KEY set) and writes required_reviews / required_review_families onto the job
+   (un-lowerable by trigger). On the home, none of those CLIs may exist.
+8. VOICE: server.py::voice_token mints an OpenAI ephemeral client secret from OPENAI_API_KEY
+   loaded from ~/.chief/env by _load_chief_env; the browser then talks DIRECTLY to the vendor.
+   The mouth's only tool posts to /api/voice/ask (+ /api/voice/ask/stream, SSE) on the server.
+   server.py binds 127.0.0.1:8787 and is exposed by `tailscale serve`. There is no auth on
+   these endpoints other than being on the tailnet. A single held chief_live session
+   (_chief_session) is process-global.
+9. seats.toml is one file; seats are synced into the DB at server start (dispatch.sync_seats)
+   from whatever machine runs the server. Metered seat = grok/xai with daily/build/review caps.
+
+=== THE QUESTIONS I NEED YOU TO ATTACK ===
+(1) WORKER PROTOCOL. Design/critique: claim (what is the unit of matching — seat? capability
+    labels? project?), lease + heartbeat + renewal, what STALLED means and who sets it,
+    resume-vs-rerun (the dead worker's clone is on the dead machine), idempotent reporting
+    (events, artifacts, verdicts, head_version, result) — exactly-once or at-least-once with
+    dedupe keys? How does the frozen bundle / clone source reach a worker: git over the
+    tailnet from a bare repo on the home, or the home serving bundles? How does a worker PROVE
+    it ran the reviewed bytes? WHAT CAN A COMPROMISED OR BUGGY WORKER DO TO THE RECORD — be
+    concrete and rank it. Is "the worker runs the panel and reports verdicts" salvageable at
+    all, or does it destroy the gauntlet's meaning?
+(2) WHICH SCHEMA GUARDS BREAK when the writer is an HTTP API rather than in-process Python?
+    Go guard by guard through harness/db/schema.sql. Which become self-declared claims over
+    the wire? What must move behind the gatekeeper, and what new guards/columns are required?
+(3) VOICE/APP ON THE HOME. What changes in the token step and the SSE streaming when the home
+    is a cloud VM in a GCP region rather than the laptop on the owner's desk? Latency budget
+    for the mouth->ask_chief round trip (Tailscale direct vs DERP relay), auth on the API when
+    it is no longer "my own laptop", the process-global held session, and failure modes when
+    the tailnet or the VM is down. ~90% of use is voice; the owner drives while using it.
+(4) SEATS PER WORKER. Local model only on laptop/Studio; API/metered seats where the keys are.
+    How do budget caps stay ONE record when spend can be initiated on three machines? Can a
+    worker holding a provider key be prevented from spending without a reservation? Should
+    metered seats be forbidden on remote workers entirely?
+(5) THE CLOUD HOME'S HARDENING on Linux: OS users, systemd, zero inbound, Tailscale
+    (serve vs funnel), where keys live, backup/restore of the sqlite record (WAL), and whether
+    "the wall built on the home once" is even the right place — my view is the wall protects
+    against BUILDER agents, and builders run on the macOS workers, not the home. Am I right?
+(6) MIGRATION ORDER so nothing is migrated twice (the Studio arrives AFTER the home exists).
+    What is the smallest first step that is reversible? What must NOT be built yet?
+
+=== RULES OF THIS PROJECT (binding) ===
+See /AGENTS.md. Highlights: text-first (voice is a skin, must never be load-bearing);
+version-pin everything; Tailscale-only, nothing public; hardware-agnostic (no machine-specific
+paths); no Google/Gemini AI (Google CLOUD is allowed); local output never ships without a
+higher-tier cross-family review (DB trigger); providers referenced by SEAT never by name;
+every spec carries a Feature Acceptance Checklist (what control exists, what it does, where
+it is reachable). The owner CANNOT read code — anything he reads must be plain English.
+
+=== OUTPUT I WANT ===
+- A verdict: GO / ADJUST / STOP on the design as proposed, with your reasoning.
+- The ranked failure modes, most dangerous first, each with file:line evidence.
+- A numbered REQUIRED-CHANGES list (concrete: "add column X, move Y behind Z", not "consider").
+- Explicitly: where I am WRONG in my nine findings above.
+- Explicitly: what in this plan is over-engineering or premature.
+Be blunt. Length is fine. Do not write files; read-only.

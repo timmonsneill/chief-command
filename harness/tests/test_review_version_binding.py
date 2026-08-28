@@ -6,6 +6,7 @@ reviewed." These tests attack the chain the way he would: reuse a stale approval
 outrun a fail by re-completing, rewrite what shipped after the fact.
 """
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -192,3 +193,16 @@ def test_shipping_requires_the_tester_to_have_driven_the_current_version(conn):
 
     with pytest.raises(GuardViolation, match="tester"):
         set_status(conn, job, "shipped")
+
+
+def test_a_verdict_cannot_be_repointed_at_another_version(conn):
+    """Sol's home-and-workers gate (2026-08-28) proved this one-line bypass of the whole
+    version chain: approve OLD, then UPDATE the verdict to say it was about the head."""
+    job = create_job(conn, "the login form", builder_seat="grinder")
+    set_status(conn, job, "in_progress")
+    set_head_version(conn, job, "version-A")
+    record_verdict(conn, job, "sol", verdict="pass", reviewed_version="version-OLD")
+    with pytest.raises((GuardViolation, sqlite3.IntegrityError), match="cannot be moved"):
+        conn.execute("UPDATE verdicts SET reviewed_version='version-A' WHERE job_id=?", (job,))
+    with pytest.raises((GuardViolation, sqlite3.IntegrityError), match="cannot be moved"):
+        conn.execute("UPDATE verdicts SET job_id=? WHERE job_id=?", (job + 1000, job))

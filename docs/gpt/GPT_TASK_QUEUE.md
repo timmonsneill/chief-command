@@ -199,6 +199,18 @@ Linux box — the wall (task 13) built there once; (c) how the voice token step 
 move unchanged. Output: a spec with a Feature Acceptance Checklist (rule 9). No code
 until Sol says GO.
 
+## 15. [ ] Three live findings from the home-and-workers gate (fix before the cloud move)
+From docs/HOME_AND_WORKERS_SPEC_2026-08-28.md. (a) The voice cap is fiction: `[seats.mouth]
+daily_cap_cents` exists but `/api/voice/token` records no usage row — reserve via
+`gatekeeper.spend(seat="mouth", role="voice", cents=<per-session estimate>)` before
+minting a token and refuse when capped; a test. (b) `capabilities` / `safe_capabilities`
+(schema.sql ~377) are referenced by no trigger and no non-test code — either wire them
+(dispatch refuses a seat lacking the capability) or delete them; decoration that reads
+like enforcement is worse than nothing. (c) `_sync_seats_once` marks itself done before
+knowing the sync succeeded — mark only on success, and put the failure on the record.
+Task 14's spec has 27 REQUIRED changes; the split is "workers BUILD, the home REVIEWS,
+records and merges". Do NOT start the cloud move before the split runs on the laptop.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.
