@@ -275,11 +275,21 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
                       "safe to merge right now")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # ORDER IS THE POINT: the RECORD decides first, the irreversible act happens
-    # second. Merging and then asking produced "the code merged but the record wouldn't
-    # accept it" — an unreviewed merge with a polite note. The gatekeeper's own checks
-    # are a SUBSET of the schema's (it never checks for a passing tester), so the only
-    # safe order is to let the schema refuse before git is touched at all.
+    # ORDER (queue task 6, reworked): the git work now happens OUTSIDE the database
+    # transaction. It used to be BEGIN IMMEDIATE -> set_status('shipped') -> git merge
+    # (up to 120s) -> COMMIT — which held a write transaction across a slow git
+    # operation, and connect()'s busy_timeout is 15s. Every OTHER writer on this
+    # database (the review panel recording verdicts from several threads, in
+    # particular) would hit "database is locked" and give up long before a real merge
+    # finished, turning a single slow merge into a wave of dropped writes elsewhere.
+    #
+    # New order: re-verify under the lock, merge in git, THEN a SHORT transaction that
+    # records it. If the record refuses (a guard fires, or the write itself fails),
+    # `_reset_main_to(before)` undoes the git side effect — the same helper the old
+    # code already used for "git merged, the record couldn't say so." The record is
+    # still the only thing that can make 'shipped' true; this just moves the slow,
+    # already-idempotent-to-undo git step ahead of the fast, guarded database step,
+    # instead of holding a lock across the slow one.
     # ══════════════════════════════════════════════════════════════════════════
     with _MERGE_LOCK:
         # Re-resolve under the lock and merge the SHA, never the name. Between the check
@@ -295,22 +305,27 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
             raise _no("the project folder changed while the merge was being checked, "
                       "so it isn't safe to merge right now")
         before = _main_tip()
+
+        commit = _git_merge(tip)
+        if commit is None:
+            # Nothing committed to main and no database transaction was ever opened —
+            # there is nothing to roll back on either side.
+            raise _no("the merge didn't go through cleanly — it needs a person")
+
         conn.execute("BEGIN IMMEDIATE")
         try:
             try:
                 set_status(conn, job_id, "shipped")
             except (GuardViolation, sqlite3.IntegrityError) as exc:
                 conn.execute("ROLLBACK")
+                # git merged, the record refused it. Put main back exactly where it
+                # was, so the record and the repository never disagree about shipping.
+                _reset_main_to(before)
                 raise _no(_plain(exc)) from exc
-            commit = _git_merge(tip)
-            if commit is None:
-                conn.execute("ROLLBACK")          # the record never happened either
-                raise _no("the merge didn't go through cleanly — it needs a person")
             try:
                 conn.execute("COMMIT")
             except sqlite3.Error:
-                # git merged, the record couldn't say so. Put main back exactly where it
-                # was, so the record and the repository never disagree about shipping.
+                # git merged, the record couldn't say so. Same undo, different cause.
                 _reset_main_to(before)
                 raise
         except BaseException:

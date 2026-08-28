@@ -161,42 +161,6 @@ _BUILDERS = {
 # ---------------------------------------------------------------------------
 # The run loop — everything above, in order, for one job.
 # ---------------------------------------------------------------------------
-def _after_certification(conn, job_id: int, cfg: dict[str, Any]) -> None:
-    """Once the panel certifies (result.certified), prove the work actually runs and
-    ask the one component allowed to ship it. Pulled out of run_job so it can be
-    exercised directly against a job already parked at 'done'.
-    """
-    import tester
-    outcome = tester.run_tester_for_job(conn, job_id, cfg)
-    if outcome.get("passed"):
-        import gatekeeper
-        try:
-            answer = gatekeeper.handle(
-                {"verb": "merge", "job_id": job_id, "asked_by": "the panel"},
-                db_path=DB_PATH,
-            )
-        except Exception:  # noqa: BLE001 - asking must never crash the worker
-            answer = {"ok": False, "error": "something went wrong asking to merge this"}
-        if not answer.get("ok"):
-            # The gatekeeper already wrote its own refusal onto the event trail. Put
-            # the same plain-English reason where the voice reads current status.
-            set_status(
-                conn,
-                job_id,
-                "done",
-                spoken_summary=str(answer.get("error") or "the gatekeeper said no")[:200],
-            )
-    elif outcome.get("ran"):
-        set_status(
-            conn,
-            job_id,
-            "done",
-            spoken_summary=("Checked and certified, but the automated tests didn't "
-                            "confirm it runs: "
-                            f"{str(outcome.get('reason') or '')[:160]}"),
-        )
-
-
 def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Take one recorded job and actually do it. Safe to call in a thread.
 
@@ -258,12 +222,23 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
         #    all bound to THIS version. The panel decides nothing the database wouldn't;
         #    it produces the verdicts the guards ask for. Without a config there is no
         #    panel, and the job simply stays parked (the safe outcome, not a shortcut).
+        #
+        #    Certification itself is what asks the gatekeeper to ship (gauntlet.py's
+        #    own `_ask_to_ship`, called from inside `run_panel`) — that lives THERE,
+        #    not here, so the same thing happens whether a job gets certified through
+        #    this worker or through `gauntlet.run_gauntlet_for_job` (dispatch.py's
+        #    other entry point). This function's only job once certified is the
+        #    harmless diagnostic below, which never gates anything.
         if cfg is not None:
             import gauntlet
             panel = gauntlet.run_panel(conn, job_id, job["request"], result, version,
                                        cfg, db_path=DB_PATH)
             if panel.certified:
-                _after_certification(conn, job_id, cfg)
+                import tester
+                try:
+                    tester.record_smoke_check(conn, job_id)
+                except Exception:  # noqa: BLE001 — purely diagnostic; never worth
+                    pass            # losing the worker thread over
 
         final = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
         return {"job_id": job_id, "status": final, "version": version}

@@ -1,242 +1,135 @@
-"""The smallest running-work check needed before certified work can ship.
+"""A harmless diagnostic run — NOT a tester (queue #4, reworked after review found
+the earlier version laundering evidence).
 
-The review panel judges the work it was handed, but shipping has a separate rule: a
-different model family must judge evidence captured by the harness while the work is
-actually exercised. This module creates that evidence, asks one eligible review seat
-to judge only whether the run completed successfully, and records the answer against
-the exact version already on the job. If either the run or the judge is unavailable,
-it leaves the certified job alone and says so instead of inventing a result.
+What this file used to do: run the harness's OWN test suite and have a model judge
+whether it passed, then record that judgement as a role='tester' verdict. Two
+reviews (design + a bug-hunting pass) found this wrong on several counts, and all of
+them are fixed by simply not doing it:
+
+  1. THE SUITE BEING TESTED WAS NEVER THE JOB'S OWN WORK. It is the harness's fixed,
+     unrelated test suite — green for every job, forever, regardless of what the job
+     actually built. Recording that as guard 6's "someone drove the app" evidence is
+     exactly the believable-green-check-on-code-nobody-reviewed failure mode this
+     project exists to prevent.
+  2. IT WOULD RUN BUILDER-WRITTEN CODE AS THE OWNER. Once a real code-writing builder
+     lands, its branch could contain anything, and this module ran an arbitrary
+     command inside that branch's own checkout with no sandbox.
+  3. The exit code was never actually checked before treating a run as evidence of
+     anything, the judge prompt was buildable out of job text AND the run's own
+     stdout (both attacker/builder-controlled), and the run's log was written INSIDE
+     `chief_output/`, the exact directory a retry's `git add -A` stages — so the
+     tester's own diagnostic file could ride along into a future reviewed commit.
+
+So: no verdict, ever, from this file, and nothing it does gates or feeds anything
+downstream — `gauntlet._ask_to_ship` asks the gatekeeper to merge regardless of what
+this module finds. What's left is an inert diagnostic: it runs ONLY when a job's
+branch changes nothing relative to `main` but its own placeholder text output
+(`chief_output/*.txt`, which is all any builder produces today — the moment a real
+code builder lands, this stops running for it, on purpose, until it is rebuilt with an
+actual sandbox), it never writes anything to disk (nothing to accidentally commit on a
+retry), and what it records lands in artifact `kind`s the schema DELIBERATELY excludes
+from guard 6 (`guard_tester_must_cite_artifacts` only accepts
+screenshot/trace/video/dom_snapshot — 'exit_code' and 'stdout' can never satisfy it,
+by construction, not by convention). A real tester — something that opens the running
+app and drives it, from a different model family than the builder — is still unbuilt.
+Until it exists, `guard_ship_requires_a_passing_tester` refuses every merge, and it is
+refusing correctly; `gauntlet._ask_to_ship` says so in plain English rather than
+hiding the wait behind a fake pass.
 """
 
 from __future__ import annotations
 
-import re
-import shlex
 import subprocess
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
 
-import gauntlet
-import gatekeeper
-from db.jobs import (
-    GuardViolation,
-    over_budget,
-    record_artifact,
-    record_verdict,
-    seat,
-)
+from db.jobs import record_artifact
 
 HARNESS = Path(__file__).resolve().parent
 REPO = HARNESS.parent
 VENV_PYTHON = REPO / ".venv" / "bin" / "python"
-TEST_TIMEOUT_S = 600
-TAIL_LINES = 40
-DEFAULT_TEST_ESTIMATE_CENTS = 5
+CHECK_TIMEOUT_S = 600
+TAIL_LINES = 40                 # how much of the run's output actually lands in the
+                                 # record — read via the module global, not a default
+                                 # argument, so tests can monkeypatch TEST_CMD.
 
 TEST_CMD = [str(VENV_PYTHON), "-m", "pytest", "harness/tests/", "-q"]
 
 
-def _plain_summary(text: str, passed: bool) -> str:
-    """Keep model-written status text suitable for the voice and activity view."""
-    summary = re.sub(r"\s+", " ", str(text or "")).strip()
-    replacements = (
-        (r"\bpytest\b", "the automated tests"),
-        (r"\bexit code\b", "run result"),
-        (r"\bsubprocess\b", "test runner"),
-        (r"\bguard violation\b", "record refusal"),
-        (r"\bguard\b", "safety rule"),
-    )
-    for pattern, replacement in replacements:
-        summary = re.sub(pattern, replacement, summary, flags=re.IGNORECASE)
-    if summary:
-        return summary[:280]
-    return ("The automated tests completed successfully." if passed else
-            "The automated tests did not show a successful completed run.")
+def _git(worktree: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True,
+                          text=True, timeout=30)
 
 
-def _event(conn, job, kind: str, detail: str, tester_row=None) -> None:
-    """Add one plain-English tester update without allowing reporting to crash work."""
-    if job is None:
-        return
-    try:
-        row = tester_row or seat(conn, job["builder_seat"])
-        if row is None:
-            return
-        conn.execute(
-            "INSERT INTO events (job_id, seat_id, lane, model, family, kind, detail) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (job["id"], row["id"], "tester", row["model"], row["family"], kind,
-             detail),
-        )
-    except Exception:  # noqa: BLE001 - a status note must never crash the tester
-        return
+def _only_touches_text_output(worktree: Path) -> bool:
+    """True only if this worktree's branch changes nothing, relative to `main`,
+    except its own `chief_output/*.txt`.
 
-
-def _skip(conn, job, detail: str, reason: str, tester_row=None) -> dict[str, Any]:
-    _event(conn, job, "skipped", detail, tester_row)
-    return {"ran": False, "passed": False, "reason": reason}
-
-
-def run_tester_for_job(conn, job_id: int, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Exercise a certified job and record one cross-family judgement of the run.
-
-    Every failure mode is a stated skip or a real failing judgement. Nothing escapes
-    to crash the worker, and a broken judge is never confused with broken work.
+    This is the one thing standing between "run a command in this directory" and
+    running whatever a builder's branch happens to contain. Fail closed on anything
+    unexpected — no git repo, no common history with main, a diff that can't be
+    read — rather than guess that it's probably fine.
     """
-    job = None
-    tester_row = None
+    try:
+        inside = _git(worktree, "rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        base = _git(worktree, "merge-base", "main", "HEAD")
+        if base.returncode != 0 or not base.stdout.strip():
+            return False
+        diff = _git(worktree, "diff", "--name-only", f"{base.stdout.strip()}..HEAD")
+        if diff.returncode != 0:
+            return False
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    changed = [p.strip() for p in diff.stdout.splitlines() if p.strip()]
+    return all(fnmatch(p, "chief_output/*.txt") for p in changed)
+
+
+def record_smoke_check(conn, job_id: int) -> None:
+    """Run the harness's own suite in the job's worktree and record what happened —
+    ONLY as raw diagnostic artifacts, never as evidence of anything about the JOB.
+
+    This never gates anything and never raises: whoever certified the job
+    (`gauntlet.run_panel`) asks the gatekeeper to merge regardless of what this finds,
+    because this has nothing to say about whether the job's own work runs — only
+    whether the harness's own suite still imports in that checkout. A job with no
+    worktree, a worktree whose branch touches anything beyond its own placeholder
+    text output, or a check that can't run at all is silently skipped — there was
+    never a verdict to withhold either way.
+    """
     try:
         job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if job is None:
-            return _skip(
-                conn, job,
-                "The automated tests had no recorded work to check.",
-                "no recorded job to test",
-            )
-
+            return
         worktree_text = str(job["worktree"] or "").strip()
-        worktree = Path(worktree_text) if worktree_text else None
-        if worktree is None or not worktree.is_dir():
-            return _skip(
-                conn, job,
-                "The automated tests had no working copy to check.",
-                "no working copy to test",
-            )
-
-        roster = cfg.get("gauntlet", {}).get("reviewers", [])
-        if not isinstance(roster, list):
-            roster = []
-        for seat_id in roster:
-            row = seat(conn, str(seat_id))
-            if (row is not None and row["enabled"]
-                    and row["family"] != job["builder_family"]
-                    and gauntlet.has_runner(row["provider"])):
-                tester_row = row
-                break
-
-        no_tester_detail = (
-            "No available model from a different family could check whether the "
-            "tests actually ran."
-        )
-        if tester_row is None:
-            return _skip(conn, job, no_tester_detail, "no eligible tester seat")
-
-        seat_id = tester_row["id"]
-        if over_budget(conn, seat_id):
-            return _skip(conn, job, no_tester_detail, "no eligible tester seat",
-                         tester_row)
-        estimate = DEFAULT_TEST_ESTIMATE_CENTS if tester_row["tier"] == "metered" else 0
-        try:
-            gatekeeper.spend(
-                conn, seat_id, estimate, job_id=job_id, role="test",
-                asked_by="the tester",
-            )
-        except gatekeeper.Refused:
-            return _skip(conn, job, no_tester_detail, "no eligible tester seat",
-                         tester_row)
+        if not worktree_text:
+            return
+        worktree = Path(worktree_text)
+        if not worktree.is_dir():
+            return
+        if not _only_touches_text_output(worktree):
+            return
 
         try:
             completed = subprocess.run(
-                TEST_CMD,
-                cwd=worktree,
-                capture_output=True,
-                text=True,
-                timeout=TEST_TIMEOUT_S,
+                TEST_CMD, cwd=worktree, capture_output=True, text=True,
+                timeout=CHECK_TIMEOUT_S,
             )
-            run_result = completed.returncode
-            output = "\n".join(
-                part for part in (completed.stdout, completed.stderr) if part
-            )
-        except subprocess.TimeoutExpired:
-            run_result = -1
-            output = "The automated tests took too long and were stopped."
-        except OSError:
-            run_result = -1
-            output = "The automated tests could not start."
+            code = completed.returncode
+            output = "\n".join(p for p in (completed.stdout, completed.stderr) if p)
+        except (subprocess.TimeoutExpired, OSError):
+            return          # the check itself failing to run says nothing about the job
 
-        command = shlex.join(str(part) for part in TEST_CMD)
-        tail = "\n".join(output.splitlines()[-TAIL_LINES:])
-        evidence_text = f"command: {command}\nexit code: {run_result}\n{tail}".rstrip()
+        tail = "\n".join(output.splitlines()[-TAIL_LINES:]) or "(no output)"
 
-        output_dir = worktree / "chief_output"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        log_file = output_dir / f"tester_job_{job_id}.log"
-        log_file.write_text(
-            f"command: {command}\nexit code: {run_result}\n\n{output}",
-            encoding="utf-8",
-        )
-        record_artifact(
-            conn,
-            job_id,
-            "trace",
-            path=str(log_file),
-            value=f"exit code {run_result}\n{tail}",
-            flow="tester",
-            captured_by="harness",
-        )
-
-        request_text = (
-            f"The job was: {job['request']}\n\n"
-            "Judge ONLY whether this test run actually finished and shows the tests "
-            "passing. A non-zero exit code, or output that does not show the suite "
-            "completing, is a FAIL. Explain the answer in plain English without naming "
-            "commands or tools and without using the phrase 'exit code'."
-        )
-        try:
-            verdict, summary = gauntlet.REVIEWERS[tester_row["provider"]](
-                request_text, evidence_text, tester_row["model"]
-            )
-        except (gauntlet.ReviewerBroke, subprocess.TimeoutExpired):
-            return _skip(
-                conn, job,
-                "The model checking the automated tests could not finish.",
-                "the model checking the tests could not finish",
-                tester_row,
-            )
-        except Exception:  # noqa: BLE001 - a broken judge is a skip, never a verdict
-            return _skip(
-                conn, job,
-                "The model checking the automated tests could not finish.",
-                "the model checking the tests could not finish",
-                tester_row,
-            )
-
-        verdict = "pass" if verdict == "pass" else "fail"
-        summary = _plain_summary(summary, verdict == "pass")
-        try:
-            record_verdict(
-                conn,
-                job_id,
-                tester_row["id"],
-                verdict=verdict,
-                summary=summary,
-                role="tester",
-                reviewed_version=job["head_version"],
-            )
-        except GuardViolation as exc:
-            reason = str(exc).replace("guard: ", "").strip()
-            reason = _plain_summary(reason, False)
-            return _skip(conn, job, reason, reason, tester_row)
-
-        _event(
-            conn,
-            job,
-            "verdict" if verdict == "pass" else "error",
-            ("The automated tests were checked and confirmed." if verdict == "pass" else
-             "The automated tests were checked and something looked wrong."),
-            tester_row,
-        )
-        return {
-            "ran": True,
-            "passed": verdict == "pass",
-            "reason": summary,
-            "seat": tester_row["id"],
-        }
-    except Exception:  # noqa: BLE001 - this function must never crash the worker
-        return _skip(
-            conn,
-            job,
-            "The automated tests could not be checked.",
-            "the automated tests could not be checked",
-            tester_row,
-        )
+        # Kinds the schema DELIBERATELY excludes from guard 6 (see the module
+        # docstring). Never 'trace', never a verdict, never written to disk — nothing
+        # here can be mistaken for someone having actually driven the app, and
+        # nothing here can ride along into a future commit.
+        record_artifact(conn, job_id, "exit_code", value=str(code),
+                        flow="smoke_check", captured_by="harness")
+        record_artifact(conn, job_id, "stdout", value=tail,
+                        flow="smoke_check", captured_by="harness")
+    except Exception:                          # noqa: BLE001 — purely diagnostic;
+        return                                  # never worth losing the caller over
