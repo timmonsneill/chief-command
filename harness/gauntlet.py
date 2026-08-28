@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -62,94 +63,198 @@ DEFAULT_ESTIMATE_CENTS = 5      # what we reserve for a metered review before ca
 # ---------------------------------------------------------------------------
 # The reviewers themselves. One function per provider — adding a family to the
 # panel is adding a function here and a seat in seats.toml. Nothing else.
+#
+# LOCKDOWN (task #10 hardening, 2026-08-27). Sol's design gate found the softest target
+# in the whole panel: these calls ran on attacker-controllable text (a builder-written
+# diff) using the caller's own default CLI settings — ambient tool access, MCP servers,
+# extra directory grants, up to and including a medical-records repo grant that had
+# nothing to do with this project. And on the way out, `_parse_verdict` (removed below)
+# accepted any line starting with the word "PASS" — including one echoed straight out of
+# our own prompt, or planted in a diff a builder wrote. Two fixes, together:
+#
+#   1. Every CLI call below runs with every lockdown flag its `--help` actually offers —
+#      no ambient settings, no MCP, no tools, restricted mode. Checked against `claude
+#      --help` / `codex exec --help` on this machine, not assumed from memory. See
+#      test_reviewer_lockdown.py and assert_reviewers_locked_down() below, which fails
+#      loud if a future refactor ever drops one of these flags.
+#   2. Nobody scans free-text output for a magic word anymore. Every runner asks its
+#      provider for a STRUCTURED answer (claude: --json-schema, codex: --output-schema,
+#      xai: response_format=json_object) and reads only the structured field. Anything
+#      else — an echo, a narration line, a diff that happens to contain the string
+#      "PASS looks great" — is not JSON in the field we read, so it cannot become a
+#      verdict. It becomes ReviewerBroke: a skip, never a pass.
 # ---------------------------------------------------------------------------
 REVIEW_PROMPT = (
-    "You are reviewing another model's work. Judge it on whether it actually does what "
-    "was asked, and whether it is correct.\n"
-    "Reply with EXACTLY one line, nothing else:\n"
-    "  PASS <one-line reason>   — it is correct and does what was asked\n"
-    "  FAIL <one-line reason>   — it is wrong, incomplete, or unsafe\n\n"
+    "You are reviewing another model's work. Judge it only by what is shown below: does "
+    "it actually do what was asked, and is it correct?\n\n"
+    "Answer with a JSON object with exactly these two fields:\n"
+    '  "verdict" — the string "pass" (it is correct and does what was asked) or "fail" '
+    "(it is wrong, incomplete, or unsafe)\n"
+    '  "reason" — one sentence, at most 280 characters, saying why\n\n'
     "The task was: {request}\n\nThe work:\n{code}"
 )
 
 
-MAX_CODE_CHARS = 200_000        # past this the CLI's argument list won't hold it
+MAX_CODE_CHARS = 200_000        # past this we don't ask anyone to review it (see #7 below)
 
-
-def _parse_verdict(out: str) -> tuple[str, str]:
-    """Pull the verdict line out of a CLI's output.
-
-    Read from the END. The prompt we send contains the literal words "PASS <one-line
-    reason>" and "FAIL <one-line reason>", and CLIs echo their input — codex puts that
-    echo on stderr today, but taking the FIRST match would turn any release that moves
-    it to stdout into an automatic pass on every review. Reading backwards makes the
-    model's actual answer, which comes last, the one that counts.
-
-    Deliberately biased toward FAIL: a reviewer whose answer we cannot read has not
-    passed anything. Silence is not approval.
-    """
-    for line in reversed(out.splitlines()):
-        stripped = line.strip()
-        if stripped.upper().startswith("PASS"):
-            return "pass", stripped[:280]
-        if stripped.upper().startswith("FAIL"):
-            return "fail", stripped[:280]
-    return "fail", ("the reviewer did not answer in the required form: "
-                    + out.strip()[:200]) if out.strip() else "the reviewer said nothing"
+# The shared shape every reviewer's structured answer must match. codex's structured-
+# output endpoint additionally refuses an object schema that doesn't say
+# "additionalProperties": false explicitly (confirmed against a live call, 2026-08-27),
+# so it gets its own copy rather than mutating this one.
+VERDICT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"enum": ["pass", "fail"]},
+        "reason": {"type": "string", "maxLength": 280},
+    },
+    "required": ["verdict", "reason"],
+}
+CODEX_VERDICT_SCHEMA: dict[str, Any] = {**VERDICT_SCHEMA, "additionalProperties": False}
 
 
 class ReviewerBroke(RuntimeError):
     """The reviewer never rendered a judgement — the TOOL failed, not the work.
 
     This distinction is the whole reason the class exists. A CLI that exits non-zero
-    (expired login, rate limit, renamed model) still prints something to stdout, and
-    that something contains no verdict line — so treating output as an answer records a
-    FAIL against the build. Verdicts are permanent and bound to the version, so an
-    infrastructure hiccup would condemn good work forever, and tell Neill a reviewer
-    "found a problem" when nothing reviewed anything. A broken reviewer is a SKIP.
+    (expired login, rate limit, renamed model), or one that exits 0 with no parseable
+    structured answer, has not reviewed anything — so treating its output as an answer
+    would record a FAIL against the build. Verdicts are permanent and bound to the
+    version, so an infrastructure hiccup would condemn good work forever, and tell Neill
+    a reviewer "found a problem" when nothing reviewed anything. A broken reviewer is a
+    SKIP.
     """
 
 
-def _run_cli(cmd: list[str]) -> tuple[str, str]:
+def _prompt(request: str, code: str) -> str:
+    return REVIEW_PROMPT.format(request=request, code=code)
+
+
+def _run_cli_stdin(cmd: list[str], prompt: str) -> str:
+    """Run a reviewer CLI with the prompt on stdin — never as a positional argument.
+
+    Two reasons, both load-bearing: the lockdown flags below are variadic (`--tools
+    <tools...>`, `--json-schema <schema>`) and a positional prompt placed after them
+    would be swallowed as another value for the wrong flag rather than reaching the
+    model. And argv is visible to anyone on the box who can list processes; stdin is not.
+    """
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=REVIEW_TIMEOUT_S,
-        stdin=subprocess.DEVNULL,
+        cmd, input=prompt, capture_output=True, text=True, timeout=REVIEW_TIMEOUT_S,
     )
     if proc.returncode != 0:
         raise ReviewerBroke(
             f"{cmd[0]} exited {proc.returncode}: "
             f"{(proc.stderr or proc.stdout).strip()[:200]}"
         )
-    return _parse_verdict(proc.stdout)
+    return proc.stdout
 
 
-def _prompt(request: str, code: str) -> str:
-    if len(code) > MAX_CODE_CHARS:
-        # Say so in the prompt itself. A reviewer that silently judged 20% of the work
-        # would be worse than one that didn't run.
-        code = (code[:MAX_CODE_CHARS]
-                + f"\n\n[TRUNCATED — {len(code) - MAX_CODE_CHARS} more characters were "
-                  "not shown. If you cannot judge the whole thing, answer FAIL.]")
-    return REVIEW_PROMPT.format(request=request, code=code)
+def _read_structured(structured: Any) -> tuple[str, str]:
+    """The ONLY door a verdict can walk through, for all three providers.
+
+    No stdout scan, no substring match, no trusting a free-text field — a provider that
+    didn't hand back a dict shaped like VERDICT_SCHEMA has not answered, full stop. This
+    is what makes a diff containing the literal line "PASS looks great" inert: that text
+    has to land in a JSON field named "verdict" holding exactly "pass", or it changes
+    nothing.
+    """
+    if not isinstance(structured, dict):
+        raise ReviewerBroke("the reviewer did not answer in the structured form we required")
+    verdict = structured.get("verdict")
+    reason = structured.get("reason")
+    if verdict not in ("pass", "fail"):
+        raise ReviewerBroke("the reviewer's structured answer had no valid verdict field")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ReviewerBroke("the reviewer's structured answer had no reason")
+    return verdict, reason.strip()[:280]
+
+
+def _last_json_object(text: str) -> Any:
+    """Read backwards for the model's actual structured answer.
+
+    codex prints the run's narration (banner, token count) around the answer it wrote to
+    satisfy --output-schema; the same "read from the end" reasoning the old line-scan
+    used still applies — the model's real answer comes last. Unlike the old scan, a line
+    only counts here if it parses as JSON; free text (an echoed prompt, a narrated "PASS
+    looks great") is never mistaken for one.
+    """
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            return json.loads(stripped)
+        except ValueError:
+            continue
+    raise ReviewerBroke("the reviewer did not answer in the structured form we required")
+
+
+# --- Claude family --------------------------------------------------------------
+def _claude_cmd(model: str) -> list[str]:
+    """Every flag here was checked against `claude --help` on this machine, 2026-08-27 —
+    none is assumed. See test_reviewer_lockdown.py for the flag-by-flag proof."""
+    return [
+        "claude", "-p",
+        "--setting-sources", "",       # no user/project/local settings load at all
+        "--strict-mcp-config",         # ...so no MCP server the caller happens to have
+        "--restricted",                # ...no Bash/file-running tools, no reading outside
+        "--safe-mode",                 #    the working dirs, no hooks/skills/plugins
+        "--tools", "",                 # belt-and-braces on top of --restricted: no tools
+        "--output-format", "json",
+        "--json-schema", json.dumps(VERDICT_SCHEMA),
+        "--model", model,
+    ]
 
 
 def _claude_review(request: str, code: str, model: str) -> tuple[str, str]:
-    return _run_cli(["claude", "-p", "--model", model, _prompt(request, code)])
+    """The Claude-family reviewer — locked down against exactly what Sol's design gate
+    flagged: a reviewer call running on attacker-controllable text (a builder-written
+    diff) with the caller's own ambient tool access, MCP connections and directory
+    grants. `--output-format json` puts the answer in a `structured_output` field
+    (confirmed with a live call, 2026-08-27); that field is the only thing read below —
+    never the free-text `result` string, which is a request-shaped answer echo, not a
+    contract.
+    """
+    raw = _run_cli_stdin(_claude_cmd(model), _prompt(request, code))
+    try:
+        result = json.loads(raw)
+    except ValueError as exc:
+        raise ReviewerBroke("the reviewer's reply wasn't readable JSON") from exc
+    if not isinstance(result, dict):
+        raise ReviewerBroke("the reviewer's reply wasn't the JSON envelope we expected")
+    if result.get("is_error"):
+        raise ReviewerBroke(f"the reviewer errored: {str(result.get('result', ''))[:160]}")
+    return _read_structured(result.get("structured_output"))
+
+
+# --- Codex / GPT family ----------------------------------------------------------
+def _codex_cmd(model: str, schema_path: Path) -> list[str]:
+    """Every flag here was checked against `codex exec --help` on this machine,
+    2026-08-27. codex has no `--json-schema <string>` like claude's; --output-schema
+    only takes a file, so the schema is written to a short-lived temp file per call
+    (see _codex_review) rather than kept as a long-lived shared path."""
+    return [
+        "codex", "exec",
+        "--sandbox", "read-only",       # reads the bundle it was handed; writes nothing
+        "--skip-git-repo-check",        # it is not operating on a checkout
+        "--model", model,
+        "--output-schema", str(schema_path),
+        "-",                            # read the prompt from stdin, never argv
+    ]
 
 
 def _codex_review(request: str, code: str, model: str) -> tuple[str, str]:
-    """The GPT-family reviewer, through the codex CLI.
+    """The GPT-family reviewer, through the codex CLI."""
+    with tempfile.TemporaryDirectory(prefix="chief-review-") as tmp:
+        schema_path = Path(tmp) / "verdict_schema.json"
+        schema_path.write_text(json.dumps(CODEX_VERDICT_SCHEMA))
+        out = _run_cli_stdin(_codex_cmd(model, schema_path), _prompt(request, code))
+    return _read_structured(_last_json_object(out))
 
-    `--skip-git-repo-check` because the reviewer reads the work it was handed; it is not
-    operating on a checkout, and requiring one would tie the panel to where it runs.
-    """
-    return _run_cli(["codex", "exec", "--skip-git-repo-check", "--model", model,
-                     _prompt(request, code)])
 
-
+# --- Grok / xai family -------------------------------------------------------------
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 XAI_KEY_VAR = "XAI_API_KEY"
-MAX_REPLY_BYTES = 1_000_000     # a verdict is one line; anything bigger is not a reply
+MAX_REPLY_BYTES = 1_000_000     # a verdict is one small JSON object; anything bigger isn't
 
 
 def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
@@ -158,9 +263,12 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
     No CLI here on purpose: Grok's CLI has been alleged to upload whole checkouts, and
     the reviewer must only ever see the bundle it is handed. Plain urllib rather than an
     SDK so the seat adds no dependency — the API is OpenAI-shaped and one POST is all a
-    review needs. The key comes from the environment the server loads (~/.chief/env),
-    never from the repo. A missing key is the TOOL failing, so it is a skip, never a
-    verdict — same rule as a CLI exiting non-zero.
+    review needs. `response_format: json_object` is xai's structured-output mode
+    (confirmed against a live call, 2026-08-27); it guarantees valid JSON, not our exact
+    keys, so the prompt still names them and _read_structured still checks them. The key
+    comes from the environment the server loads (~/.chief/env), never from the repo. A
+    missing key is the TOOL failing, so it is a skip, never a verdict — same rule as a
+    CLI exiting non-zero.
     """
     key = os.environ.get(XAI_KEY_VAR, "").strip()
     if not key:
@@ -168,6 +276,7 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
     body = json.dumps({
         "model": model,
         "temperature": 0,
+        "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": _prompt(request, code)}],
     }).encode()
     req = urllib.request.Request(
@@ -193,13 +302,16 @@ def _xai_review(request: str, code: str, model: str) -> tuple[str, str]:
         text = choice["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:
         raise ReviewerBroke("the paid reviewer sent back no answer") from exc
-    # An empty answer, or one cut off before the verdict line, is the TOOL failing.
-    # Left to _parse_verdict it would become a permanent FAIL against this version.
+    # An empty answer, or one cut off before the closing brace, is the TOOL failing.
     if not text.strip():
         raise ReviewerBroke("the paid reviewer answered with nothing")
     if choice.get("finish_reason") not in (None, "stop"):
         raise ReviewerBroke("the paid reviewer was cut off before it finished")
-    return _parse_verdict(text)
+    try:
+        structured = json.loads(text)
+    except ValueError as exc:
+        raise ReviewerBroke("the paid reviewer's reply wasn't readable JSON") from exc
+    return _read_structured(structured)
 
 
 REVIEWERS: dict[str, Callable[[str, str, str], tuple[str, str]]] = {
@@ -208,16 +320,108 @@ REVIEWERS: dict[str, Callable[[str, str, str], tuple[str, str]]] = {
     "xai": _xai_review,
 }
 
-# Can the runner actually run HERE, now? A runner that exists but has no key would be
-# counted onto every new job's panel and then skip — parking the job forever with
-# "3 required, 2 reported". Better one legible exclusion at the door.
+
+# ---------------------------------------------------------------------------
+# Can the runner actually run HERE, now? A runner that exists but is logged out, or has
+# no key, would be counted onto every new job's panel and then skip — parking the job
+# forever with "3 required, 2 reported". Better one legible exclusion at the door.
+# ---------------------------------------------------------------------------
+def _claude_ready() -> bool:
+    """`claude auth status` prints JSON with a `loggedIn` field and exits 0 whether or
+    not it's logged in (confirmed with a live call, 2026-08-27) — so the exit code alone
+    is not enough; the field has to say so. `~/.claude` missing entirely is checked first
+    as a cheap short-circuit before spending a subprocess call."""
+    if not (Path.home() / ".claude").exists():
+        return False
+    try:
+        proc = subprocess.run(["claude", "auth", "status"], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        return bool(json.loads(proc.stdout).get("loggedIn"))
+    except ValueError:
+        return False
+
+
+def _codex_ready() -> bool:
+    """`codex login status` exits non-zero when logged out (the nearest equivalent to
+    claude's status field — codex has no machine-readable flag on this command)."""
+    try:
+        proc = subprocess.run(["codex", "login", "status"], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 _READY: dict[str, Callable[[], bool]] = {
     "xai": lambda: bool(os.environ.get(XAI_KEY_VAR, "").strip()),
+    "claude-cli": _claude_ready,
+    "codex": _codex_ready,
 }
 
 
 def has_runner(provider: str) -> bool:
     return provider in REVIEWERS and _READY.get(provider, lambda: True)()
+
+
+# ---------------------------------------------------------------------------
+# The startup self-check. Every other guarantee in this module assumes the reviewer
+# CLIs are actually running locked down — this is the one place that verifies it,
+# rather than trusting that nobody ever edits _claude_cmd/_codex_cmd without noticing
+# what they removed.
+# ---------------------------------------------------------------------------
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    try:
+        i = argv.index(flag)
+    except ValueError:
+        return None
+    return argv[i + 1] if i + 1 < len(argv) else None
+
+
+def assert_reviewers_locked_down() -> None:
+    """Inspect the argv the runners would actually build and refuse to run the panel if
+    a lockdown flag is missing.
+
+    This builds argv only — it never spawns a process — so it is cheap enough to call on
+    every panel run. Called from run_panel(), which means a bad deploy (a refactor that
+    drops --restricted, a codex upgrade that renames --sandbox) fails the FIRST review
+    job loudly, instead of quietly running every review after it wide open.
+    """
+    claude_argv = _claude_cmd("probe-model")
+    codex_argv = _codex_cmd("probe-model", Path("/tmp/chief-review-probe/verdict_schema.json"))
+
+    failures: list[str] = []
+    if _flag_value(claude_argv, "--setting-sources") != "":
+        failures.append("claude: --setting-sources must be present and empty")
+    if "--strict-mcp-config" not in claude_argv:
+        failures.append("claude: --strict-mcp-config is missing")
+    if "--restricted" not in claude_argv:
+        failures.append("claude: --restricted is missing")
+    if "--safe-mode" not in claude_argv:
+        failures.append("claude: --safe-mode is missing")
+    if _flag_value(claude_argv, "--tools") != "":
+        failures.append("claude: --tools must be present and empty (no tool access)")
+    if not _flag_value(claude_argv, "--json-schema"):
+        failures.append("claude: --json-schema is missing")
+    if _flag_value(claude_argv, "--output-format") != "json":
+        failures.append("claude: --output-format json is missing")
+
+    if _flag_value(codex_argv, "--sandbox") != "read-only":
+        failures.append("codex: --sandbox read-only is missing")
+    if "--skip-git-repo-check" not in codex_argv:
+        failures.append("codex: --skip-git-repo-check is missing")
+    if not _flag_value(codex_argv, "--output-schema"):
+        failures.append("codex: --output-schema is missing")
+
+    if failures:
+        raise RuntimeError(
+            "reviewer lockdown check failed — refusing to run the panel: "
+            + "; ".join(failures)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -365,17 +569,12 @@ def _review_one(
             out.skipped = "we can't run that reviewer on this machine yet"
             _event(conn, job_id, row, "skipped", out.skipped)
             return
-        if over_budget(conn, seat_id):
-            out.skipped = "that reviewer is out of budget for today"
-            _event(conn, job_id, row, "skipped", out.skipped)
-            return
 
-        estimate = int(
-            cfg.get("seats", {}).get(seat_id, {}).get(
-                "review_estimate_cents", DEFAULT_ESTIMATE_CENTS)
-        )
         # Already reviewed this exact version? Then this is a re-run, and repeating it
-        # would spend the money twice and stack duplicate verdicts on the record.
+        # would spend the money twice and stack duplicate verdicts on the record. This
+        # check runs BEFORE the budget check below, on purpose: a retry must not throw
+        # away a reviewer's earlier PASS just because that seat is capped out today —
+        # the verdict was already earned and paid for.
         already = conn.execute(
             "SELECT verdict, summary FROM verdicts WHERE job_id=? AND reviewer_seat=? "
             "AND reviewed_version IS ? ORDER BY id DESC LIMIT 1",
@@ -385,6 +584,25 @@ def _review_one(
             out.verdict, out.summary = already["verdict"], already["summary"] or ""
             return
 
+        # Preflight size check, before any money moves or any provider is called. A
+        # reviewer that silently judged part of the work would be worse than one that
+        # didn't run — and truncating-then-asking would eventually FAIL the version
+        # forever on a build that simply grew past what one review call can hold. Skip
+        # plainly instead; skips can be retried, a truncated FAIL cannot be un-said.
+        if len(code) > MAX_CODE_CHARS:
+            out.skipped = "the work is too large to review in one go"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+
+        if over_budget(conn, seat_id):
+            out.skipped = "that reviewer is out of budget for today"
+            _event(conn, job_id, row, "skipped", out.skipped)
+            return
+
+        estimate = int(
+            cfg.get("seats", {}).get(seat_id, {}).get(
+                "review_estimate_cents", DEFAULT_ESTIMATE_CENTS)
+        )
         if not _reserve_review_budget(conn, seat_id, job_id, estimate):
             out.skipped = "that reviewer is out of budget for today"
             _event(conn, job_id, row, "skipped", out.skipped)
@@ -475,6 +693,10 @@ def run_panel(
     `conn` is the caller's connection, used only for the final decision. Each reviewer
     gets its own. Returns what actually happened — including who didn't run and why.
     """
+    # Fail loud, first, before anyone is dispatched: a lockdown flag missing from a
+    # runner's argv is a hole in the exact place task #10's design gate found one.
+    assert_reviewers_locked_down()
+
     import dispatch                      # local: dispatch imports this module
 
     gauntlet = cfg.get("gauntlet", {})

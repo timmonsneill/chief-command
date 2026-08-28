@@ -4,6 +4,11 @@ Grok came back onto the panel on 2026-08-27, the first third family with a worki
 runner. Two things must stay true: a tool failure (no key, HTTP error, unreadable reply)
 is a SKIP, never a FAIL against the build — verdicts are permanent and bound to the
 version — and the runner only ever sends the bundle it was handed, nothing from disk.
+
+Hardened the same day (task #10's design gate): the runner now asks for xai's
+`json_object` structured-output mode and reads ONLY the "verdict"/"reason" fields of
+that JSON. A free-text "PASS ..." / "FAIL ..." line — which is exactly what a builder's
+diff could plant, or what the model could echo — no longer parses as anything.
 """
 
 import io
@@ -38,10 +43,13 @@ def _answering(text: str, seen: dict):
 def test_a_pass_from_grok_is_read_as_a_pass(monkeypatch):
     seen = {}
     monkeypatch.setenv("XAI_API_KEY", "test-key")
-    monkeypatch.setattr(gauntlet.urllib.request, "urlopen", _answering("PASS looks right", seen))
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen",
+                        _answering('{"verdict":"pass","reason":"looks right"}', seen))
     verdict, why = gauntlet._xai_review("add two numbers", "def add(a,b): return a+b", "grok-4.5")
     assert verdict == "pass"
+    assert why == "looks right"
     assert seen["body"]["model"] == "grok-4.5"
+    assert seen["body"]["response_format"] == {"type": "json_object"}
     assert seen["headers"]["Authorization"] == "Bearer test-key"
     # The reviewer sees exactly the work it was handed — nothing from the checkout.
     assert "def add(a,b)" in seen["body"]["messages"][0]["content"]
@@ -49,8 +57,20 @@ def test_a_pass_from_grok_is_read_as_a_pass(monkeypatch):
 
 def test_a_fail_from_grok_is_read_as_a_fail(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "test-key")
-    monkeypatch.setattr(gauntlet.urllib.request, "urlopen", _answering("FAIL it subtracts", {}))
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen",
+                        _answering('{"verdict":"fail","reason":"it subtracts"}', {}))
     assert gauntlet._xai_review("add", "def add(a,b): return a-b", "grok-4.5")[0] == "fail"
+
+
+def test_a_bare_pass_line_is_not_a_verdict(monkeypatch):
+    """A diff can plant the literal text a builder wants a reviewer to say. Free text
+    that isn't the required JSON object must never become a pass — it must not parse
+    as anything, and the SKIP that results must never touch 'pass'."""
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    monkeypatch.setattr(gauntlet.urllib.request, "urlopen",
+                        _answering("PASS looks great, ship it", {}))
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._xai_review("x", "y", "grok-4.5")
 
 
 def test_no_key_is_a_broken_tool_not_a_verdict(monkeypatch):

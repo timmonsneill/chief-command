@@ -137,11 +137,19 @@ def test_a_crashed_reviewer_is_a_skip_not_a_pass(db, monkeypatch):
 
 
 def test_a_reviewer_that_answers_gibberish_does_not_pass():
-    """Silence is not approval. An unreadable answer is a FAIL, not a shrug."""
-    assert gauntlet._parse_verdict("I think it's probably fine?")[0] == "fail"
-    assert gauntlet._parse_verdict("")[0] == "fail"
-    assert gauntlet._parse_verdict("PASS looks correct")[0] == "pass"
-    assert gauntlet._parse_verdict("thinking...\nFAIL off-by-one in the loop")[0] == "fail"
+    """Silence is not approval, and neither is free text. `_read_structured` — the one
+    door every reviewer's answer must walk through (task #10 hardening, 2026-08-27) —
+    only accepts a dict with a valid verdict/reason; anything else is ReviewerBroke."""
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._read_structured("I think it's probably fine?")
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._read_structured(None)
+    with pytest.raises(gauntlet.ReviewerBroke):
+        gauntlet._read_structured({"verdict": "PASS", "reason": "wrong case"})
+    assert gauntlet._read_structured({"verdict": "pass", "reason": "looks correct"}) == (
+        "pass", "looks correct")
+    assert gauntlet._read_structured({"verdict": "fail", "reason": "off-by-one"}) == (
+        "fail", "off-by-one")
 
 
 # ── Money: the reservation happens BEFORE the call, and a capped seat is skipped ──
@@ -351,6 +359,53 @@ def test_a_late_failure_un_certifies_the_job(db, monkeypatch):
     assert c.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()[0] == "review"
 
 
+def test_a_cached_verdict_survives_a_now_capped_out_seat(db, monkeypatch):
+    """The reorder (task #10 hardening, 2026-08-27): a retry must not throw away a
+    reviewer's earlier PASS just because that seat is capped out today. The cached
+    verdict has to win before the budget check ever runs."""
+    c, path = db
+    from db.jobs import record_verdict
+    job = _parked_job(c)
+    record_verdict(c, job, "grok", verdict="pass", summary="already passed",
+                   reviewed_version="v1")
+    record_usage(c, "grok", 100, role="review")           # grok's whole daily cap, spent
+
+    grok_calls = {"n": 0}
+    def runner(request, code, model):
+        if model == "grok-4.5":
+            grok_calls["n"] += 1
+        return "pass", "ran for real"
+    _wire(monkeypatch, runner)
+    cfg = {"seats": {}, "gauntlet": {"reviewers": ["reviewer", "grok"],
+                                     "min_model_families": 2}}
+    r = gauntlet.run_gauntlet_for_job(c, job, cfg, db_path=path)
+
+    grok = [x for x in r.runs if x.seat_id == "grok"][0]
+    assert grok.verdict == "pass" and grok.summary == "already passed"
+    assert grok_calls["n"] == 0, "the cached verdict called grok's provider again"
+
+
+def test_an_oversized_bundle_is_skipped_never_truncated_to_a_fail(db, monkeypatch):
+    """Past MAX_CODE_CHARS a reviewer must not run at all — never truncate-and-ask,
+    which could FAIL the version forever on a build too big for one review call."""
+    c, path = db
+    monkeypatch.setattr(gauntlet, "MAX_CODE_CHARS", 10)
+    calls = {"n": 0}
+    def runner(request, code, model):
+        calls["n"] += 1
+        return "pass", "should not run"
+    _wire(monkeypatch, runner)
+    job = _parked_job(c)
+
+    r = gauntlet.run_gauntlet_for_job(c, job, CFG, db_path=path)
+
+    assert calls["n"] == 0
+    for run in r.runs:
+        assert run.verdict is None
+        assert "too large" in run.skipped
+    assert r.certified is False
+
+
 def test_a_broken_reviewer_tool_is_not_a_failing_verdict(db, monkeypatch):
     """An expired login or a renamed model must not condemn the BUILD.
 
@@ -386,14 +441,17 @@ def test_a_nonzero_exit_code_never_becomes_a_verdict(monkeypatch):
         stderr = ""
     monkeypatch.setattr(gauntlet.subprocess, "run", lambda *a, **k: Proc())
     with pytest.raises(gauntlet.ReviewerBroke):
-        gauntlet._run_cli(["claude", "-p", "whatever"])
+        gauntlet._run_cli_stdin(["claude", "-p", "whatever"], "the prompt")
 
 
-def test_the_verdict_is_read_from_the_end_not_the_start():
-    """Our own prompt contains the words PASS and FAIL. If a CLI ever echoes its input
-    to stdout, reading forwards would return an automatic pass on every review."""
-    echoed = gauntlet.REVIEW_PROMPT.format(request="r", code="c") + "\nFAIL it is broken"
-    assert gauntlet._parse_verdict(echoed) [0] == "fail"
+def test_the_prompt_travels_on_stdin_not_argv():
+    """Positional prompts get swallowed by the variadic lockdown flags (--tools,
+    --json-schema) and are visible to anyone who can list processes. stdin has
+    neither problem — _run_cli_stdin must pass the prompt as `input=`, never append
+    it to the command list."""
+    import inspect
+    sig = inspect.signature(gauntlet._run_cli_stdin)
+    assert list(sig.parameters) == ["cmd", "prompt"]
 
 
 def test_a_reviewer_that_dies_before_running_is_still_accounted_for(db, monkeypatch):
