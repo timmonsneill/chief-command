@@ -19,11 +19,11 @@ from __future__ import annotations
 def disallowed_paths(raw_lines: list[str], numstat_lines: list[str]) -> list[str]:
     """Read `git diff --raw` and `git diff --numstat` output (already split into
     lines) and return every path that isn't a plain text file with an unchanged
-    file mode: binaries, symlinks (120000), submodules (160000), exec-bit changes,
-    `.gitattributes` (which can silently change how future diffs even render), and
-    anything with `.git` as a path component (defense in depth — git itself already
-    refuses to track its own directory, but a rename trick is cheap insurance
-    against relying on that alone).
+    file mode: binaries, symlinks (120000), submodules (160000), any file that IS
+    or BECOMES executable (100755) — new files included, renames included — plus
+    `.gitattributes`, anything under a `.git`-prefixed path component (also catches
+    `.github`, `.gitignore`, `.gitmodules`), and anything under a `scripts/hooks/`
+    directory at any depth.
 
     `git diff --raw` line shape: `:<old_mode> <new_mode> <old_sha> <new_sha>
     <status>\t<path>` (renames/copies carry a second tab-separated path).
@@ -48,21 +48,30 @@ def disallowed_paths(raw_lines: list[str], numstat_lines: list[str]) -> list[str
         fields = meta.split()
         if len(fields) < 5:
             continue
-        old_mode, new_mode, _old_sha, _new_sha, status = fields[:5]
+        old_mode, new_mode, _old_sha, _new_sha, _status = fields[:5]
         old_mode = old_mode.lstrip(":")
         for p in paths.split("\t"):
             p = p.strip()
             if not p:
                 continue
-            if ".git" in p.split("/"):
-                _flag(p, "inside .git")
+            parts = p.split("/")
+            if any(part.startswith(".git") for part in parts):
+                _flag(p, "inside a .git-prefixed path")
+            elif any(parts[i] == "scripts" and parts[i + 1] == "hooks"
+                     for i in range(len(parts) - 1)):
+                _flag(p, "inside a hooks directory")
             elif new_mode == "120000":
                 _flag(p, "a symlink")
             elif new_mode == "160000":
                 _flag(p, "a submodule")
             elif p == ".gitattributes" or p.endswith("/.gitattributes"):
                 _flag(p, "can silently change how future diffs are rendered")
-            elif old_mode not in ("000000", new_mode) and status[:1] in ("M", "T"):
+            # DROPPED the old `status[:1] in ("M", "T")` filter — that silently
+            # let a BRAND NEW file committed with the executable bit set through
+            # (a new file's old_mode is "000000", so the old check's
+            # `old_mode not in ("000000", new_mode)` was False and skipped it
+            # entirely), and skipped renames (status "R") the same way.
+            elif new_mode == "100755" and old_mode != "100755":
                 _flag(p, "its executable bit changed")
 
     for line in numstat_lines:

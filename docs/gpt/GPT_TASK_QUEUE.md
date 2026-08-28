@@ -143,6 +143,27 @@ and make the guard require `a.reviewed_version IS NEW.reviewed_version`. Numbere
 migration + schema.sql in step; `test_live_db_matches_schema` must pass after applying.
 Design with Sol first (it's a guard change).
 
+## 12. [ ] Merge-time bundle contract, a commit-time size limit, and pushing job/N
+`gatekeeper.merge` recomputes `git merge-base main tip` at merge time and compares
+that FRESH computation against the stored bundle — which means the base it
+verifies against can differ from the base the panel actually reviewed against if
+`main` moved in between (task #9's design review flagged this: the check can be
+correct today and still verify against the wrong thing tomorrow). Store the FULL
+base commit id (not just the diff text) and the exact `git diff` options used
+(`--no-renames`, pinned) at build time, and make `gatekeeper.merge` verify against
+THAT STORED BASE, never a recomputed one — if `main` has moved, that's a new
+integration and needs a fresh review, not a silent re-verify. Separately:
+`_claude_cli_build`/`_commit_diff_in_clone` have no upper bound on how large a
+change they'll accept before committing — a commit-time size limit (mirroring
+gauntlet.py's MAX_CODE_CHARS truncation-avoidance design for reviews) belongs here
+too, refused BEFORE a commit exists rather than truncated after. And today nothing
+ever pushes `job/<id>` anywhere — when auto-merge is eventually enabled (after the
+real OS isolation boundary Sol's design gate is still waiting on), the
+gatekeeper's merge needs to push the merged `main` to the real remote, behind the
+same lock, with the same "refuse and say so" discipline as every other step in
+that function. Design each of these with Sol before building, same as task #9
+itself was.
+
 ---
 
 Done tasks get reviewed by the harness's cross-family panel before merge.

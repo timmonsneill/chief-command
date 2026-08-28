@@ -45,7 +45,11 @@ BUILD_ESTIMATE_CENTS = 25       # reserved for a metered build before the call (
 # PROVIDER — stamped once at dispatch and then frozen (migration 008), because the
 # `seats` table is re-upserted from config on every server start and a seat's live
 # `provider` is therefore mutable history; what a job WAS must not follow it.
-BUNDLE_KIND_BY_PROVIDER = {"claude-cli": "diff", "codex": "diff"}   # default: 'text'
+# codex is NOT mapped here on purpose: there is no in-process codex builder yet
+# (executor.py only knows ollama and claude-cli). Mapping it to 'diff' now would
+# stamp a review contract for work nothing can actually produce. Add it back the
+# day an in-process codex builder exists.
+BUNDLE_KIND_BY_PROVIDER = {"claude-cli": "diff"}   # default: 'text'
 
 
 class DispatchRefused(RuntimeError):

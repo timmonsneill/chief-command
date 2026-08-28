@@ -219,6 +219,10 @@
   <section id="work" class="tab">
     <h2>What's happening</h2>
     <form class="ask give" id="give">
+      <select id="giveBuilder" title="Who builds this">
+        <option value="">Local (free)</option>
+        <option value="riggs">Riggs (Claude)</option>
+      </select>
       <input id="giveIn" placeholder="Give the team a job to build…" autocomplete="off">
       <button id="giveBtn">Build it</button>
     </form>
@@ -299,9 +303,10 @@ $('#give').onsubmit = async e => {
   $('#giveIn').value = ''; $('#giveBtn').disabled = true;
   $('#giveMsg').textContent = 'Sending it over…';
   try {
+    const builder = $('#giveBuilder').value;
     const r = await fetch('/api/dispatch', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text, nonce})
+      body: JSON.stringify({text, nonce, builder})
     }).then(r => r.json());
     $('#giveMsg').textContent = r.reply || r.error || '';
     refresh();

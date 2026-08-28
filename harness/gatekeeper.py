@@ -276,7 +276,9 @@ def merge(conn, job_id: int, *, asked_by: str = "unknown") -> Receipt:
         if bundle is None or bundle != (job["result"] or ""):
             raise _no("what's on that branch doesn't match what the reviewers "
                       "actually read, so it can't be merged as reviewed")
-        bad = git_policy.disallowed_paths(*_range_diff_lines(base_sha, tip))
+        lines = _range_diff_lines(base_sha, tip)
+        bad = (["(could not verify the branch's change is safe to merge)"]
+               if lines is None else git_policy.disallowed_paths(*lines))
         if bad:
             raise _no("that branch changes things that can't be merged as reviewed "
                       f"({_clean(', '.join(bad), 160)})")
@@ -387,15 +389,21 @@ def _branch_tip(branch: str) -> str | None:
 def _same_commit(tip: str, version: str) -> bool:
     """Is the reviewed version this exact commit?
 
-    `head_version` is a short id, so compare on the shorter length. A version that is
-    not a commit id at all (the local worker records a content hash) can never match,
-    which is correct: if we cannot prove the reviewed thing is this code, we do not
-    merge it.
+    A FULL 40-character sha (every 'diff'-kind job stores one — see
+    executor._commit_diff_in_clone) is compared for EXACT equality, never a
+    prefix: a prefix match on a full sha adds nothing but an accidental collision
+    surface. Older/legacy rows recorded a short 16-char id (the local worker's
+    truncated commit id, or a content hash for jobs never in git at all) — those
+    keep the prefix match, since a short id was never meant to be exact. A version
+    that is not a commit id at all can never match either way, which is correct: if
+    we cannot prove the reviewed thing is this code, we do not merge it.
     """
     version = (version or "").strip().lower()
     tip = (tip or "").strip().lower()
     if len(version) < 7 or not re.fullmatch(r"[0-9a-f]+", version):
         return False
+    if len(version) == 40:
+        return tip == version
     return tip.startswith(version)
 
 
@@ -425,16 +433,19 @@ def _unreviewed_files_in(commit: str, job_id: int) -> list[str]:
     return sorted(p for p in diff.stdout.splitlines() if p.strip() and p.strip() != allowed)
 
 
-def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]]:
+def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]] | None:
     """`git diff --raw` and `git diff --numstat` for one COMMITTED range, split
     into lines — the same shape git_policy.disallowed_paths() reads from
-    executor.py's staged-changes check, applied here to a committed range instead."""
+    executor.py's staged-changes check, applied here to a committed range instead.
+    Returns None if either command failed — the caller must treat that as a
+    refusal, never as "nothing to flag"."""
     raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=REPO,
                          capture_output=True, text=True)
     numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=REPO,
                              capture_output=True, text=True)
-    return (raw.stdout.splitlines() if raw.returncode == 0 else [],
-            numstat.stdout.splitlines() if numstat.returncode == 0 else [])
+    if raw.returncode != 0 or numstat.returncode != 0:
+        return None
+    return (raw.stdout.splitlines(), numstat.stdout.splitlines())
 
 
 def _diff_bundle(base: str, tip: str) -> str | None:

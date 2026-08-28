@@ -62,3 +62,20 @@ was run three times as the cross-model re-review before push.
   stamped in the birth record, so the freeze remains absolute instead of being weakened.
 - Gauntlet: not run; the Claude orchestrator is the independent reviewer for this
   uncommitted handoff. The two existing untracked Sol notes were left untouched.
+
+## 2026-08-28 · real builder security-review fixes · branch gpt/real-builders
+- Outcome: all nine required review findings were addressed. The paid builder is now
+  reachable from the Work screen, gets the sign-in identity it needs without receiving
+  sibling-provider secrets, refuses incomplete or unreadable runs, and removes failed
+  private copies so a retry is possible. Change inspection and reviewed-version checks
+  now refuse uncertainty instead of treating it as safe.
+- Commits: none, by the orchestrator's explicit instruction. The edits remain in the
+  working tree for independent verification and commit.
+- Verification: focused real-builder checks → 28 passed. Full harness checks → 289
+  passed, 1 skipped, using a temporary sign-in readiness stub that blocked real paid
+  calls; the stub was removed afterward. The worktree-local test environment was absent,
+  so the same project's shared test environment was used instead.
+- Gauntlet: not run; this session applied findings from the already-completed security
+  and bug-hunter reviews. The human-supervised real paid build remains deliberately for
+  the orchestrator, exactly as requested. The two pre-existing untracked Sol notes were
+  left untouched.

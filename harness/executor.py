@@ -154,7 +154,8 @@ def _make_clone(job_id: int, branch: str) -> tuple[Path | None, str]:
         return None, "an isolated copy for this job already exists"
     try:
         subprocess.run(
-            ["git", "clone", "--quiet", "--no-hardlinks", str(HARNESS.parent), str(dest)],
+            ["git", "clone", "--quiet", "--no-hardlinks", "--branch", "main",
+             str(HARNESS.parent), str(dest)],
             capture_output=True, text=True, timeout=120, check=True,
         )
         subprocess.run(
@@ -170,15 +171,24 @@ def _make_clone(job_id: int, branch: str) -> tuple[Path | None, str]:
 
 
 def cleanup_clone(job_id: int) -> None:
-    """Remove a job's clone once its candidate has been read (or abandoned).
+    """Remove a job's clone AND its settings file.
 
-    NOT called automatically when a diff job reaches 'done' — Neill reads the
-    candidate first; see gauntlet._ask_to_ship's diff-kind branch, which
-    deliberately leaves the clone in place instead of calling this.
+    Called from two places with two different meanings: (a) here in this module,
+    on every FAILED claude-cli build — a failed job has nothing left worth reading,
+    and leaving the clone behind would block a retry (_make_clone refuses to reuse
+    an existing job directory). (b) NOT called automatically when a diff job
+    reaches 'done' — Neill reads the candidate first; see gauntlet._ask_to_ship's
+    diff-kind branch, which deliberately never calls this on the success path.
     """
     dest = CLONES / f"job-{job_id}"
+    settings = dest.parent / f"{dest.name}.settings.json"
     if dest.exists():
         subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+    if settings.exists():
+        try:
+            settings.unlink()
+        except OSError:
+            pass
 
 
 def cleanup_worktree(job_id: int) -> None:
@@ -291,6 +301,23 @@ def _build_prompt(request: str) -> str:
     )
 
 
+def _settings_path_for(clone: Path) -> Path:
+    """Where a clone's --settings file lives: alongside the clone, in CLONES
+    itself (never inside the clone — see the per-job --settings contract in
+    _claude_build_argv), named after the clone directory."""
+    return clone.parent / f"{clone.name}.settings.json"
+
+
+def _plain_builder_error(raw: str) -> str:
+    """Turn CLI/vendor text into something Neill could read without flinching.
+    Only translates the ONE pattern we know shows up in practice (an unauthenticated
+    session); anything else stays as truncated raw text — this is a translation of
+    a specific known phrase, not a general jargon filter."""
+    if "not logged in" in raw.lower():
+        return "the builder isn't signed in on this machine"
+    return raw.strip()[:300]
+
+
 def _claude_cli_build(seat_row, request: str, model: str, clone: Path) -> str:
     """Run the builder INSIDE the clone. Returns the CLI's raw stdout (a JSON
     envelope) for logging only — the actual work product is whatever changed on
@@ -298,7 +325,7 @@ def _claude_cli_build(seat_row, request: str, model: str, clone: Path) -> str:
     model's own narration of what it did.
     """
     assert_builders_locked_down()
-    settings_path = clone.parent / f"job-{clone.name}.settings.json"
+    settings_path = _settings_path_for(clone)
     settings_path.write_text(json.dumps({"permissions": {"additionalDirectories": []}}))
     argv = _claude_build_argv(model, clone, settings_path)
 
@@ -309,15 +336,35 @@ def _claude_cli_build(seat_row, request: str, model: str, clone: Path) -> str:
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
         "HOME": os.environ.get("HOME", str(Path.home())),
+        # USER, not just HOME: verified live that with only PATH+HOME the CLI
+        # exits "Not logged in" — the macOS Keychain lookup for the OAuth session
+        # keys off USER as well. Still no XAI_API_KEY/OPENAI_API_KEY — a sibling
+        # provider's key must never reach this process.
+        "USER": os.environ.get("USER", ""),
     }
     proc = subprocess.run(
         argv, input=_build_prompt(request), cwd=clone, env=env,
         capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:300]}"
-        )
+        raise RuntimeError(_plain_builder_error(proc.stderr or proc.stdout))
+
+    # The exit code alone isn't enough — the CLI can exit 0 with an envelope that
+    # says the run didn't actually finish (mirrors gauntlet.py's _claude_review,
+    # which does the same is_error check for the review path). NOTHING gets
+    # committed on any of these: the caller only calls _commit_diff_in_clone after
+    # this function returns successfully.
+    try:
+        envelope = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise RuntimeError("the builder's reply wasn't readable JSON") from exc
+    if not isinstance(envelope, dict):
+        raise RuntimeError("the builder's reply wasn't the JSON envelope we expected")
+    if envelope.get("is_error"):
+        raise RuntimeError(_plain_builder_error(str(envelope.get("result", ""))))
+    subtype = envelope.get("subtype")
+    if subtype and subtype != "success":
+        raise RuntimeError(f"the builder didn't finish cleanly ({subtype})")
     return proc.stdout
 
 
@@ -343,14 +390,19 @@ class ClonedCommit:
 
 
 def _disallowed_files_staged(clone: Path) -> list[str]:
-    raw = subprocess.run(["git", "diff", "--cached", "--raw"], cwd=clone,
-                         capture_output=True, text=True, timeout=30)
-    numstat = subprocess.run(["git", "diff", "--cached", "--numstat"], cwd=clone,
+    try:
+        raw = subprocess.run(["git", "diff", "--cached", "--raw"], cwd=clone,
                              capture_output=True, text=True, timeout=30)
-    return git_policy.disallowed_paths(
-        raw.stdout.splitlines() if raw.returncode == 0 else [],
-        numstat.stdout.splitlines() if numstat.returncode == 0 else [],
-    )
+        numstat = subprocess.run(["git", "diff", "--cached", "--numstat"], cwd=clone,
+                                 capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return ["(could not check what changed — refusing to guess)"]
+    if raw.returncode != 0 or numstat.returncode != 0:
+        # An empty result here used to mean "nothing to flag" — indistinguishable
+        # from git having FAILED to tell us anything at all. A check that can't
+        # run is not a clean bill of health.
+        return ["(could not check what changed — refusing to guess)"]
+    return git_policy.disallowed_paths(raw.stdout.splitlines(), numstat.stdout.splitlines())
 
 
 def _commit_diff_in_clone(clone: Path, job_id: int, branch: str, summary: str) -> ClonedCommit:
@@ -395,14 +447,20 @@ def _commit_diff_in_clone(clone: Path, job_id: int, branch: str, summary: str) -
 
 
 def _merge_base_with_main(clone: Path) -> str | None:
-    out = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=clone,
-                         capture_output=True, text=True, timeout=30)
+    try:
+        out = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=clone,
+                             capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     return (out.stdout.strip() or None) if out.returncode == 0 else None
 
 
 def _diff_against_main(clone: Path, base: str, tip: str) -> str | None:
-    out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=clone,
-                         capture_output=True, text=True, timeout=60)
+    try:
+        out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=clone,
+                             capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     return out.stdout if out.returncode == 0 else None
 
 
@@ -444,6 +502,24 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                    "This worker only runs the local model or the claude-cli builder directly.")
             return {"job_id": job_id, "status": "failed"}
 
+        # The job's bundle_kind was frozen at dispatch from the seat's provider AT
+        # THAT TIME (dispatch.BUNDLE_KIND_BY_PROVIDER). Seats are re-upserted from
+        # config on every server start, so a seat's LIVE provider can drift after a
+        # job is queued (e.g. reconfigured between dispatch and this worker actually
+        # running). If the frozen stamp and the live provider now disagree about
+        # what shape this job's review should be, refuse rather than guess which
+        # one is right — running it either way would produce a bundle that doesn't
+        # match what the record says it should be.
+        expected_kind = "diff" if is_claude_builder else "text"
+        actual_kind = job["bundle_kind"] or "text"
+        if actual_kind != expected_kind:
+            set_status(conn, job_id, "failed",
+                       error="this job's review shape no longer matches its builder "
+                             "— refusing to run it")
+            _event(conn, job_id, seat_row, "error",
+                   "This job's setup changed since it was queued and can't safely continue.")
+            return {"job_id": job_id, "status": "failed"}
+
         branch = job["branch"] or f"job/{job_id}"
 
         # 1. Isolate. Code builders get a standalone clone (no shared .git with
@@ -456,6 +532,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                            error=f"could not isolate the build: {wt_note}")
                 _event(conn, job_id, seat_row, "error",
                        "Could not set up an isolated copy to build in.")
+                cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
         else:
             wt, wt_note = _make_worktree(job_id, branch)
@@ -472,6 +549,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
             except Exception as exc:  # noqa: BLE001 — model, timeout, lockdown check
                 set_status(conn, job_id, "failed", error=f"builder error: {exc}")
                 _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
+                cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
 
             # 3. Commit what changed, refusing anything that isn't plain text —
@@ -482,6 +560,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
             if commit.sha is None:
                 set_status(conn, job_id, "failed", error=commit.reason)
                 _event(conn, job_id, seat_row, "error", commit.reason)
+                cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
             version = commit.sha
             base = _merge_base_with_main(wt)
@@ -491,6 +570,7 @@ def run_job(job_id: int, *, cfg: dict[str, Any] | None = None) -> dict[str, Any]
                            error="could not compute the change against the main line")
                 _event(conn, job_id, seat_row, "error",
                        "Could not compare the work against the main line of code.")
+                cleanup_clone(job_id)
                 return {"job_id": job_id, "status": "failed"}
             set_head_version(conn, job_id, version)
             result = bundle

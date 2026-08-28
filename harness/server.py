@@ -418,7 +418,13 @@ def _pick_local_builder(c) -> str | None:
 @app.post("/api/dispatch")
 async def dispatch_endpoint(request: Request):
     """Give the team a real job. Non-blocking: returns as soon as it's recorded and
-    the worker has started, so the page stays live while the work grinds."""
+    the worker has started, so the page stays live while the work grinds.
+
+    `builder` is OPTIONAL and defaults to the local coder — the button in the UI
+    that reaches the real code builder was missing entirely (rule 9: a feature with
+    no reachable control is not done), not just this validation. See web/index.html's
+    #giveBuilder picker.
+    """
     import dispatch as dispatch_mod
 
     body = await request.json()
@@ -427,14 +433,34 @@ async def dispatch_endpoint(request: Request):
         return JSONResponse({"error": "Say what to build."}, status_code=400)
     # The client stamps a nonce so a double-tap or a re-send can't start it twice.
     nonce = (body.get("nonce") or "").strip() or None
+    requested_builder = (body.get("builder") or "").strip()
 
     c = db()
-    builder = _pick_local_builder(c)
-    if not builder:
-        return JSONResponse(
-            {"error": "The free local coder isn't available on this machine right now."},
-            status_code=503,
-        )
+    if requested_builder:
+        row = c.execute(
+            "SELECT id, provider, enabled FROM seats WHERE id = ?", (requested_builder,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse({"error": "That builder doesn't exist."}, status_code=400)
+        if not row["enabled"]:
+            return JSONResponse(
+                {"error": f"{requested_builder.title()} is turned off right now."},
+                status_code=400,
+            )
+        if row["provider"] not in ("claude-cli", "ollama"):
+            return JSONResponse(
+                {"error": "That builder can't take a direct job yet — pick the "
+                          "local coder or Riggs."},
+                status_code=400,
+            )
+        builder = requested_builder
+    else:
+        builder = _pick_local_builder(c)
+        if not builder:
+            return JSONResponse(
+                {"error": "The free local coder isn't available on this machine right now."},
+                status_code=503,
+            )
     try:
         d = dispatch_mod.dispatch_local(
             c, text, builder, origin="text", dispatch_key=nonce,

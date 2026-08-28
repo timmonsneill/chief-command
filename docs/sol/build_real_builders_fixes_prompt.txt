@@ -1,0 +1,934 @@
+You are GPT-5.6-sol, in WRITE mode, inside the SAME worktree as your last session
+(branch gpt/real-builders — your prior commit 93bf956 is already on this branch).
+Security and bug-hunter reviews of that commit came back with 9 required fixes,
+numbered by priority. Apply them EXACTLY as specified below — this is a security-
+sensitive builder-lockdown change, not a place for "improvements." Make the edits,
+run the test suite yourself, COMMIT NOTHING (the orchestrator commits after
+independently re-verifying, same as last time).
+
+============================================================================
+1. CRITICAL — the builder's env is missing USER; the Keychain lookup keys off it
+============================================================================
+File: harness/executor.py, function `_claude_cli_build` (currently ~line 294).
+
+Find:
+```python
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+        "HOME": os.environ.get("HOME", str(Path.home())),
+    }
+```
+
+Replace with:
+```python
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+        "HOME": os.environ.get("HOME", str(Path.home())),
+        # USER, not just HOME: verified live that with only PATH+HOME the CLI
+        # exits "Not logged in" — the macOS Keychain lookup for the OAuth session
+        # keys off USER as well. Still no XAI_API_KEY/OPENAI_API_KEY — a sibling
+        # provider's key must never reach this process.
+        "USER": os.environ.get("USER", ""),
+    }
+```
+
+File: harness/tests/test_real_builders.py, function
+`test_builder_process_receives_only_path_and_home` — rename it and update the
+assertion to the new 3-key env:
+
+```python
+def test_builder_process_receives_only_path_home_and_user(tmp_path, monkeypatch):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    seen = {}
+
+    monkeypatch.setenv("XAI_API_KEY", "must-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout='{"is_error": false, "result": "ok"}', stderr="")
+
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    executor._claude_cli_build(None, "make a small change", "probe-model", clone)
+
+    assert set(seen["env"]) == {"PATH", "HOME", "USER"}
+    assert "XAI_API_KEY" not in seen["env"]
+    assert "OPENAI_API_KEY" not in seen["env"]
+```
+
+Do NOT do the "prove a real build" step yourself (item 1's second half) — the
+orchestrator will run that manually against the real `claude` CLI after your edits
+land, since it costs real API usage and needs a human-supervised throwaway clone.
+
+============================================================================
+2. CRITICAL (rule 9 — no button) — a person must be able to reach the code builder
+============================================================================
+File: harness/server.py, function `dispatch_endpoint` (currently ~line 418).
+
+Find:
+```python
+@app.post("/api/dispatch")
+async def dispatch_endpoint(request: Request):
+    """Give the team a real job. Non-blocking: returns as soon as it's recorded and
+    the worker has started, so the page stays live while the work grinds."""
+    import dispatch as dispatch_mod
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Say what to build."}, status_code=400)
+    # The client stamps a nonce so a double-tap or a re-send can't start it twice.
+    nonce = (body.get("nonce") or "").strip() or None
+
+    c = db()
+    builder = _pick_local_builder(c)
+    if not builder:
+        return JSONResponse(
+            {"error": "The free local coder isn't available on this machine right now."},
+            status_code=503,
+        )
+    try:
+```
+
+Replace with:
+```python
+@app.post("/api/dispatch")
+async def dispatch_endpoint(request: Request):
+    """Give the team a real job. Non-blocking: returns as soon as it's recorded and
+    the worker has started, so the page stays live while the work grinds.
+
+    `builder` is OPTIONAL and defaults to the local coder — the button in the UI
+    that reaches the real code builder was missing entirely (rule 9: a feature with
+    no reachable control is not done), not just this validation. See web/index.html's
+    #giveBuilder picker.
+    """
+    import dispatch as dispatch_mod
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Say what to build."}, status_code=400)
+    # The client stamps a nonce so a double-tap or a re-send can't start it twice.
+    nonce = (body.get("nonce") or "").strip() or None
+    requested_builder = (body.get("builder") or "").strip()
+
+    c = db()
+    if requested_builder:
+        row = c.execute(
+            "SELECT id, provider, enabled FROM seats WHERE id = ?", (requested_builder,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse({"error": "That builder doesn't exist."}, status_code=400)
+        if not row["enabled"]:
+            return JSONResponse(
+                {"error": f"{requested_builder.title()} is turned off right now."},
+                status_code=400,
+            )
+        if row["provider"] not in ("claude-cli", "ollama"):
+            return JSONResponse(
+                {"error": "That builder can't take a direct job yet — pick the "
+                          "local coder or Riggs."},
+                status_code=400,
+            )
+        builder = requested_builder
+    else:
+        builder = _pick_local_builder(c)
+        if not builder:
+            return JSONResponse(
+                {"error": "The free local coder isn't available on this machine right now."},
+                status_code=503,
+            )
+    try:
+```
+
+Everything after this `try:` (the `dispatch_mod.dispatch_local(...)` call and the
+reply-building lines) stays exactly as it is today.
+
+File: harness/web/index.html — find the `#give` form:
+```html
+    <form class="ask give" id="give">
+      <input id="giveIn" placeholder="Give the team a job to build…" autocomplete="off">
+      <button id="giveBtn">Build it</button>
+    </form>
+```
+
+Replace with (a plain `<select>`, styled with whatever existing class the other
+form inputs use if one applies — check the `<style>` block for an existing select
+rule; if none exists, leave it unstyled rather than inventing new CSS):
+```html
+    <form class="ask give" id="give">
+      <select id="giveBuilder" title="Who builds this">
+        <option value="">Local (free)</option>
+        <option value="riggs">Riggs (Claude)</option>
+      </select>
+      <input id="giveIn" placeholder="Give the team a job to build…" autocomplete="off">
+      <button id="giveBtn">Build it</button>
+    </form>
+```
+
+Then find the `$('#give').onsubmit` handler's fetch body:
+```javascript
+    const r = await fetch('/api/dispatch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, nonce})
+    }).then(r => r.json());
+```
+
+Replace with:
+```javascript
+    const builder = $('#giveBuilder').value;
+    const r = await fetch('/api/dispatch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, nonce, builder})
+    }).then(r => r.json());
+```
+
+(An empty string for `builder` means "use the default local coder" — the server
+side already treats `""` the same as absent via `.strip()` on an empty body value.)
+
+============================================================================
+3. CRITICAL — parse the builder's output envelope; nothing commits on a bad build
+============================================================================
+File: harness/executor.py, function `_claude_cli_build`.
+
+Mirror `gauntlet.py`'s `_claude_review` (~line 208), which does this for the
+review path: `json.loads` the envelope, refuse if it isn't a dict, refuse if
+`is_error` is truthy. For the BUILD path we also refuse on a non-success `subtype`
+(the Claude Code SDK's `--output-format json` envelope carries `type: "result"` and
+a `subtype` — `"success"` on a clean finish, or something like
+`"error_max_turns"` / `"error_during_execution"` when the run didn't actually
+finish the work — budget exhaustion and hitting the turn limit both surface here).
+A build that didn't finish cleanly must never have its half-done changes committed.
+
+Add a small shared translator (used by both failure paths below) directly above
+`_claude_cli_build`:
+
+```python
+def _plain_builder_error(raw: str) -> str:
+    """Turn CLI/vendor text into something Neill could read without flinching.
+    Only translates the ONE pattern we know shows up in practice (an unauthenticated
+    session); anything else stays as truncated raw text — this is a translation of
+    a specific known phrase, not a general jargon filter."""
+    if "not logged in" in raw.lower():
+        return "the builder isn't signed in on this machine"
+    return raw.strip()[:300]
+```
+
+Then replace the whole body of `_claude_cli_build` from the `proc = subprocess.run(...)`
+line to the end:
+
+Find:
+```python
+    proc = subprocess.run(
+        argv, input=_build_prompt(request), cwd=clone, env=env,
+        capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:300]}"
+        )
+    return proc.stdout
+```
+
+Replace with:
+```python
+    proc = subprocess.run(
+        argv, input=_build_prompt(request), cwd=clone, env=env,
+        capture_output=True, text=True, timeout=BUILD_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(_plain_builder_error(proc.stderr or proc.stdout))
+
+    # The exit code alone isn't enough — the CLI can exit 0 with an envelope that
+    # says the run didn't actually finish (mirrors gauntlet.py's _claude_review,
+    # which does the same is_error check for the review path). NOTHING gets
+    # committed on any of these: the caller only calls _commit_diff_in_clone after
+    # this function returns successfully.
+    try:
+        envelope = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise RuntimeError("the builder's reply wasn't readable JSON") from exc
+    if not isinstance(envelope, dict):
+        raise RuntimeError("the builder's reply wasn't the JSON envelope we expected")
+    if envelope.get("is_error"):
+        raise RuntimeError(_plain_builder_error(str(envelope.get("result", ""))))
+    subtype = envelope.get("subtype")
+    if subtype and subtype != "success":
+        raise RuntimeError(f"the builder didn't finish cleanly ({subtype})")
+    return proc.stdout
+```
+
+Update the existing test `test_fake_builder_writes_a_real_text_candidate_that_the_harness_commits`
+if needed — it already returns `{"is_error": false, "result": "ok"}` with no
+`subtype` key, which is fine (absent subtype is treated as success, matching the
+`if subtype and subtype != "success"` check). Add ONE new test proving the refusal:
+
+```python
+def test_a_bad_envelope_subtype_refuses_without_committing(tmp_path, monkeypatch):
+    repo = _new_repo(tmp_path / "repo")
+    (repo / "candidate.py").write_text("touched by a run that didn't finish\n")
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"is_error": false, "subtype": "error_max_turns", "result": "ran out of turns"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="didn't finish cleanly"):
+        executor._claude_cli_build(None, "do something", "probe-model", repo)
+
+    # Nothing was staged/committed by this function itself — it only ran the model.
+    assert _git(repo, "status", "--porcelain") == "" or "candidate.py" in _git(
+        repo, "status", "--porcelain")
+```
+
+(That last assertion is deliberately loose — `_claude_cli_build` never stages or
+commits anything itself in ANY case, staging is `_commit_diff_in_clone`'s job, so
+the real proof that "nothing committed" is that `run_job`'s except block returns
+`failed` before ever calling `_commit_diff_in_clone` — verify that by reading
+`run_job`, don't over-engineer this one test.)
+
+============================================================================
+4. HIGH — clone from a resolvable `main`; timeouts must not escape run_job
+============================================================================
+File: harness/executor.py, function `_make_clone`.
+
+Find:
+```python
+        subprocess.run(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(HARNESS.parent), str(dest)],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-q", "-B", branch], cwd=dest,
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+```
+
+Replace with (explicitly clone `main`, not "whatever HEAD happens to be checked
+out in the source" — if the harness's own checkout is ever NOT on `main`, plain
+`git clone` would give the job branch's `merge-base main HEAD` nothing to resolve,
+since only the source's checked-out branch becomes a local branch in a fresh
+clone; every other branch, including `main`, becomes a remote-tracking ref only):
+```python
+        subprocess.run(
+            ["git", "clone", "--quiet", "--no-hardlinks", "--branch", "main",
+             str(HARNESS.parent), str(dest)],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-q", "-B", branch], cwd=dest,
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+```
+
+Now the timeout/OSError hardening. Find:
+```python
+def _merge_base_with_main(clone: Path) -> str | None:
+    out = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=clone,
+                         capture_output=True, text=True, timeout=30)
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def _diff_against_main(clone: Path, base: str, tip: str) -> str | None:
+    out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=clone,
+                         capture_output=True, text=True, timeout=60)
+    return out.stdout if out.returncode == 0 else None
+```
+
+Replace with (both now swallow the two failure modes that used to escape `run_job`
+entirely — `subprocess.TimeoutExpired` and `OSError` — and return `None`, which the
+EXISTING caller in `run_job` already treats as "failed", so no caller-side change is
+needed):
+```python
+def _merge_base_with_main(clone: Path) -> str | None:
+    try:
+        out = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=clone,
+                             capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def _diff_against_main(clone: Path, base: str, tip: str) -> str | None:
+    try:
+        out = subprocess.run(["git", "diff", f"{base}..{tip}"], cwd=clone,
+                             capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+```
+
+Add a test proving a timeout lands as `failed`, not an exception escaping `run_job`:
+```python
+def test_merge_base_timeout_returns_none_not_an_exception(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    assert executor._merge_base_with_main(Path("/tmp/does-not-matter")) is None
+    assert executor._diff_against_main(Path("/tmp/does-not-matter"), "a", "b") is None
+```
+
+============================================================================
+5. HIGH — git_policy: catch new-executable files and renames; add path prefixes;
+   a git failure while listing a diff must be a REFUSAL, not "clean"
+============================================================================
+File: harness/git_policy.py. Replace the ENTIRE `disallowed_paths` function body
+with:
+
+```python
+def disallowed_paths(raw_lines: list[str], numstat_lines: list[str]) -> list[str]:
+    """Read `git diff --raw` and `git diff --numstat` output (already split into
+    lines) and return every path that isn't a plain text file with an unchanged
+    file mode: binaries, symlinks (120000), submodules (160000), any file that IS
+    or BECOMES executable (100755) — new files included, renames included — plus
+    `.gitattributes`, anything under a `.git`-prefixed path component (also catches
+    `.github`, `.gitignore`, `.gitmodules`), and anything under a `scripts/hooks/`
+    directory at any depth.
+
+    `git diff --raw` line shape: `:<old_mode> <new_mode> <old_sha> <new_sha>
+    <status>\t<path>` (renames/copies carry a second tab-separated path).
+    `git diff --numstat` line shape: `<added>\t<deleted>\t<path>`, where a binary
+    file reports `-\t-\t<path>` instead of numbers.
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def _flag(path: str, why: str) -> None:
+        path = path.strip()
+        if not path or path in seen:
+            return
+        seen.add(path)
+        bad.append(f"{path} ({why})")
+
+    for line in raw_lines:
+        line = line.strip()
+        if not line.startswith(":"):
+            continue
+        meta, _, paths = line.partition("\t")
+        fields = meta.split()
+        if len(fields) < 5:
+            continue
+        old_mode, new_mode, _old_sha, _new_sha, _status = fields[:5]
+        old_mode = old_mode.lstrip(":")
+        for p in paths.split("\t"):
+            p = p.strip()
+            if not p:
+                continue
+            parts = p.split("/")
+            if any(part.startswith(".git") for part in parts):
+                _flag(p, "inside a .git-prefixed path")
+            elif any(parts[i] == "scripts" and parts[i + 1] == "hooks"
+                     for i in range(len(parts) - 1)):
+                _flag(p, "inside a hooks directory")
+            elif new_mode == "120000":
+                _flag(p, "a symlink")
+            elif new_mode == "160000":
+                _flag(p, "a submodule")
+            elif p == ".gitattributes" or p.endswith("/.gitattributes"):
+                _flag(p, "can silently change how future diffs are rendered")
+            # DROPPED the old `status[:1] in ("M", "T")` filter — that silently
+            # let a BRAND NEW file committed with the executable bit set through
+            # (a new file's old_mode is "000000", so the old check's
+            # `old_mode not in ("000000", new_mode)` was False and skipped it
+            # entirely), and skipped renames (status "R") the same way.
+            elif new_mode == "100755" and old_mode != "100755":
+                _flag(p, "its executable bit changed")
+
+    for line in numstat_lines:
+        parts = line.strip().split("\t")
+        if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
+            _flag(parts[2], "a binary file")
+
+    return bad
+```
+
+Add tests in `harness/tests/test_real_builders.py` (near the existing
+`test_shared_policy_also_flags_submodules_and_git_components`):
+
+```python
+def test_shared_policy_flags_new_executables_and_renames():
+    raw = [
+        ":000000 100755 0000000 1234567 A\tnew_script.sh",
+        ":100644 100755 89abcde 1234567 R100\told_name.py\tnew_name.py",
+        ":000000 100644 0000000 1234567 A\t.github/workflows/ci.yml",
+        ":000000 100644 0000000 1234567 A\tscripts/hooks/pre-commit.sh",
+        ":000000 100644 0000000 1234567 A\ta/b/scripts/hooks/deep.sh",
+    ]
+    bad = git_policy.disallowed_paths(raw, [])
+    joined = " ".join(bad)
+    assert "new_script.sh" in joined
+    assert "new_name.py" in joined
+    assert ".github/workflows/ci.yml" in joined
+    assert "scripts/hooks/pre-commit.sh" in joined
+    assert "a/b/scripts/hooks/deep.sh" in joined
+```
+
+Now the "git failure = refusal, not clean" fix, at BOTH call sites.
+
+File: harness/executor.py, function `_disallowed_files_staged`. Find:
+```python
+def _disallowed_files_staged(clone: Path) -> list[str]:
+    raw = subprocess.run(["git", "diff", "--cached", "--raw"], cwd=clone,
+                         capture_output=True, text=True, timeout=30)
+    numstat = subprocess.run(["git", "diff", "--cached", "--numstat"], cwd=clone,
+                             capture_output=True, text=True, timeout=30)
+    return git_policy.disallowed_paths(
+        raw.stdout.splitlines() if raw.returncode == 0 else [],
+        numstat.stdout.splitlines() if numstat.returncode == 0 else [],
+    )
+```
+
+Replace with:
+```python
+def _disallowed_files_staged(clone: Path) -> list[str]:
+    try:
+        raw = subprocess.run(["git", "diff", "--cached", "--raw"], cwd=clone,
+                             capture_output=True, text=True, timeout=30)
+        numstat = subprocess.run(["git", "diff", "--cached", "--numstat"], cwd=clone,
+                                 capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return ["(could not check what changed — refusing to guess)"]
+    if raw.returncode != 0 or numstat.returncode != 0:
+        # An empty result here used to mean "nothing to flag" — indistinguishable
+        # from git having FAILED to tell us anything at all. A check that can't
+        # run is not a clean bill of health.
+        return ["(could not check what changed — refusing to guess)"]
+    return git_policy.disallowed_paths(raw.stdout.splitlines(), numstat.stdout.splitlines())
+```
+
+File: harness/gatekeeper.py, function `_range_diff_lines`. Find:
+```python
+def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]]:
+    """`git diff --raw` and `git diff --numstat` for one COMMITTED range, split
+    into lines — the same shape git_policy.disallowed_paths() reads from
+    executor.py's staged-changes check, applied here to a committed range instead."""
+    raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=REPO,
+                         capture_output=True, text=True)
+    numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=REPO,
+                             capture_output=True, text=True)
+    return (raw.stdout.splitlines() if raw.returncode == 0 else [],
+            numstat.stdout.splitlines() if numstat.returncode == 0 else [])
+```
+
+Replace with (now returns `None` on failure instead of a pair of empty lists — an
+empty pair is indistinguishable from "nothing changed," which is exactly the lie
+a failed `git diff` must not tell):
+```python
+def _range_diff_lines(base: str, tip: str) -> tuple[list[str], list[str]] | None:
+    """`git diff --raw` and `git diff --numstat` for one COMMITTED range, split
+    into lines — the same shape git_policy.disallowed_paths() reads from
+    executor.py's staged-changes check, applied here to a committed range instead.
+    Returns None if either command failed — the caller must treat that as a
+    refusal, never as "nothing to flag"."""
+    raw = subprocess.run(["git", "diff", "--raw", f"{base}..{tip}"], cwd=REPO,
+                         capture_output=True, text=True)
+    numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{tip}"], cwd=REPO,
+                             capture_output=True, text=True)
+    if raw.returncode != 0 or numstat.returncode != 0:
+        return None
+    return (raw.stdout.splitlines(), numstat.stdout.splitlines())
+```
+
+And in `merge()`, find:
+```python
+        bad = git_policy.disallowed_paths(*_range_diff_lines(base_sha, tip))
+        if bad:
+            raise _no("that branch changes things that can't be merged as reviewed "
+                      f"({_clean(', '.join(bad), 160)})")
+```
+
+Replace with:
+```python
+        lines = _range_diff_lines(base_sha, tip)
+        bad = (["(could not verify the branch's change is safe to merge)"]
+               if lines is None else git_policy.disallowed_paths(*lines))
+        if bad:
+            raise _no("that branch changes things that can't be merged as reviewed "
+                      f"({_clean(', '.join(bad), 160)})")
+```
+
+============================================================================
+6. MEDIUM — exact-sha comparison for 40-char versions; refuse on bundle_kind/
+   provider drift before building
+============================================================================
+File: harness/gatekeeper.py, function `_same_commit`. Find:
+```python
+def _same_commit(tip: str, version: str) -> bool:
+    """Is the reviewed version this exact commit?
+
+    `head_version` is a short id, so compare on the shorter length. A version that is
+    not a commit id at all (the local worker records a content hash) can never match,
+    which is correct: if we cannot prove the reviewed thing is this code, we do not
+    merge it.
+    """
+    version = (version or "").strip().lower()
+    tip = (tip or "").strip().lower()
+    if len(version) < 7 or not re.fullmatch(r"[0-9a-f]+", version):
+        return False
+    return tip.startswith(version)
+```
+
+Replace with:
+```python
+def _same_commit(tip: str, version: str) -> bool:
+    """Is the reviewed version this exact commit?
+
+    A FULL 40-character sha (every 'diff'-kind job stores one — see
+    executor._commit_diff_in_clone) is compared for EXACT equality, never a
+    prefix: a prefix match on a full sha adds nothing but an accidental collision
+    surface. Older/legacy rows recorded a short 16-char id (the local worker's
+    truncated commit id, or a content hash for jobs never in git at all) — those
+    keep the prefix match, since a short id was never meant to be exact. A version
+    that is not a commit id at all can never match either way, which is correct: if
+    we cannot prove the reviewed thing is this code, we do not merge it.
+    """
+    version = (version or "").strip().lower()
+    tip = (tip or "").strip().lower()
+    if len(version) < 7 or not re.fullmatch(r"[0-9a-f]+", version):
+        return False
+    if len(version) == 40:
+        return tip == version
+    return tip.startswith(version)
+```
+
+File: harness/executor.py, `run_job`. Add a frozen-shape-vs-live-seat check
+IMMEDIATELY after the existing "no in-process builder for provider" block and
+BEFORE the `branch = job["branch"] or f"job/{job_id}"` line / isolation step (no
+clone has been created yet at this point, so there is nothing to clean up on this
+refusal). Find:
+```python
+            _event(conn, job_id, seat_row, "error",
+                   "This worker only runs the local model or the claude-cli builder directly.")
+            return {"job_id": job_id, "status": "failed"}
+
+        branch = job["branch"] or f"job/{job_id}"
+```
+
+Replace with:
+```python
+            _event(conn, job_id, seat_row, "error",
+                   "This worker only runs the local model or the claude-cli builder directly.")
+            return {"job_id": job_id, "status": "failed"}
+
+        # The job's bundle_kind was frozen at dispatch from the seat's provider AT
+        # THAT TIME (dispatch.BUNDLE_KIND_BY_PROVIDER). Seats are re-upserted from
+        # config on every server start, so a seat's LIVE provider can drift after a
+        # job is queued (e.g. reconfigured between dispatch and this worker actually
+        # running). If the frozen stamp and the live provider now disagree about
+        # what shape this job's review should be, refuse rather than guess which
+        # one is right — running it either way would produce a bundle that doesn't
+        # match what the record says it should be.
+        expected_kind = "diff" if is_claude_builder else "text"
+        actual_kind = job["bundle_kind"] or "text"
+        if actual_kind != expected_kind:
+            set_status(conn, job_id, "failed",
+                       error="this job's review shape no longer matches its builder "
+                             "— refusing to run it")
+            _event(conn, job_id, seat_row, "error",
+                   "This job's setup changed since it was queued and can't safely continue.")
+            return {"job_id": job_id, "status": "failed"}
+
+        branch = job["branch"] or f"job/{job_id}"
+```
+
+Add tests for both fixes:
+```python
+def test_same_commit_requires_exact_match_for_a_full_sha():
+    full = "a" * 40
+    assert gatekeeper._same_commit(full, full) is True
+    assert gatekeeper._same_commit(full + "extra-noise-thats-invalid", full) is False
+    # a differing full sha must never prefix-match another full sha
+    other_full = "b" * 40
+    assert gatekeeper._same_commit(other_full, full) is False
+
+
+def test_same_commit_still_prefix_matches_a_legacy_short_id():
+    short = "a" * 16
+    assert gatekeeper._same_commit(short + "0" * 24, short) is True
+
+
+def test_bundle_kind_drift_refuses_before_any_isolation(db, monkeypatch):
+    # riggs (claude-cli) but the job was stamped 'text' before this run — as if the
+    # seat's provider changed after dispatch.
+    job_id = create_job(db, "build it", builder_seat="riggs", bundle_kind="text")
+    set_status(db, job_id, "in_progress")
+
+    def must_not_clone(*args, **kwargs):
+        raise AssertionError("isolation started on a job that should have been refused first")
+
+    monkeypatch.setattr(executor, "_make_clone", must_not_clone)
+    result = executor.run_job(job_id, cfg=None)
+    assert result["status"] == "failed"
+    row = db.execute("SELECT status, error FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert "review shape" in row["error"]
+```
+
+(`executor.run_job` opens its OWN connection via `connect(DB_PATH)` rather than
+using the `db` fixture's connection directly — if that makes this test awkward
+against a tmp/in-memory db, monkeypatch `executor.DB_PATH` to the fixture's db path
+via `monkeypatch.setattr(executor, "DB_PATH", <the db fixture's path>)` and adjust
+the `db` fixture usage as needed so `run_job` reads/writes the same tmp database
+the test set up. Get this test actually exercising `run_job`, not just the
+standalone check in isolation — that's the point of it.)
+
+============================================================================
+7. MEDIUM — codex is not a builder yet; only claude-cli stamps 'diff'
+============================================================================
+File: harness/dispatch.py. Find:
+```python
+BUNDLE_KIND_BY_PROVIDER = {"claude-cli": "diff", "codex": "diff"}   # default: 'text'
+```
+
+Replace with:
+```python
+# codex is NOT mapped here on purpose: there is no in-process codex builder yet
+# (executor.py only knows ollama and claude-cli). Mapping it to 'diff' now would
+# stamp a review contract for work nothing can actually produce. Add it back the
+# day an in-process codex builder exists.
+BUNDLE_KIND_BY_PROVIDER = {"claude-cli": "diff"}   # default: 'text'
+```
+
+Update `test_dispatch_stamps_the_builder_bundle_shape` in test_real_builders.py if
+it references `codex`/`brain` expecting `'diff'` — it currently only parametrizes
+`riggs` (diff) and `grinder_local` (text), so no change should be needed; just
+confirm, and if there's any assumption elsewhere in the new tests that `brain`
+(codex) stamps 'diff', fix it to expect 'text'.
+
+============================================================================
+8. Clone lifecycle — remove the clone (and its settings file) on a FAILED job;
+   keep it only when the job reaches 'done'
+============================================================================
+File: harness/executor.py. First, fix a latent naming bug while you're in here:
+the settings file path is currently built as
+`clone.parent / f"job-{clone.name}.settings.json"` — since `clone.name` is ALREADY
+`f"job-{job_id}"`, this produces `job-job-<id>.settings.json` (harmless but
+confusing, and it means `_claude_cli_build` and any cleanup code have to
+independently reconstruct the same odd string correctly or diverge). Add ONE
+helper both places use:
+
+```python
+def _settings_path_for(clone: Path) -> Path:
+    """Where a clone's --settings file lives: alongside the clone, in CLONES
+    itself (never inside the clone — see the per-job --settings contract in
+    _claude_build_argv), named after the clone directory."""
+    return clone.parent / f"{clone.name}.settings.json"
+```
+
+Place it right above `_claude_cli_build`. In `_claude_cli_build`, find:
+```python
+    settings_path = clone.parent / f"job-{clone.name}.settings.json"
+```
+Replace with:
+```python
+    settings_path = _settings_path_for(clone)
+```
+
+Now the cleanup. Find `cleanup_clone`:
+```python
+def cleanup_clone(job_id: int) -> None:
+    """Remove a job's clone once its candidate has been read (or abandoned).
+
+    NOT called automatically when a diff job reaches 'done' — Neill reads the
+    candidate first; see gauntlet._ask_to_ship's diff-kind branch, which
+    deliberately leaves the clone in place instead of calling this.
+    """
+    dest = CLONES / f"job-{job_id}"
+    if dest.exists():
+        subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+```
+
+Replace with:
+```python
+def cleanup_clone(job_id: int) -> None:
+    """Remove a job's clone AND its settings file.
+
+    Called from two places with two different meanings: (a) here in this module,
+    on every FAILED claude-cli build — a failed job has nothing left worth reading,
+    and leaving the clone behind would block a retry (_make_clone refuses to reuse
+    an existing job directory). (b) NOT called automatically when a diff job
+    reaches 'done' — Neill reads the candidate first; see gauntlet._ask_to_ship's
+    diff-kind branch, which deliberately never calls this on the success path.
+    """
+    dest = CLONES / f"job-{job_id}"
+    settings = dest.parent / f"{dest.name}.settings.json"
+    if dest.exists():
+        subprocess.run(["rm", "-rf", str(dest)], capture_output=True, text=True)
+    if settings.exists():
+        try:
+            settings.unlink()
+        except OSError:
+            pass
+```
+
+Now call it from every FAILURE return inside `run_job`'s `is_claude_builder`
+branch (NOT the bundle_kind-drift refusal above, which returns before any clone
+exists — nothing to clean up there). There are three failure returns in that
+branch today: the build-exception catch, the commit-refusal catch, and the
+merge-base/diff-computation catch. Add `cleanup_clone(job_id)` immediately before
+each of those three `return {"job_id": job_id, "status": "failed"}` lines (i.e.
+right after the matching `_event(...)` call, still inside the `if is_claude_builder:`
+block). Also add it to the isolation-failure return (`wt is None` case) for
+symmetry, even though nothing was created there in practice — `_make_clone` cleans
+up its own partial directory on failure already, so this is a no-op safety net,
+not new behavior.
+
+Concretely, all four `is_claude_builder`-branch failure returns should look like
+this shape (example — the build-exception one):
+```python
+            try:
+                _claude_cli_build(seat_row, job["request"], model, wt)
+            except Exception as exc:  # noqa: BLE001 — model, timeout, lockdown check
+                set_status(conn, job_id, "failed", error=f"builder error: {exc}")
+                _event(conn, job_id, seat_row, "error", "The worker hit a problem.")
+                cleanup_clone(job_id)
+                return {"job_id": job_id, "status": "failed"}
+```
+Apply the same `cleanup_clone(job_id)` line (before the `return`) to the isolation
+failure, the commit-refusal failure, and the merge-base/diff-computation failure.
+
+Add a test:
+```python
+def test_failed_claude_build_removes_the_clone_so_a_retry_can_run(db, monkeypatch, tmp_path):
+    source = _new_repo(tmp_path / "source")
+    (source / "harness").mkdir()
+    (source / "harness" / ".keep").write_text("fixture\n")
+    _git(source, "add", ".")
+    _git(source, "commit", "-q", "-m", "add harness")
+    monkeypatch.setattr(executor, "HARNESS", source / "harness")
+    monkeypatch.setattr(executor, "CLONES", tmp_path / "clones")
+    monkeypatch.setattr(executor, "DB_PATH", db.execute("PRAGMA database_list").fetchone()[2])
+
+    job_id = create_job(db, "build it", builder_seat="riggs", bundle_kind="diff")
+    set_status(db, job_id, "in_progress")
+    conn2 = connect(executor.DB_PATH)
+    # ensure the seat exists on THIS connection's view of the db too
+    upsert_seat(conn2, Seat("riggs", "claude-cli", "claude-opus-4-8", "claude", "subscription"))
+    conn2.close()
+
+    def broken_build(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(executor, "_claude_cli_build", broken_build)
+    result = executor.run_job(job_id, cfg=None)
+
+    assert result["status"] == "failed"
+    assert not (tmp_path / "clones" / f"job-{job_id}").exists()
+```
+
+(If `db`'s tmp path / connection sharing makes the `DB_PATH` monkeypatch awkward,
+adapt using whatever pattern the OTHER new run_job test from item 6 ends up using
+— keep both consistent. The property being proven is: a clone directory that
+existed before the failure does NOT exist after `run_job` returns 'failed'.)
+
+============================================================================
+9. LOW — grammar, and error text scrubbed of raw CLI phrasing
+============================================================================
+File: harness/gauntlet.py. Find:
+```python
+_DIFF_CANDIDATE_SENTENCE = (
+    "Checked and passed by {n} different models. The changes are ready for you "
+    "to read before anything goes in."
+)
+```
+
+Replace with:
+```python
+def _model_count_phrase(n: int) -> str:
+    return "one other model" if n == 1 else f"{n} different models"
+
+
+_DIFF_CANDIDATE_SENTENCE = (
+    "Checked and passed by {phrase}. The changes are ready for you "
+    "to read before anything goes in."
+)
+```
+
+Find, a few lines below in `_ask_to_ship`:
+```python
+        if job_row is not None and (job_row["bundle_kind"] or "text") == "diff":
+            n = _families_passed_count(conn, job_row)
+            set_status(conn, job_id, "done",
+                       spoken_summary=_DIFF_CANDIDATE_SENTENCE.format(n=n))
+            return
+```
+
+Replace with:
+```python
+        if job_row is not None and (job_row["bundle_kind"] or "text") == "diff":
+            n = _families_passed_count(conn, job_row)
+            set_status(conn, job_id, "done",
+                       spoken_summary=_DIFF_CANDIDATE_SENTENCE.format(
+                           phrase=_model_count_phrase(n)))
+            return
+```
+
+Update the existing test in test_real_builders.py that checks this exact sentence
+(`test_certified_diff_job_stops_at_done_with_the_fixed_sentence`, which seeds
+exactly 1 passing family) — change its assertion from
+`"Checked and passed by 1 different models. ..."` to
+`"Checked and passed by one other model. ..."`. Add ONE more test (or extend the
+same one with a second job) proving the plural path still reads naturally for
+N > 1 — e.g. seed two passing reviewer families and assert the sentence contains
+`"2 different models"`.
+
+The `jobs.error` raw-CLI-text issue is already fixed by item 3/1's
+`_plain_builder_error` helper (it wraps both the non-zero-exit path and the
+is_error-envelope path in `_claude_cli_build`, and `run_job` passes whatever that
+function raises straight into `error=f"builder error: {exc}"`, so a translated
+message flows through automatically). Confirm this with a quick read after
+finishing items 1 and 3 — no separate code change should be needed here, but if
+`f"builder error: {exc}"` still results in "builder error: the builder isn't
+signed in on this machine" reading oddly, feel free to drop the "builder error: "
+prefix specifically for this one translated case (i.e. in `run_job`, if the
+exception message already reads as a complete plain-English sentence, don't
+prepend "builder error:" to it) — use your judgement on the smallest change that
+keeps `jobs.error` readable, but do NOT change behavior for exceptions that aren't
+this translated case.
+
+============================================================================
+QUEUE — do not build these, just record them
+============================================================================
+File: docs/gpt/GPT_TASK_QUEUE.md. Add a NEW item 12 (the next unused number — items
+0 through 11 already exist; confirm by reading the file's current numbering before
+you add this one, and use whatever number is actually next) at the END of the
+numbered list, matching the existing entries' voice and format exactly (a `## N.
+[ ] <title>` header, then 3-6 sentences of plain, specific prose — no code, no
+diffs):
+
+```markdown
+## 12. [ ] Merge-time bundle contract, a commit-time size limit, and pushing job/N
+`gatekeeper.merge` recomputes `git merge-base main tip` at merge time and compares
+that FRESH computation against the stored bundle — which means the base it
+verifies against can differ from the base the panel actually reviewed against if
+`main` moved in between (task #9's design review flagged this: the check can be
+correct today and still verify against the wrong thing tomorrow). Store the FULL
+base commit id (not just the diff text) and the exact `git diff` options used
+(`--no-renames`, pinned) at build time, and make `gatekeeper.merge` verify against
+THAT STORED BASE, never a recomputed one — if `main` has moved, that's a new
+integration and needs a fresh review, not a silent re-verify. Separately: `_claude_
+cli_build`/`_commit_diff_in_clone` have no upper bound on how large a change they'll
+accept before committing — a commit-time size limit (mirroring gauntlet.py's
+MAX_CODE_CHARS truncation-avoidance design for reviews) belongs here too, refused
+BEFORE a commit exists rather than truncated after. And today nothing ever pushes
+`job/<id>` anywhere — when auto-merge is eventually enabled (after the real OS
+isolation boundary Sol's design gate is still waiting on), the gatekeeper's merge
+needs to push the merged `main` to the real remote, behind the same lock, with the
+same "refuse and say so" discipline as every other step in that function. Design
+each of these with Sol before building, same as task #9 itself was.
+```
+
+============================================================================
+VERIFICATION
+============================================================================
+Run `.venv/bin/python -m pytest harness/tests/ -q` (drop any worker-count flag
+that isn't a real option on this install; if unsure, just run it plain). Fix
+anything red that your own changes caused. Do NOT touch tests outside this task's
+scope, do NOT weaken any guard or lockdown check to make a test pass, and do NOT
+commit anything — leave the working tree as edited files for the orchestrator to
+review and commit.

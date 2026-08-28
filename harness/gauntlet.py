@@ -853,8 +853,12 @@ def _families_passed_count(conn, job) -> int:
 # generation, no merge). Not the gatekeeper's problem to solve and not something
 # _ask_to_ship should improvise per job: one sentence, always the same shape, N
 # filled in from the record.
+def _model_count_phrase(n: int) -> str:
+    return "one other model" if n == 1 else f"{n} different models"
+
+
 _DIFF_CANDIDATE_SENTENCE = (
-    "Checked and passed by {n} different models. The changes are ready for you "
+    "Checked and passed by {phrase}. The changes are ready for you "
     "to read before anything goes in."
 )
 
@@ -877,7 +881,8 @@ def _ask_to_ship(conn, job_id: int, cfg: dict[str, Any], db_path: Path) -> None:
         if job_row is not None and (job_row["bundle_kind"] or "text") == "diff":
             n = _families_passed_count(conn, job_row)
             set_status(conn, job_id, "done",
-                       spoken_summary=_DIFF_CANDIDATE_SENTENCE.format(n=n))
+                       spoken_summary=_DIFF_CANDIDATE_SENTENCE.format(
+                           phrase=_model_count_phrase(n)))
             return
 
         import gatekeeper

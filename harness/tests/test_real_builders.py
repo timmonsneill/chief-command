@@ -168,7 +168,7 @@ def test_executable_bit_change_is_refused_without_a_commit(repo):
 
 def test_gitattributes_is_refused_without_a_commit(repo):
     (repo / ".gitattributes").write_text("*.secret -diff\n")
-    _assert_commit_refused(repo, "future diffs")
+    _assert_commit_refused(repo, "git-prefixed path")
 
 
 def test_nothing_changed_is_refused_without_a_commit(repo):
@@ -182,8 +182,25 @@ def test_shared_policy_also_flags_submodules_and_git_components():
     ]
     assert git_policy.disallowed_paths(raw, []) == [
         "vendor/library (a submodule)",
-        "nested/.git/hooks/check (inside .git)",
+        "nested/.git/hooks/check (inside a .git-prefixed path)",
     ]
+
+
+def test_shared_policy_flags_new_executables_and_renames():
+    raw = [
+        ":000000 100755 0000000 1234567 A\tnew_script.sh",
+        ":100644 100755 89abcde 1234567 R100\told_name.py\tnew_name.py",
+        ":000000 100644 0000000 1234567 A\t.github/workflows/ci.yml",
+        ":000000 100644 0000000 1234567 A\tscripts/hooks/pre-commit.sh",
+        ":000000 100644 0000000 1234567 A\ta/b/scripts/hooks/deep.sh",
+    ]
+    bad = git_policy.disallowed_paths(raw, [])
+    joined = " ".join(bad)
+    assert "new_script.sh" in joined
+    assert "new_name.py" in joined
+    assert ".github/workflows/ci.yml" in joined
+    assert "scripts/hooks/pre-commit.sh" in joined
+    assert "a/b/scripts/hooks/deep.sh" in joined
 
 
 def test_plain_text_commit_binds_the_full_sha_to_the_job(repo, db):
@@ -221,6 +238,25 @@ def test_bundle_shape_cannot_be_rewritten(db):
     job_id = create_job(db, "write text", builder_seat="grinder_local")
     with pytest.raises(sqlite3.IntegrityError, match="guard:"):
         db.execute("UPDATE jobs SET bundle_kind='diff' WHERE id=?", (job_id,))
+
+
+def test_bundle_kind_drift_refuses_before_any_isolation(db, monkeypatch):
+    # riggs (claude-cli) but the job was stamped 'text' before this run — as if the
+    # seat's provider changed after dispatch.
+    job_id = create_job(db, "build it", builder_seat="riggs", bundle_kind="text")
+    set_status(db, job_id, "in_progress")
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.setattr(executor, "DB_PATH", db_path)
+
+    def must_not_clone(*args, **kwargs):
+        raise AssertionError("isolation started on a job that should have been refused first")
+
+    monkeypatch.setattr(executor, "_make_clone", must_not_clone)
+    result = executor.run_job(job_id, cfg=None)
+    assert result["status"] == "failed"
+    row = db.execute("SELECT status, error FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert "review shape" in row["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +314,20 @@ def test_diff_bundle_mismatch_is_refused_without_moving_main(db, repo, monkeypat
     assert _git(repo, "rev-parse", "main") == main_before
 
 
+def test_same_commit_requires_exact_match_for_a_full_sha():
+    full = "a" * 40
+    assert gatekeeper._same_commit(full, full) is True
+    assert gatekeeper._same_commit(full + "extra-noise-thats-invalid", full) is False
+    # a differing full sha must never prefix-match another full sha
+    other_full = "b" * 40
+    assert gatekeeper._same_commit(other_full, full) is False
+
+
+def test_same_commit_still_prefix_matches_a_legacy_short_id():
+    short = "a" * 16
+    assert gatekeeper._same_commit(short + "0" * 24, short) is True
+
+
 # ---------------------------------------------------------------------------
 # Certified diff jobs park for the owner; they never ask to merge
 # ---------------------------------------------------------------------------
@@ -304,15 +354,41 @@ def test_certified_diff_job_stops_at_done_with_the_fixed_sentence(db, tmp_path, 
     ).fetchone()
     assert row["status"] == "done"
     assert row["spoken_summary"] == (
-        "Checked and passed by 1 different models. The changes are ready for you "
+        "Checked and passed by one other model. The changes are ready for you "
         "to read before anything goes in."
     )
+
+
+def test_certified_diff_job_uses_a_natural_plural_model_count(db, tmp_path, monkeypatch):
+    job_id = _new_diff_job(db)
+    set_status(db, job_id, "in_progress")
+    db.execute(
+        "UPDATE jobs SET required_reviews=2, required_review_families=2 WHERE id=?",
+        (job_id,),
+    )
+    set_head_version(db, job_id, "b" * 40)
+    set_status(db, job_id, "review", result="diff text")
+    record_verdict(db, job_id, "brain", verdict="pass", role="reviewer")
+    record_verdict(db, job_id, "grok", verdict="pass", role="reviewer")
+    set_status(db, job_id, "done")
+
+    def must_not_merge(*args, **kwargs):
+        raise AssertionError("a diff candidate asked to merge")
+
+    monkeypatch.setattr(gatekeeper, "handle", must_not_merge)
+    gauntlet._ask_to_ship(db, job_id, CFG, tmp_path / "jobs.db")
+
+    row = db.execute(
+        "SELECT status, spoken_summary FROM jobs WHERE id=?", (job_id,),
+    ).fetchone()
+    assert row["status"] == "done"
+    assert "Checked and passed by 2 different models." in row["spoken_summary"]
 
 
 # ---------------------------------------------------------------------------
 # Process environment and standalone-clone isolation
 # ---------------------------------------------------------------------------
-def test_builder_process_receives_only_path_and_home(tmp_path, monkeypatch):
+def test_builder_process_receives_only_path_home_and_user(tmp_path, monkeypatch):
     clone = tmp_path / "clone"
     clone.mkdir()
     seen = {}
@@ -327,7 +403,7 @@ def test_builder_process_receives_only_path_and_home(tmp_path, monkeypatch):
     monkeypatch.setattr(executor.subprocess, "run", fake_run)
     executor._claude_cli_build(None, "make a small change", "probe-model", clone)
 
-    assert set(seen["env"]) == {"PATH", "HOME"}
+    assert set(seen["env"]) == {"PATH", "HOME", "USER"}
     assert "XAI_API_KEY" not in seen["env"]
     assert "OPENAI_API_KEY" not in seen["env"]
 
@@ -354,6 +430,37 @@ def test_fake_builder_writes_a_real_text_candidate_that_the_harness_commits(tmp_
     assert committed.sha is not None and len(committed.sha) == 40
 
 
+def test_a_bad_envelope_subtype_refuses_without_committing(tmp_path, monkeypatch):
+    repo = _new_repo(tmp_path / "repo")
+    (repo / "candidate.py").write_text("touched by a run that didn't finish\n")
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"is_error": false, "subtype": "error_max_turns", "result": "ran out of turns"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="didn't finish cleanly"):
+        executor._claude_cli_build(None, "do something", "probe-model", repo)
+
+    # Nothing was staged/committed by this function itself — it only ran the model.
+    monkeypatch.setattr(executor.subprocess, "run", real_run)
+    assert _git(repo, "status", "--porcelain") == "" or "candidate.py" in _git(
+        repo, "status", "--porcelain")
+
+
+def test_merge_base_timeout_returns_none_not_an_exception(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    assert executor._merge_base_with_main(Path("/tmp/does-not-matter")) is None
+    assert executor._diff_against_main(Path("/tmp/does-not-matter"), "a", "b") is None
+
+
 def test_make_clone_has_its_own_git_directory_and_refuses_reuse(tmp_path, monkeypatch):
     source = _new_repo(tmp_path / "source")
     (source / "harness").mkdir()
@@ -374,3 +481,30 @@ def test_make_clone_has_its_own_git_directory_and_refuses_reuse(tmp_path, monkey
     again, reason = executor._make_clone(41, "job/41")
     assert again is None
     assert "already exists" in reason
+
+
+def test_failed_claude_build_removes_the_clone_so_a_retry_can_run(db, monkeypatch, tmp_path):
+    source = _new_repo(tmp_path / "source")
+    (source / "harness").mkdir()
+    (source / "harness" / ".keep").write_text("fixture\n")
+    _git(source, "add", ".")
+    _git(source, "commit", "-q", "-m", "add harness")
+    monkeypatch.setattr(executor, "HARNESS", source / "harness")
+    monkeypatch.setattr(executor, "CLONES", tmp_path / "clones")
+    monkeypatch.setattr(executor, "DB_PATH", db.execute("PRAGMA database_list").fetchone()[2])
+
+    job_id = create_job(db, "build it", builder_seat="riggs", bundle_kind="diff")
+    set_status(db, job_id, "in_progress")
+    conn2 = connect(executor.DB_PATH)
+    # ensure the seat exists on THIS connection's view of the db too
+    upsert_seat(conn2, Seat("riggs", "claude-cli", "claude-opus-4-8", "claude", "subscription"))
+    conn2.close()
+
+    def broken_build(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(executor, "_claude_cli_build", broken_build)
+    result = executor.run_job(job_id, cfg=None)
+
+    assert result["status"] == "failed"
+    assert not (tmp_path / "clones" / f"job-{job_id}").exists()
