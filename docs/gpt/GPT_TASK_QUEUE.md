@@ -76,7 +76,7 @@ request body, so on a keep-alive connection the leftover bytes are parsed as the
 request line. Read and discard `Content-Length` bytes (bounded) or send
 `Connection: close` before returning. Add a test with a raw socket. No other changes.
 
-## 6. [ ] Merge holds a write transaction across `git merge`
+## 6. [x] DONE 2026-08-28 — Merge holds a write transaction across `git merge`
 `gatekeeper.merge` runs `BEGIN IMMEDIATE` → `set_status` → `git merge` (up to 120s) →
 `COMMIT`, while `connect()` sets a 15s busy timeout — so a slow merge turns concurrent
 panel writers into "couldn't finish" skips. Either raise the busy timeout above the merge
@@ -100,7 +100,7 @@ roster, live `seats` row via `sync_seats`, tests that reference "grok" as a seat
 NOT the `family = "grok"` value, which is correct). Nothing in orchestration may
 reference a provider by name. One task, no behaviour change; all tests green.
 
-## 9. [ ] Real code builders — Sol's GO version ONLY (STOP on the full plan, 2026-08-27)
+## 9. [x] DONE 2026-08-28 (candidate-only) — Real code builders — Sol's GO version ONLY (STOP on the full plan, 2026-08-27)
 Sol's gate: docs/sol/sol_real_code_builders.out. The full plan (builder edits, tests run,
 auto-merge) is STOPPED until a real OS boundary exists (the wall). What is GO tonight —
 "candidate generation, no merge":
@@ -125,7 +125,7 @@ auto-merge) is STOPPED until a real OS boundary exists (the wall). What is GO to
 - **It stops at `done`. Nothing runs builder-written tests; nothing merges.** Neill reads
   the diff in the morning. Executing and merging come after the wall, in that order.
 
-## 10. [ ] Merge loop (task 4) — fix Sol's finding before it merges
+## 10. [x] DONE 2026-08-28 — Merge loop (task 4) — fix Sol's finding before it merges
 `harness/tester.py` records a pytest log as artifact kind `trace` to satisfy
 `guard_tester_must_cite_artifacts` — that launders "the tests passed" into "someone
 drove the app", making a green suite sufficient to ship. Record test runs as `exit_code`

@@ -79,3 +79,21 @@ was run three times as the cross-model re-review before push.
   and bug-hunter reviews. The human-supervised real paid build remains deliberately for
   the orchestrator, exactly as requested. The two pre-existing untracked Sol notes were
   left untouched.
+
+## 2026-08-28 (night of 08-27) · tasks 4, 6, 9 + #12 fast lane + reviewer lockdown · driven by Chief
+Branches gpt/voice-fast-lane, gpt/merge-loop, gpt/harden-reviewers, gpt/real-builders,
+each GPT-built (one Claude-authored, GPT-reviewed) and reviewed by the OTHER family
+before merging to main. Suite on main: 290 passed. Pushed.
+- Voice fast lane: first sentence streams immediately (live probe 2.9s); NEEDS PHONE TEST.
+- Merge loop: the panel ASKS the gatekeeper after certifying (both paths); guard 6 refuses
+  until a real driving tester exists, and says so in one fixed sentence. The unit-test
+  "tester" was removed as evidence laundering. Git runs outside the record's transaction.
+- Reviewers: no tools, no user config, structured verdicts only; codex web tool disabled.
+  Live-tested: all three refuse an injected "PASS".
+- Real code builders (Sol's GO version only): locked-down `claude -p` in a standalone
+  clone (env PATH/HOME/USER), harness commits, full sha, file-type refusals at commit and
+  merge, bundle_kind frozen (migration 008 applied to the live DB; backup in
+  harness/db/backups/), panel reviews the diff, STOPS at done. Builder picker in the app.
+  Proved with a real supervised build (edited + committed in a throwaway clone).
+- Deferred (queue 12): stored merge base + pinned diff options, commit-time size cap,
+  pushing job/N when merging is enabled. Queue 10 is DONE by the rework; 11 still open.
